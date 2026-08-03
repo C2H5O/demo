@@ -1,0 +1,74 @@
+# Python/build/editor state
+__pycache__/
+*.py[cod]
+*.so
+*.dll
+*.dylib
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.yml
+
+# Datasets, model weights, caches, and experiment artifacts
+data/*
+!data/README.md
+checkpoints/*
+!checkpoints/README.md
+outputs/
+processed/
+teacher_cache/
+external/*
+!external/README.md
+
+# Generated model/data formats (defense in depth outside the directories above)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.jsonl
+*.parquet
+*.pkl
+*.pickle
+
+# Generated media, logs, and temporary files
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+*.mp4
+*.avi
+*.mov
+*.log
+*.tmp
+*.temp
+.vda_spool_*
+
+# Archives commonly used for dataset/checkpoint transfer
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar

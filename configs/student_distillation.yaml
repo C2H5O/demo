@@ -1,0 +1,136 @@
+experiment:
+  name: vggtomega_to_dune_distillation
+  seed: 42
+
+seed: 42
+device: cuda
+
+dataset:
+  name: scared
+  root: /public/home/2024141520249/Documents/Projects/vggt_omega_distill/data/scared
+  train_manifest_path: null
+  test_manifest_path: null
+  frame_source: auto
+  clip_length: 8
+  sample_stride: 1
+  window_stride: 4
+  drop_incomplete_clip: false
+  image_height: 448
+  image_width: 560
+  resize_mode: resize
+  normalize_mode: imagenet
+  ground_truth:
+    enabled: true
+    required: true
+    directory_keys: [depth_directory, scene_points_directory]
+    relative_directories:
+      - data/depthmap_rectified
+      - data/depth
+      - data/scene_points
+    # SCARED depthmap_rectified stores millimetres; train in metres.
+    scale: 0.001
+    channel: 0
+
+teacher:
+  pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
+  freeze_backbone: true
+  freeze_heads: true
+  lora_checkpoint: ./outputs/teacher_lora_endodac_lora/last.pt
+  cache_root: ./data/teacher_cache_endodac_lora_448x560
+  frozen: true
+  # VGGT-Omega max_size uses this as the longest side. For the native 4:5
+  # SCARED RGB aspect ratio, 560 produces an exact 448x560 patch-aligned input.
+  image_resolution: 560
+  preprocess_mode: max_size
+  image_height: 448
+  image_width: 560
+  min_depth: 0.1
+  max_depth: 150.0
+  lora:
+    enabled: true
+    type: lora
+    rank: 4
+    alpha: 1
+    dropout: 0.0
+    target: mlp
+    target_layers: all
+
+student:
+  # Pretrained positional-embedding base size; runtime input is dataset 448x560.
+  image_size: 336
+  patch_size: 14
+  embed_dim: 384
+  encoder_depth: 12
+  encoder_heads: 6
+  fusion_layers: 6
+  fusion_heads: 6
+  scene_layers: 2
+  mlp_ratio: 4.0
+  dropout: 0.0
+  max_views: 16
+  encoder_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
+  freeze_encoder: false
+
+loss:
+  lambda_point: 1.0
+  lambda_geo: 0.25
+  lambda_smooth: 0.03
+  lambda_conf: 0.1
+  lambda_supervised_depth: 0.1
+  lambda_global: 1.0
+  lambda_local: 1.0
+  alpha_dist: 1.0
+  alpha_normal: 0.5
+  charbonnier_eps: 0.001
+  confidence_floor: 0.02
+  point_scale_mode: avg_distance
+  min_depth: 0.1
+  max_depth: 150.0
+  normalize_mode: imagenet
+  supervised_depth_scale_alignment: median
+  supervised_depth_loss: log_l1
+  supervised_depth_min_depth: 0.0001
+  supervised_depth_max_depth: 100.0
+
+dataloader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 2
+  drop_last: false
+
+training:
+  epochs: 20
+  learning_rate: 1.0e-5
+  min_learning_rate: 1.0e-6
+  weight_decay: 0.05
+  warmup_steps: 0
+  gradient_accumulation_steps: 32
+  gradient_clip_norm: 1.0
+  amp: true
+  amp_dtype: auto
+  amp_initial_scale: 128.0
+  amp_growth_interval: 2000
+  log_every: 10
+  validate_every: 1
+  save_every: 1
+  use_test_for_evaluation: true
+  output_dir: ./outputs/student_distillation_448x560
+  resume: null
+
+evaluation:
+  checkpoint: ./outputs/student_distillation_448x560/last.pt
+  split: test
+  protocol: endo3r
+  # Prefer the RGB source actually present in this project's SCARED copy.
+  # Endo3R's depth scoring below is unchanged.
+  frame_source: auto
+  gt_relative_directory: data/depthmap_rectified
+  gt_depth_channel: 0
+  require_all_gt: true
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  amp: true
+  output: ./outputs/student_distillation_448x560/evaluation_test_endo3r.json

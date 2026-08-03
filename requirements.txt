@@ -1,0 +1,10 @@
+# Keep versions aligned with the source project.
+torch==2.3.1
+torchvision==0.18.1
+torchaudio==2.3.1
+numpy<2
+Pillow>=10.0
+PyYAML>=6.0
+einops>=0.8
+safetensors>=0.4
+opencv-python>=4.8

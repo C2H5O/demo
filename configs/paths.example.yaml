@@ -1,0 +1,16 @@
+dataset:
+  root: ./data/SCARED
+  train_datasets: [dataset_1, dataset_2, dataset_3, dataset_4, dataset_5, dataset_6, dataset_7]
+  test_datasets: [dataset_8, dataset_9]
+
+teacher:
+  package_source: ./external/vggt-omega
+  pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
+  lora_checkpoint: ./outputs/teacher_lora_endodac_lora/last.pt
+  cache_root: ./data/teacher_cache_endodac_lora_448x560
+
+student:
+  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
+
+output:
+  root: ./outputs
