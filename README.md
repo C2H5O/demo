@@ -286,3 +286,31 @@ python evaluate_vda.py \
   --split test \
   --output outputs/evaluation_teacher_finetuned_vda.json
 ```
+
+## Endo3R VDA baseline
+
+`evaluate_endo3r_vda.py` runs the unmodified upstream Endo3R `demo.py` on the
+official SCARED test split (datasets 8 and 9), then sends its per-frame depth
+maps through the same VDA scale/shift alignment and AbsRel/RMSE/delta1 scoring
+used above. Predictions are paired with RGB and ground truth by numeric frame
+ID and resized to 448x560, so this baseline is directly comparable with the
+student and teacher-cache VDA JSON files.
+
+Clone Endo3R separately into `external/Endo3R` (that directory is ignored by
+Git), then edit `configs/endo3r_vda_baseline.yaml` if its source, SCARED data,
+or checkpoint locations differ. The current upstream model also loads
+`raft-things.pth` during construction in addition to the Endo3R and DUSt3R
+weights. The runner creates ignored symlinks under
+`outputs/endo3r_vda_baseline/.runtime/checkpoints` so upstream relative paths
+resolve without copying weights or modifying the Endo3R checkout.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python evaluate_endo3r_vda.py \
+  --config configs/endo3r_vda_baseline.yaml
+```
+
+Completed sequences are reused on restart. Use `--force-inference` to rerun
+them, or `--skip-inference` to score an already complete prediction tree.
+Results are written to `outputs/endo3r_vda_baseline/evaluation_vda.json`; all
+weights, third-party source, predictions, runtime links, and result files stay
+excluded from Git.

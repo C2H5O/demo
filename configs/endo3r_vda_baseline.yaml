@@ -1,0 +1,36 @@
+# Endo3R baseline on the official SCARED test split (datasets 8 and 9).
+# Third-party source, checkpoints, datasets, and outputs remain outside Git.
+
+dataset:
+  root: /public/home/2024141520249/Documents/Projects/vggt_omega_distill/data/scared
+  frame_source: left_rectified
+  ground_truth:
+    directory_keys: [depth_directory, scene_points_directory]
+    relative_directories: [data/depthmap_rectified]
+
+endo3r:
+  # Clone https://github.com/wrld/Endo3R separately on the server.
+  root: ./external/Endo3R
+  python: python
+  checkpoint: /checkpoints/endo3r.pth
+  dust3r_checkpoint: /checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth
+  # Current upstream Endo3R loads this relative path while constructing memory.
+  raft_checkpoint: /checkpoints/raft-things.pth
+  checkpoint_alias: endo3r.pth
+  dust3r_alias: DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth
+  raft_alias: raft-things.pth
+  device: cuda:0
+  cuda_visible_devices: "0"
+  resolution: 320
+  kf_every: 1
+
+# Match this project's student VDA comparison size and aggregation protocol.
+evaluation:
+  image_height: 448
+  image_width: 560
+  gt_relative_directory: data/depthmap_rectified
+  gt_depth_channel: 0
+  require_all_gt: true
+  result_file: evaluation_vda.json
+
+output_root: ./outputs/endo3r_vda_baseline
