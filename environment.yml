@@ -1,0 +1,17 @@
+name: vggtodistill3r
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10.20
+  - pytorch=2.3.1
+  - torchvision=0.18.1
+  - torchaudio=2.3.1
+  - pytorch-cuda=12.1
+  - numpy=1.26.4
+  - pip
+  - git
+  - git-lfs
+  - pip:
+      - -r requirements.txt

@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python evaluate.py --config configs/student_distillation.yaml "$@"
+conda run --no-capture-output -n vggtodistill3r \
+  python evaluate.py --config configs/student_distillation.yaml "$@"

@@ -13,7 +13,7 @@ from PIL import Image
 
 from datasets.scared_clip_dataset import make_scared_rgb_dataset
 from datasets.transforms import unnormalize_image
-from models.student.dune_model import DUNEViTSmallPointMapStudent
+from models.student.distill3r_wrapper import Distill3RStudent
 from utils.config import ensure_dir, load_config
 
 
@@ -22,8 +22,7 @@ def load_student(checkpoint_path: Path, config: Dict[str, Any], device: torch.de
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
     checkpoint_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
     student_config = dict(checkpoint_config.get("student", config["student"]))
-    student_config["encoder_checkpoint"] = None
-    model = DUNEViTSmallPointMapStudent(student_config)
+    model = Distill3RStudent(student_config)
     state = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
     model.load_state_dict(state, strict=True)
     return model.eval().to(device)

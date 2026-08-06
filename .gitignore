@@ -34,6 +34,7 @@ processed/
 teacher_cache/
 external/*
 !external/README.md
+!external/Distill3R
 
 # Generated model/data formats (defense in depth outside the directories above)
 *.pt

@@ -5,7 +5,7 @@ import inspect
 import pytest
 import torch
 
-from models.student.dune_model import DUNEStudentConfig, DUNEVisionTransformer, PointMapHead
+from models.student.distill3r_wrapper import Distill3RStudent
 from trainers.student_distillation_trainer import (
     _amp_settings,
     _build_scheduler,
@@ -78,6 +78,7 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
 
     assert config["dataset"]["image_height"] == 448
     assert config["dataset"]["image_width"] == 560
+    assert config["dataset"]["normalize_mode"] == "zero_one"
     assert config["teacher"]["preprocess_mode"] == "max_size"
     assert config["teacher"]["image_resolution"] == 560
     assert config["teacher"]["image_height"] == 448
@@ -90,27 +91,68 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     assert config["training"]["gradient_accumulation_steps"] == 32
     assert config["training"]["amp_dtype"] == "auto"
     assert config["training"]["amp_initial_scale"] == 128.0
+    assert config["student"]["image_height"] == 448
+    assert config["student"]["image_width"] == 560
+    assert config["student"]["patch_size"] == 14
+    assert config["student"]["encoder_type"] == "dune"
+    assert config["student"]["decoder_depth"] == 6
+    assert config["student"]["decoder_attention_implementation"] == "flash_attention"
+    assert config["student"]["use_local_dune_submodule"] is True
+    assert 448 // 14 == 32
+    assert 560 // 14 == 40
 
-    encoder = DUNEVisionTransformer(
-        DUNEStudentConfig(encoder_depth=0)
-    )
-    positions = encoder._position_embedding(448 // 14, 560 // 14)
-    assert positions.shape[1] == 1 + 32 * 40
+
+class _FakeOfficialDistill3R(torch.nn.Module):
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+        self.kwargs = kwargs
+        self.seen_views = None
+
+    def forward(self, views):
+        self.seen_views = views
+        outputs = []
+        for view in views:
+            batch, _, height, width = view["img"].shape
+            xyz = view["img"].new_zeros(batch, height, width, 3)
+            confidence = view["img"].new_ones(batch, height, width)
+            outputs.append(
+                {
+                    "pts3d_in_other_view": xyz,
+                    "pts3d_local": xyz + 1.0,
+                    "conf": confidence,
+                    "conf_local": confidence * 2.0,
+                }
+            )
+        return outputs
 
 
-def test_point_map_head_uses_resize_convolution_at_runtime_resolution() -> None:
-    head = PointMapHead(dimension=8)
-    assert not any(isinstance(module, torch.nn.ConvTranspose2d) for module in head.modules())
+def test_official_distill3r_adapter_preserves_448x560_contract() -> None:
+    config = load_config("configs/student_distillation.yaml")["student"]
+    model = Distill3RStudent(config, model_factory=_FakeOfficialDistill3R)
+    images = torch.rand(2, 3, 3, 448, 560)
 
-    tokens = torch.randn(2, 32 * 40, 8, requires_grad=True)
-    xyz, confidence = head(tokens, grid=(32, 40), output_size=(448, 560))
+    output = model(images)
 
-    assert xyz.shape == (2, 448, 560, 3)
-    assert confidence.shape == (2, 448, 560)
-    loss = xyz.square().mean() + confidence.mean()
-    loss.backward()
-    assert tokens.grad is not None
-    assert torch.isfinite(tokens.grad).all()
+    assert output["xyz_global"].shape == (2, 3, 448, 560, 3)
+    assert output["xyz_local"].shape == (2, 3, 448, 560, 3)
+    assert output["conf_global"].shape == (2, 3, 448, 560)
+    assert output["conf_local"].shape == (2, 3, 448, 560)
+    assert len(model.student.seen_views) == 3
+    assert model.student.seen_views[0]["true_shape"].tolist() == [
+        [448, 560],
+        [448, 560],
+    ]
+    assert model.student.kwargs["decoder_depth"] == 6
+    assert model.student.kwargs["encoder_type"] == "dune"
+    assert "decoder_attention_implementation" not in model.student.kwargs
+
+
+def test_distill3r_adapter_rejects_other_runtime_resolution() -> None:
+    config = load_config("configs/student_distillation.yaml")["student"]
+    model = Distill3RStudent(config, model_factory=_FakeOfficialDistill3R)
+
+    with pytest.raises(ValueError, match="expects 448x560"):
+        model(torch.rand(1, 2, 3, 448, 546))
 
 
 def test_epoch_checkpoint_is_written_before_validation() -> None:

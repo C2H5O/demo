@@ -1,4 +1,4 @@
-from models.student import DUNEViTSmallPointMapStudent
+from models.student import Distill3RStudent
 from models.teacher import VGGTOmegaTeacher
 
-__all__ = ["DUNEViTSmallPointMapStudent", "VGGTOmegaTeacher"]
+__all__ = ["Distill3RStudent", "VGGTOmegaTeacher"]

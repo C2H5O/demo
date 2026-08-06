@@ -1,4 +1,4 @@
-"""Train DUNE ViT-Small from offline frozen VGGT-Omega SCARED caches."""
+"""Train the official Distill3R student from frozen VGGT-Omega caches."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from datasets.scared_clip_dataset import (
     make_scared_rgb_dataset,
 )
 from losses.distillation_loss import ScaredDistillationLoss
-from models.student.dune_model import DUNEViTSmallPointMapStudent
+from models.student.distill3r_wrapper import Distill3RStudent
 from utils.config import ensure_dir, load_config
 from utils.seed import seed_everything
 
@@ -201,7 +201,7 @@ def train(
             shuffle=False,
         )
 
-    model = DUNEViTSmallPointMapStudent(config["student"]).to(device)
+    model = Distill3RStudent(config["student"]).to(device)
     loss_function = ScaredDistillationLoss(config["loss"]).to(device)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     initial_learning_rate = float(config["training"]["learning_rate"])

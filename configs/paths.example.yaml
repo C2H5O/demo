@@ -10,7 +10,9 @@ teacher:
   cache_root: ./data/teacher_cache_endodac_lora_448x560
 
 student:
-  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
+  source: ./external/Distill3R
+  # Official DUNE weights are downloaded over HTTPS into TORCH_HOME.
+  torch_home: ./checkpoints/torch_hub
 
 output:
   root: ./outputs

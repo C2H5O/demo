@@ -1,0 +1,3 @@
+[submodule "external/Distill3R"]
+	path = external/Distill3R
+	url = https://github.com/TheFourthKaramazov/Distill3R.git

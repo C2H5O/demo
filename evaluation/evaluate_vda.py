@@ -35,7 +35,7 @@ from evaluation.evaluate_depth import (
     _load_endo3r_gt_depth,
     extract_frame_id,
 )
-from models.student.dune_model import DUNEViTSmallPointMapStudent
+from models.student.distill3r_wrapper import Distill3RStudent
 from models.student.output_adapter import adapt_student_outputs
 from utils.config import ensure_dir, load_config
 
@@ -293,7 +293,6 @@ def _load_student_memory_efficient(
     student_config = dict(
         checkpoint_config.get("student", fallback_config["student"])
     )
-    student_config["encoder_checkpoint"] = None
     state = (
         checkpoint.get("model", checkpoint)
         if isinstance(checkpoint, dict)
@@ -311,7 +310,7 @@ def _load_student_memory_efficient(
         flush=True,
     )
 
-    model = DUNEViTSmallPointMapStudent(student_config)
+    model = Distill3RStudent(student_config)
     try:
         model.load_state_dict(state, strict=True, assign=True)
         assigned = True

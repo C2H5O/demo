@@ -1,5 +1,5 @@
 experiment:
-  name: vggtomega_to_dune_distillation
+  name: vggtomega_to_distill3r
   seed: 42
 
 seed: 42
@@ -18,7 +18,8 @@ dataset:
   image_height: 448
   image_width: 560
   resize_mode: resize
-  normalize_mode: imagenet
+  # Official Distill3R consumes zero-one RGB tensors.
+  normalize_mode: zero_one
   ground_truth:
     enabled: true
     required: true
@@ -56,20 +57,30 @@ teacher:
     target_layers: all
 
 student:
-  # Pretrained positional-embedding base size; runtime input is dataset 448x560.
-  image_size: 336
+  # Official Distill3R CompressedFast3R + DUNE student. Runtime I/O is fixed
+  # to 448x560 (32x40 DUNE patches), matching RGB, teacher cache, and GT.
+  image_height: 448
+  image_width: 560
+  img_size: 560
   patch_size: 14
   embed_dim: 384
   encoder_depth: 12
   encoder_heads: 6
-  fusion_layers: 6
-  fusion_heads: 6
-  scene_layers: 2
-  mlp_ratio: 4.0
-  dropout: 0.0
+  decoder_depth: 6
+  decoder_heads: 6
+  # Keep the official memory-efficient backend for multi-view training.
+  # pytorch_naive is available for single-view smoke tests without Flash SDPA.
+  decoder_attention_implementation: flash_attention
+  encoder_type: dune
   max_views: 16
-  encoder_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
+  max_parallel_views_for_head: 8
+  landscape_only: true
+  with_local_head: true
+  load_pretrained: true
   freeze_encoder: false
+  # Redirect Distill3R's torch.hub DUNE code lookup to the pinned submodule.
+  # The official 448 checkpoint is still downloaded over HTTPS into TORCH_HOME.
+  use_local_dune_submodule: true
 
 loss:
   lambda_point: 1.0
@@ -86,7 +97,7 @@ loss:
   point_scale_mode: avg_distance
   min_depth: 0.1
   max_depth: 150.0
-  normalize_mode: imagenet
+  normalize_mode: zero_one
   supervised_depth_scale_alignment: median
   supervised_depth_loss: log_l1
   supervised_depth_min_depth: 0.0001
@@ -116,11 +127,11 @@ training:
   validate_every: 1
   save_every: 1
   use_test_for_evaluation: true
-  output_dir: ./outputs/student_distillation_448x560
+  output_dir: ./outputs/student_distill3r_448x560
   resume: null
 
 evaluation:
-  checkpoint: ./outputs/student_distillation_448x560/last.pt
+  checkpoint: ./outputs/student_distill3r_448x560/last.pt
   split: test
   protocol: endo3r
   # Prefer the RGB source actually present in this project's SCARED copy.
@@ -133,4 +144,4 @@ evaluation:
   pin_memory: true
   persistent_workers: true
   amp: true
-  output: ./outputs/student_distillation_448x560/evaluation_test_endo3r.json
+  output: ./outputs/student_distill3r_448x560/evaluation_test_endo3r.json

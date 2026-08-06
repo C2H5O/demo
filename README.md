@@ -1,4 +1,4 @@
-# VGGT-Omega LoRA Distillation
+# VGGT-Omega LoRA to Distill3R
 
 This independent project implements a two-stage endoscopic reconstruction
 pipeline derived selectively from `vggt_omega_distill`, PC-Depth, and EndoDAC.
@@ -13,7 +13,7 @@ Those source projects are reference-only and are not imported at runtime.
    original/inpainted consistency losses.
 2. Stage two reloads the pretrained teacher plus its LoRA-only checkpoint,
    freezes the complete teacher, creates or reads offline caches, and trains the
-   migrated DUNE ViT-Small student using teacher point maps/confidence,
+   official Distill3R `CompressedFast3R` student using teacher point maps/confidence,
    SCARED ground-truth depth, geometry consistency, and edge-aware smoothness.
    Cache-backed training never reruns the teacher inside the student loop.
 
@@ -24,7 +24,47 @@ the base output. The supplied configuration follows EndoDAC's ordinary LoRA
 branch with `rank=4`, `alpha=1`, no LoRA dropout, and explicitly rejects
 DV-LoRA.
 
+## Reproducible HTTPS setup
+
+The project is Git-managed and pins the official
+[Distill3R](https://github.com/TheFourthKaramazov/Distill3R) repository as a
+submodule. All repository/submodule URLs use HTTPS. On the training server:
+
+```bash
+git clone --recursive https://github.com/C2H5O/demo.git vggtodistill3r
+cd vggtodistill3r
+bash scripts/setup_environment.sh
+conda activate vggtodistill3r
+export TORCH_HOME="$PWD/checkpoints/torch_hub"
+python scripts/verify_environment.py
+```
+
+`environment.yml` creates a new `vggtodistill3r` environment with Python
+3.10.20, PyTorch 2.3.1, torchvision/torchaudio 0.18.1/2.3.1, and the CUDA 12.1
+PyTorch runtime. Distill3R's official DUNE 448 checkpoint is downloaded over
+HTTPS on first model construction and cached under
+`$TORCH_HOME/hub/checkpoints/dune/`. If that host is slow from the training
+server, pre-download the same official file without changing protocols:
+
+```bash
+mkdir -p "$TORCH_HOME/hub/checkpoints/dune"
+curl --fail --location --retry 5 \
+  https://download.europe.naverlabs.com/dune/dune_vitsmall14_448.pth \
+  --output "$TORCH_HOME/hub/checkpoints/dune/dune_vitsmall14_448.pth"
+```
+
+For an existing clone, initialize all pinned sources with:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
 ## Entry points
+
+The `scripts/*.sh` wrappers always execute through the named
+`vggtodistill3r` Conda environment. Direct Python commands below assume that
+environment is already activated.
 
 ```bash
 python train_teacher_lora.py --config configs/teacher_lora_finetune.yaml
@@ -34,15 +74,17 @@ python generate_teacher_cache.py --config configs/student_distillation.yaml --sp
 python generate_teacher_cache.py --config configs/student_distillation.yaml --split test --base-teacher --cache-root data/teacher_cache_base_448x560 --overwrite
 python compare_teacher_caches.py --config configs/student_distillation.yaml --base-cache data/teacher_cache_base_448x560 --finetuned-cache data/teacher_cache_endodac_lora_448x560
 python train_student_distillation.py --config configs/student_distillation.yaml
-python evaluate.py --config configs/student_distillation.yaml --checkpoint outputs/student_distillation_448x560/last.pt --split test
-python evaluate_vda.py --config configs/student_distillation.yaml --checkpoint outputs/student_distillation_448x560/last.pt --split test
+python evaluate.py --config configs/student_distillation.yaml --checkpoint outputs/student_distill3r_448x560/last.pt --split test
+python evaluate_vda.py --config configs/student_distillation.yaml --checkpoint outputs/student_distill3r_448x560/last.pt --split test
+python -m pytest -q
 ```
 
 Install VGGT-Omega itself into the environment as a Python package, for example
 with `pip install -e external/vggt-omega`. The project deliberately does not
 modify `sys.path` to reach the old repository or an external source checkout.
-All dataset, checkpoint, cache, and output paths are local to this project by
-default and live in YAML configuration.
+The student adapter only adds the pinned Distill3R/Fast3R submodule roots to its
+import path. All dataset, checkpoint, cache, and output paths are local to this
+project by default and live in YAML configuration.
 
 `generate_teacher_cache.py --base-teacher` loads only the configured pretrained
 VGGT-Omega checkpoint and skips both LoRA injection and LoRA checkpoint loading.
@@ -57,7 +99,7 @@ data/          local datasets and generated teacher caches (contents ignored)
 checkpoints/   pretrained and trained weights (contents ignored)
 external/      optional local VGGT-Omega source checkout (contents ignored)
 datasets/      SCARED discovery, manifests, clips, transforms, and calibration boundary
-models/        frozen teacher + LoRA and the migrated DUNE student
+models/        frozen teacher + LoRA and the official Distill3R adapter
 losses/        complete teacher self-supervision and student distillation objectives
 trainers/      separate teacher-LoRA and student-distillation orchestration
 cache/         teacher cache generation and cache-backed dataset API
@@ -76,17 +118,18 @@ data/
 checkpoints/
   vggt_omega/vggt_omega_1b_512.pt
   teacher_lora/last.pt
-  dune/dune_vitsmall14_336.pth
+  torch_hub/hub/checkpoints/dune/dune_vitsmall14_448.pth
 external/
+  Distill3R/                  # pinned Git submodule (with recursive submodules)
   vggt-omega/                 # optional editable dependency checkout
 outputs/                      # generated automatically
 ```
 
-Only the three README placeholder files are versioned under `data/`,
-`checkpoints/`, and `external/`; actual datasets, caches, weights, and external
-source trees remain local. Run commands from the project root so the relative
-paths in `configs/*.yaml` resolve consistently. This project does not need the
-old `vggt_omega_distill`, PC-Depth, or EndoDAC directories at runtime.
+Datasets, caches, weights, and outputs remain ignored; the official Distill3R
+source is the exception and is represented by a pinned Git submodule commit.
+Run commands from the project root so relative paths resolve consistently. This
+project does not need the old `vggt_omega_distill`, PC-Depth, or EndoDAC
+directories at runtime.
 
 ## LoRA target discovery
 
@@ -111,7 +154,7 @@ The SCARED clip dataset optionally runs a robust PC-Depth-inspired highlight
 processor and returns:
 
 ```text
-images               ImageNet-normalized RGB for existing student behavior
+images               RGB normalized according to the active stage
 highlight_masks      binary [T,1,H,W] masks
 inpainted_images     zero-one locally repaired RGB
 ```
@@ -155,9 +198,17 @@ VDA student/teacher/GT evaluation 448x560
 
 The teacher cache exporter rejects any input or output that is not exactly
 448x560, and cache-backed training rejects stale caches of another resolution
-instead of silently resizing them. `student.image_size: 336` remains the
-pretrained DUNE positional-embedding base grid; runtime inputs use the dataset
-448x560 shape and interpolate that embedding from 24x24 to 32x40 patches.
+instead of silently resizing them. Stage-two RGB uses Distill3R's `[0,1]`
+input convention. The official DUNE-S/14 encoder receives a 32x40 patch grid,
+and the official Distill3R DPT heads return both local and global point maps at
+448x560. The adapter rejects any different input or output shape.
+
+Multi-view training keeps Distill3R's official `flash_attention` decoder
+backend. The CUDA-enabled Linux PyTorch build must provide Flash SDPA; for a
+small single-view compatibility smoke test on a build without that kernel, set
+`student.decoder_attention_implementation: pytorch_naive`. The naive backend is
+not recommended for normal multi-view training because attention memory grows
+quadratically with the total patch count.
 
 The cache-backed dataset aligns SCARED ground-truth depth to RGB by numeric
 frame ID. PNG, TIFF, and NPY depth are supported, including configurable channel
@@ -193,8 +244,8 @@ completed epoch by default:
 ```text
 outputs/teacher_lora_endodac_lora/epoch_0001.pt
 outputs/teacher_lora_endodac_lora/epoch_0002.pt
-outputs/student_distillation_448x560/epoch_0001.pt
-outputs/student_distillation_448x560/epoch_0002.pt
+outputs/student_distill3r_448x560/epoch_0001.pt
+outputs/student_distill3r_448x560/epoch_0002.pt
 ```
 
 The interval is controlled by `training.save_every`; both supplied
@@ -208,7 +259,7 @@ configurations set it to `1`.
 - PC-Depth-inspired highlight detection, inpainting, light alignment, and loss are implemented.
 - Teacher temporal self-supervision and formal AMP/checkpoint training loop are implemented.
 - Frozen adapted-teacher cache generation is implemented.
-- DUNE student cache distillation plus SCARED ground-truth depth supervision is implemented.
+- Official Distill3R student cache distillation plus SCARED ground-truth depth supervision is implemented.
 - Depth evaluation and reconstruction visualization are implemented.
 
 No dataset, pretrained weight, teacher cache, checkpoint, or experiment output
@@ -237,9 +288,9 @@ not used by `evaluate.py`.
 ```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate.py \
   --config configs/student_distillation.yaml \
-  --checkpoint outputs/student_distillation_448x560/last.pt \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
   --split test \
-  --output outputs/student_distillation_448x560/evaluation_test_endo3r.json
+  --output outputs/student_distill3r_448x560/evaluation_test_endo3r.json
 ```
 
 ## Video-Depth-Anything depth evaluation
@@ -247,7 +298,7 @@ CUDA_VISIBLE_DEVICES=0 python evaluate.py \
 `evaluate_vda.py` is a separate evaluation path that reads the existing
 `configs/student_distillation.yaml`; no additional evaluation config is used.
 Project adaptation is limited to SCARED discovery, numeric RGB/GT pairing,
-overlapping DUNE inference, and conversion of `xyz_local[..., 2]` depth to the
+overlapping Distill3R inference, and conversion of `xyz_local[..., 2]` depth to the
 disparity input expected by the upstream evaluator. The scale-and-shift
 alignment and AbsRel/RMSE/delta1 scoring core remain unchanged.
 Every evaluable clip in the selected split is traversed (1474 clips for the
@@ -262,9 +313,9 @@ protocol.
 ```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate_vda.py \
   --config configs/student_distillation.yaml \
-  --checkpoint outputs/student_distillation_448x560/last.pt \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
   --split test \
-  --output outputs/student_distillation_448x560/evaluation_test_vda.json
+  --output outputs/student_distill3r_448x560/evaluation_test_vda.json
 ```
 
 The same entry point evaluates the cached VGGT-Omega teacher without loading

@@ -1,4 +1,11 @@
-from models.student.dune_model import DUNEStudentConfig, DUNEViTSmallPointMapStudent
-from models.student.dune_wrapper import build_dune_student
+from models.student.distill3r_wrapper import (
+    Distill3RStudent,
+    Distill3RStudentConfig,
+    build_distill3r_student,
+)
 
-__all__ = ["DUNEStudentConfig", "DUNEViTSmallPointMapStudent", "build_dune_student"]
+__all__ = [
+    "Distill3RStudent",
+    "Distill3RStudentConfig",
+    "build_distill3r_student",
+]
