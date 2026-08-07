@@ -35,8 +35,8 @@ teacher:
   pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
   freeze_backbone: true
   freeze_heads: true
-  lora_checkpoint: ./outputs/teacher_lora_endodac_lora/last.pt
-  cache_root: ./data/teacher_cache_endodac_lora_448x560
+  lora_checkpoint: /public/home/2024141520249/Documents/Projects/vggtomega_lora_distill/outputs/teacher_lora_endodac_lora/last.pt
+  cache_root: /public/home/2024141520249/Documents/Projects/vggtomega_lora_distill/data/teacher_cache_endodac_lora_448x560
   frozen: true
   # VGGT-Omega max_size uses this as the longest side. For the native 4:5
   # SCARED RGB aspect ratio, 560 produces an exact 448x560 patch-aligned input.
