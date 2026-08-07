@@ -75,6 +75,8 @@ student:
   max_parallel_views_for_head: 8
   landscape_only: true
   with_local_head: true
+  # Teacher-cache confidence is normalized to [0,1]; use the same student range.
+  conf_mode: [sigmoid, 0.0, 1.0]
   load_pretrained: true
   freeze_encoder: false
   # Load the official DUNE-S/14 448 encoder checkpoint directly from this path.

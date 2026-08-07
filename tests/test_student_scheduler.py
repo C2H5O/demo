@@ -102,6 +102,7 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     assert config["student"]["pretrained_checkpoint"] == (
         "./checkpoints/dune/dune_vitsmall14_448.pth"
     )
+    assert config["student"]["conf_mode"] == ["sigmoid", 0.0, 1.0]
     assert config["student"]["use_local_dune_submodule"] is True
     assert 448 // 14 == 32
     assert 560 // 14 == 40
@@ -119,13 +120,13 @@ class _FakeOfficialDistill3R(torch.nn.Module):
         for view in views:
             batch, _, height, width = view["img"].shape
             xyz = view["img"].new_zeros(batch, height, width, 3)
-            confidence = view["img"].new_ones(batch, height, width)
+            confidence = view["img"].new_full((batch, height, width), 0.25)
             outputs.append(
                 {
                     "pts3d_in_other_view": xyz,
                     "pts3d_local": xyz + 1.0,
                     "conf": confidence,
-                    "conf_local": confidence * 2.0,
+                    "conf_local": confidence * 3.0,
                 }
             )
         return outputs
@@ -142,6 +143,8 @@ def test_official_distill3r_adapter_preserves_448x560_contract() -> None:
     assert output["xyz_local"].shape == (2, 3, 448, 560, 3)
     assert output["conf_global"].shape == (2, 3, 448, 560)
     assert output["conf_local"].shape == (2, 3, 448, 560)
+    assert output["conf_global"].min().item() == pytest.approx(0.25)
+    assert output["conf_local"].max().item() == pytest.approx(0.75)
     assert len(model.student.seen_views) == 3
     assert model.student.seen_views[0]["true_shape"].tolist() == [
         [448, 560],
@@ -149,6 +152,7 @@ def test_official_distill3r_adapter_preserves_448x560_contract() -> None:
     ]
     assert model.student.kwargs["decoder_depth"] == 6
     assert model.student.kwargs["encoder_type"] == "dune"
+    assert model.student.kwargs["conf_mode"] == ["sigmoid", 0.0, 1.0]
     assert "decoder_attention_implementation" not in model.student.kwargs
     assert "pretrained_checkpoint" not in model.student.kwargs
 

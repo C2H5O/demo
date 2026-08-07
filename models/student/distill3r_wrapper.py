@@ -6,7 +6,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,7 @@ class Distill3RStudentConfig:
     max_parallel_views_for_head: int = 8
     landscape_only: bool = True
     with_local_head: bool = True
+    conf_mode: Tuple[str, float, float] = ("sigmoid", 0.0, 1.0)
     load_pretrained: bool = True
     freeze_encoder: bool = False
     pretrained_checkpoint: str = "./checkpoints/dune/dune_vitsmall14_448.pth"
@@ -65,6 +66,11 @@ class Distill3RStudentConfig:
             )
         if not self.with_local_head:
             raise ValueError("Local point maps are required by the existing loss/evaluation pipeline")
+        if tuple(self.conf_mode) != ("sigmoid", 0.0, 1.0):
+            raise ValueError(
+                "Distill3R conf_mode must be [sigmoid, 0.0, 1.0] to match the "
+                "normalized teacher-cache confidence contract"
+            )
         if not self.load_pretrained:
             raise ValueError(
                 "The upstream Distill3R DUNE constructor requires load_pretrained=true"

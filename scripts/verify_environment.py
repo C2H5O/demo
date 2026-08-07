@@ -77,6 +77,13 @@ def main() -> None:
                 EXPECTED_DUNE_CHECKPOINT, student_checkpoint
             )
         )
+    student_conf_mode = list(config["student"].get("conf_mode", []))
+    if student_conf_mode != ["sigmoid", 0.0, 1.0]:
+        raise RuntimeError(
+            "student.conf_mode must be [sigmoid, 0.0, 1.0], got {}".format(
+                student_conf_mode
+            )
+        )
     gt_directories = list(
         config["dataset"].get("ground_truth", {}).get("relative_directories", [])
     )
