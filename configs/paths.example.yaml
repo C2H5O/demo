@@ -11,8 +11,7 @@ teacher:
 
 student:
   source: ./external/Distill3R
-  # Official DUNE weights are downloaded over HTTPS into TORCH_HOME.
-  torch_home: ./checkpoints/torch_hub
+  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
 
 output:
   root: ./outputs

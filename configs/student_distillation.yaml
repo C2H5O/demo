@@ -25,10 +25,9 @@ dataset:
     required: true
     directory_keys: [depth_directory, scene_points_directory]
     relative_directories:
-      - data/depthmap_rectified
       - data/depth
       - data/scene_points
-    # SCARED depthmap_rectified stores millimetres; train in metres.
+    # SCARED depth/scene-point maps store millimetres; train in metres.
     scale: 0.001
     channel: 0
 
@@ -78,8 +77,9 @@ student:
   with_local_head: true
   load_pretrained: true
   freeze_encoder: false
-  # Redirect Distill3R's torch.hub DUNE code lookup to the pinned submodule.
-  # The official 448 checkpoint is still downloaded over HTTPS into TORCH_HOME.
+  # Load the official DUNE-S/14 448 encoder checkpoint directly from this path.
+  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
+  # Keep DUNE imports pinned to the recursive Distill3R submodule checkout.
   use_local_dune_submodule: true
 
 loss:
@@ -137,7 +137,7 @@ evaluation:
   # Prefer the RGB source actually present in this project's SCARED copy.
   # Endo3R's depth scoring below is unchanged.
   frame_source: auto
-  gt_relative_directory: data/depthmap_rectified
+  gt_relative_directory: data/depth
   gt_depth_channel: 0
   require_all_gt: true
   num_workers: 4

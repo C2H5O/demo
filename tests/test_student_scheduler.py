@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import sys
+import types
 
 import pytest
 import torch
 
-from models.student.distill3r_wrapper import Distill3RStudent
+from models.student.distill3r_wrapper import Distill3RStudent, _pinned_dune_hub
 from trainers.student_distillation_trainer import (
     _amp_settings,
     _build_scheduler,
@@ -97,6 +99,9 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     assert config["student"]["encoder_type"] == "dune"
     assert config["student"]["decoder_depth"] == 6
     assert config["student"]["decoder_attention_implementation"] == "flash_attention"
+    assert config["student"]["pretrained_checkpoint"] == (
+        "./checkpoints/dune/dune_vitsmall14_448.pth"
+    )
     assert config["student"]["use_local_dune_submodule"] is True
     assert 448 // 14 == 32
     assert 560 // 14 == 40
@@ -145,6 +150,7 @@ def test_official_distill3r_adapter_preserves_448x560_contract() -> None:
     assert model.student.kwargs["decoder_depth"] == 6
     assert model.student.kwargs["encoder_type"] == "dune"
     assert "decoder_attention_implementation" not in model.student.kwargs
+    assert "pretrained_checkpoint" not in model.student.kwargs
 
 
 def test_distill3r_adapter_rejects_other_runtime_resolution() -> None:
@@ -153,6 +159,46 @@ def test_distill3r_adapter_rejects_other_runtime_resolution() -> None:
 
     with pytest.raises(ValueError, match="expects 448x560"):
         model(torch.rand(1, 2, 3, 448, 546))
+
+
+def test_distill3r_requires_configured_local_checkpoint(tmp_path) -> None:
+    config = load_config("configs/student_distillation.yaml")["student"]
+    config["pretrained_checkpoint"] = str(tmp_path / "missing.pth")
+
+    with pytest.raises(FileNotFoundError, match="Configured DUNE checkpoint"):
+        Distill3RStudent(config)
+
+
+def test_distill3r_hub_redirect_loads_configured_checkpoint(
+    monkeypatch, tmp_path
+) -> None:
+    checkpoint = tmp_path / "dune_vitsmall14_448.pth"
+    checkpoint.write_bytes(b"test checkpoint path")
+    encoder = torch.nn.Identity()
+    seen = []
+
+    model_package = types.ModuleType("model")
+    model_package.__path__ = []
+    dune_module = types.ModuleType("model.dune")
+
+    def fake_loader(path):
+        seen.append(path)
+        return encoder, 0
+
+    dune_module.load_dune_encoder_from_checkpoint = fake_loader
+    model_package.dune = dune_module
+    monkeypatch.setitem(sys.modules, "model", model_package)
+    monkeypatch.setitem(sys.modules, "model.dune", dune_module)
+
+    with _pinned_dune_hub(True, checkpoint):
+        loaded = torch.hub.load(
+            "naver/dune",
+            "dune_vitsmall_14_448_encoder",
+            trust_repo=True,
+        )
+
+    assert loaded is encoder
+    assert seen == [str(checkpoint)]
 
 
 def test_epoch_checkpoint_is_written_before_validation() -> None:

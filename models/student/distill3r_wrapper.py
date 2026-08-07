@@ -39,6 +39,7 @@ class Distill3RStudentConfig:
     with_local_head: bool = True
     load_pretrained: bool = True
     freeze_encoder: bool = False
+    pretrained_checkpoint: str = "./checkpoints/dune/dune_vitsmall14_448.pth"
     use_local_dune_submodule: bool = True
 
     def validate(self) -> None:
@@ -68,6 +69,13 @@ class Distill3RStudentConfig:
             raise ValueError(
                 "The upstream Distill3R DUNE constructor requires load_pretrained=true"
             )
+        if not str(self.pretrained_checkpoint).strip():
+            raise ValueError("student.pretrained_checkpoint must be configured")
+        if not self.use_local_dune_submodule:
+            raise ValueError(
+                "student.use_local_dune_submodule must remain true so the configured "
+                "local DUNE checkpoint is used"
+            )
         if self.max_views <= 0 or self.max_parallel_views_for_head <= 0:
             raise ValueError("max_views and max_parallel_views_for_head must be positive")
         if self.decoder_attention_implementation not in {
@@ -94,15 +102,15 @@ def _ensure_official_sources_importable() -> None:
                 ", ".join(str(path) for path in missing)
             )
         )
-    for path in (DISTILL3R_FAST3R_ROOT, DISTILL3R_ROOT):
+    for path in (DISTILL3R_DUNE_ROOT, DISTILL3R_FAST3R_ROOT, DISTILL3R_ROOT):
         value = str(path)
         if value not in sys.path:
             sys.path.insert(0, value)
 
 
 @contextmanager
-def _pinned_dune_hub(enabled: bool) -> Iterator[None]:
-    """Redirect Distill3R's DUNE hub call to its pinned HTTPS submodule checkout."""
+def _pinned_dune_hub(enabled: bool, checkpoint_path: Path) -> Iterator[None]:
+    """Redirect Distill3R's hub call to the configured local DUNE checkpoint."""
 
     if not enabled:
         yield
@@ -111,9 +119,12 @@ def _pinned_dune_hub(enabled: bool) -> Iterator[None]:
 
     def local_load(repo_or_dir: Any, model: str, *args: Any, **kwargs: Any) -> Any:
         if str(repo_or_dir).lower() == "naver/dune":
-            kwargs.pop("trust_repo", None)
-            kwargs["source"] = "local"
-            return original_load(str(DISTILL3R_DUNE_ROOT), model, *args, **kwargs)
+            if model != "dune_vitsmall_14_448_encoder":
+                raise ValueError("Unexpected Distill3R DUNE hub model: {}".format(model))
+            from model.dune import load_dune_encoder_from_checkpoint
+
+            encoder, _ = load_dune_encoder_from_checkpoint(str(checkpoint_path))
+            return encoder
         return original_load(repo_or_dir, model, *args, **kwargs)
 
     torch.hub.load = local_load
@@ -156,10 +167,24 @@ class Distill3RStudent(nn.Module):
         model_kwargs.pop("image_width")
         freeze_encoder = bool(model_kwargs.pop("freeze_encoder"))
         use_local_dune = bool(model_kwargs.pop("use_local_dune_submodule"))
+        checkpoint_value = str(model_kwargs.pop("pretrained_checkpoint"))
+        checkpoint_path = Path(checkpoint_value).expanduser()
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = PROJECT_ROOT / checkpoint_path
+        checkpoint_path = checkpoint_path.resolve()
+        if model_factory is None and not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                "Configured DUNE checkpoint does not exist: {}".format(
+                    checkpoint_path
+                )
+            )
         attention_implementation = str(
             model_kwargs.pop("decoder_attention_implementation")
         )
-        with _pinned_dune_hub(use_local_dune and model_factory is None):
+        with _pinned_dune_hub(
+            use_local_dune and model_factory is None,
+            checkpoint_path,
+        ):
             self.student = factory(**model_kwargs)
         self._set_decoder_attention_implementation(attention_implementation)
         if freeze_encoder:

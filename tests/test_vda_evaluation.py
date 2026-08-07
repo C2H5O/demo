@@ -52,7 +52,7 @@ def test_teacher_cache_adapter_uses_local_z_depth(tmp_path) -> None:
     np.testing.assert_allclose(disparity[1], 0.25)
 
 
-def test_gt_discovery_falls_back_to_dataset_depth_directory(tmp_path) -> None:
+def test_gt_discovery_uses_configured_dataset_depth_directory(tmp_path) -> None:
     keyframe = tmp_path / "keyframe_0"
     depth_directory = keyframe / "data" / "depth"
     depth_directory.mkdir(parents=True)
@@ -65,7 +65,7 @@ def test_gt_discovery_falls_back_to_dataset_depth_directory(tmp_path) -> None:
 
     selected, indexed = _find_sequence_gt_depths(
         sequence,
-        {"gt_relative_directory": "data/depthmap_rectified"},
+        {"gt_relative_directory": "data/depth"},
         {
             "ground_truth": {
                 "directory_keys": ["depth_directory"],

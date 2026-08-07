@@ -15,6 +15,8 @@ EXPECTED_TORCH = "2.3.1"
 EXPECTED_CUDA = "12.1"
 EXPECTED_NUMPY = "1.26.4"
 EXPECTED_RESOLUTION = (448, 560)
+EXPECTED_DUNE_CHECKPOINT = "./checkpoints/dune/dune_vitsmall14_448.pth"
+EXPECTED_GT_DIRECTORIES = ["data/depth", "data/scene_points"]
 
 
 def main() -> None:
@@ -66,6 +68,29 @@ def main() -> None:
         raise RuntimeError(
             "Dataset/student/teacher resolutions must all be 448x560: {}".format(
                 (dataset_resolution, student_resolution, teacher_resolution)
+            )
+        )
+    student_checkpoint = str(config["student"].get("pretrained_checkpoint", ""))
+    if student_checkpoint != EXPECTED_DUNE_CHECKPOINT:
+        raise RuntimeError(
+            "student.pretrained_checkpoint must be {}, got {}".format(
+                EXPECTED_DUNE_CHECKPOINT, student_checkpoint
+            )
+        )
+    gt_directories = list(
+        config["dataset"].get("ground_truth", {}).get("relative_directories", [])
+    )
+    if gt_directories != EXPECTED_GT_DIRECTORIES:
+        raise RuntimeError(
+            "Ground-truth relative directories must be {}, got {}".format(
+                EXPECTED_GT_DIRECTORIES, gt_directories
+            )
+        )
+    evaluation_gt = str(config.get("evaluation", {}).get("gt_relative_directory", ""))
+    if evaluation_gt != "data/depth":
+        raise RuntimeError(
+            "evaluation.gt_relative_directory must be data/depth, got {}".format(
+                evaluation_gt
             )
         )
     print(

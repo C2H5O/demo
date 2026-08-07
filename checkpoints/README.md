@@ -9,7 +9,7 @@ checkpoints/
   teacher_lora/
     last.pt
   dune/
-    dune_vitsmall14_336.pth
+    dune_vitsmall14_448.pth
 ```
 
 The default YAML files already use these paths. Training outputs remain under

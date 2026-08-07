@@ -245,7 +245,7 @@ def _candidate_gt_directories(
         "gt_directory_candidates",
         ground_truth.get(
             "relative_directories",
-            ("data/depthmap_rectified", "data/depth", "data/scene_points"),
+            ("data/depth", "data/scene_points"),
         ),
     )
     values.extend(keyframe_directory / str(relative) for relative in relatives)

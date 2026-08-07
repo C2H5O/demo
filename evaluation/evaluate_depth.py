@@ -35,7 +35,7 @@ ENDO3R_HEIGHT = 256
 ENDO3R_MIN_DEPTH = 0.0001
 ENDO3R_MAX_DEPTH = 100.0
 ENDO3R_GT_SCALE = 1.0 / 1000.0
-ENDO3R_GT_DIRECTORY = "data/depthmap_rectified"
+ENDO3R_GT_DIRECTORY = "data/depth"
 ENDO3R_FRAME_SOURCE = "left_rectified"
 PROJECT_FRAME_SOURCE = "auto"
 
@@ -457,7 +457,7 @@ def evaluate(
     ]
     if not evaluable_clip_indices:
         raise RuntimeError(
-            "No evaluable {} clips have Endo3R depthmap_rectified GT".format(
+            "No evaluable {} clips have Endo3R depth GT under data/depth".format(
                 split
             )
         )

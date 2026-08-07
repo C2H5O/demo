@@ -35,23 +35,26 @@ git clone --recursive https://github.com/C2H5O/demo.git vggtodistill3r
 cd vggtodistill3r
 bash scripts/setup_environment.sh
 conda activate vggtodistill3r
-export TORCH_HOME="$PWD/checkpoints/torch_hub"
 python scripts/verify_environment.py
 ```
 
 `environment.yml` creates a new `vggtodistill3r` environment with Python
 3.10.20, PyTorch 2.3.1, torchvision/torchaudio 0.18.1/2.3.1, and the CUDA 12.1
-PyTorch runtime. Distill3R's official DUNE 448 checkpoint is downloaded over
-HTTPS on first model construction and cached under
-`$TORCH_HOME/hub/checkpoints/dune/`. If that host is slow from the training
-server, pre-download the same official file without changing protocols:
+PyTorch runtime. Download Distill3R's official DUNE 448 checkpoint over HTTPS
+to the exact path configured by `student.pretrained_checkpoint`:
 
 ```bash
-mkdir -p "$TORCH_HOME/hub/checkpoints/dune"
-curl --fail --location --retry 5 \
+mkdir -p checkpoints/dune
+curl --fail --location --retry 5 --continue-at - \
   https://download.europe.naverlabs.com/dune/dune_vitsmall14_448.pth \
-  --output "$TORCH_HOME/hub/checkpoints/dune/dune_vitsmall14_448.pth"
+  --output checkpoints/dune/dune_vitsmall14_448.pth.part
+mv checkpoints/dune/dune_vitsmall14_448.pth.part \
+  checkpoints/dune/dune_vitsmall14_448.pth
 ```
+
+Model construction reads this configured file directly through DUNE's official
+checkpoint loader. It never downloads weights implicitly and does not depend on
+`TORCH_HOME` or a symbolic link.
 
 For an existing clone, initialize all pinned sources with:
 
@@ -118,7 +121,7 @@ data/
 checkpoints/
   vggt_omega/vggt_omega_1b_512.pt
   teacher_lora/last.pt
-  torch_hub/hub/checkpoints/dune/dune_vitsmall14_448.pth
+  dune/dune_vitsmall14_448.pth
 external/
   Distill3R/                  # pinned Git submodule (with recursive submodules)
   vggt-omega/                 # optional editable dependency checkout
@@ -211,9 +214,10 @@ not recommended for normal multi-view training because attention memory grows
 quadratically with the total patch count.
 
 The cache-backed dataset aligns SCARED ground-truth depth to RGB by numeric
-frame ID. PNG, TIFF, and NPY depth are supported, including configurable channel
-and scale. SCARED `depthmap_rectified` values are converted from millimetres to
-metres with `dataset.ground_truth.scale: 0.001` before supervised loss. The
+frame ID. PNG, TIFF, and NPY depth are supported under `data/depth` and
+`data/scene_points`, including configurable channel and scale. Values are
+converted from millimetres to metres with `dataset.ground_truth.scale: 0.001`
+before supervised loss. The
 student objective combines:
 
 ```text
@@ -269,7 +273,7 @@ non-mock training.
 ## Endo3R depth evaluation
 
 `evaluate.py` follows Endo3R's SCARED depth protocol: it pairs prediction and
-`data/depthmap_rectified` frames by numeric frame ID, converts ground truth
+`data/depth` frames by numeric frame ID, converts ground truth
 from millimetres to metres, resizes both maps to 320x256 with nearest-neighbour
 interpolation, applies one median scale ratio to the entire scene, and reports
 AbsRel, SqRel, RMSE, RMSE-log, delta1, delta2, and delta3. Scene scores are
