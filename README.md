@@ -297,6 +297,31 @@ CUDA_VISIBLE_DEVICES=0 python evaluate.py \
   --output outputs/student_distill3r_448x560/evaluation_test_endo3r.json
 ```
 
+## Student inference visualization
+
+The command-line visualization workflow is retained from the earlier
+`vggt_omega_distill` project. The exporter now loads the configured official
+Distill3R student checkpoint and keeps the same depth-image and RGB point-cloud
+outputs.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_depth.py \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
+  --split test \
+  --clip-offset 0
+
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_cloud.py \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
+  --split test \
+  --clip-offset 0 \
+  --point-stride 2
+```
+
+Add `--sequence-id dataset_8/keyframe_0` to select a sequence explicitly. For
+the optional interactive point-cloud viewer, install
+`requirements-visualization.txt`, add `--serve --host 0.0.0.0 --port 8080`, and
+forward the server port over SSH.
+
 ## Video-Depth-Anything depth evaluation
 
 `evaluate_vda.py` is a separate evaluation path that reads the existing

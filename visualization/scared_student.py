@@ -163,7 +163,7 @@ def export_depth_visualization(
         "depth_range": [min_depth, max_depth],
         "depth_color_percentiles": [float(color_low), float(color_high)],
         "panel_order": ["rgb", "depth_magma", "local_confidence_viridis"],
-        "confidence_warning": "Student confidence is output but is not supervised by the current loss.",
+        "confidence_note": "Student confidence is sigmoid-normalized and supervised in [0,1].",
     }
     (output / "depth_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print("Exported depth and confidence visualization to {}".format(output))
@@ -222,7 +222,7 @@ def export_cloud_visualization(
         "point_stride": point_stride,
         "depth_range": [min_depth, max_depth],
         "confidence_threshold": confidence_threshold,
-        "confidence_warning": "Student confidence is currently unsupervised; keep threshold disabled for the baseline.",
+        "confidence_note": "Student confidence is sigmoid-normalized and supervised in [0,1].",
     }
     (output / "cloud_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print("Exported {} colored points to {}".format(len(points), output))
@@ -315,7 +315,7 @@ def export_clip_visualization(
         "depth_range": [min_depth, max_depth],
         "depth_color_percentiles": [float(color_low), float(color_high)],
         "confidence_threshold": confidence_threshold,
-        "confidence_warning": "Student confidence is currently not supervised; leave threshold disabled for valid comparisons.",
+        "confidence_note": "Student confidence is sigmoid-normalized and supervised in [0,1].",
     }
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print("Exported {} colored points to {}".format(len(points), output))
