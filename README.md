@@ -77,8 +77,8 @@ python generate_teacher_cache.py --config configs/student_distillation.yaml --sp
 python generate_teacher_cache.py --config configs/student_distillation.yaml --split test --base-teacher --cache-root data/teacher_cache_base_448x560 --overwrite
 python compare_teacher_caches.py --config configs/student_distillation.yaml --base-cache data/teacher_cache_base_448x560 --finetuned-cache data/teacher_cache_endodac_lora_448x560
 python train_student_distillation.py --config configs/student_distillation.yaml
-python evaluate.py --config configs/student_distillation.yaml --checkpoint outputs/student_distill3r_256x320_1epoch/last.pt --split test
-python evaluate_vda.py --config configs/student_distillation.yaml --checkpoint outputs/student_distill3r_256x320_1epoch/last.pt --split test
+python evaluate.py --config configs/student_distillation.yaml --checkpoint outputs/student_distill3r_448x560/last.pt --split test
+python evaluate_vda.py --config configs/student_distillation.yaml --checkpoint outputs/student_distill3r_448x560/last.pt --split test
 python -m pytest -q
 ```
 
@@ -189,25 +189,22 @@ anchor-loss version use a different LoRA tensor layout and must not be resumed.
 
 ## Student supervision
 
-The student keeps the DUNE/cache input contract at `448x560`, while the DPT
-heads now expose their native `256x320` grid:
+The configured spatial contract is `H x W = 448 x 560` throughout:
 
 ```text
 SCARED RGB 1024x1280 -> aspect-preserving VGGT-Omega max_size resize
 teacher input/output/cache 448x560
 SCARED RGB 1024x1280 -> student resize 448x560
-student local/global output 256x320
-teacher targets and training GT resized to 256x320 at the dataset boundary
+student output, teacher targets, and training GT 448x560
+VDA student/teacher/GT evaluation 448x560
 ```
 
-Existing 448x560 teacher caches are reused directly; they do not need to be
-regenerated. Cache-backed training still rejects stale caches of another
-resolution, then explicitly resizes their point/confidence targets to 256x320.
-Stage-two RGB uses Distill3R's `[0,1]` input convention. The official DUNE-S/14
-encoder still receives a 32x40 patch grid. The adapter replaces only each DPT
-head's final parameter-free `bilinear` x1.75 resize with an identity operation,
-so both local and global point maps remain at 256x320. The configured experiment
-runs for one epoch and writes to `outputs/student_distill3r_256x320_1epoch`.
+The teacher cache exporter rejects any input or output that is not exactly
+448x560, and cache-backed training rejects stale caches of another resolution
+instead of silently resizing them. Stage-two RGB uses Distill3R's `[0,1]`
+input convention. The official DUNE-S/14 encoder receives a 32x40 patch grid,
+and the official Distill3R DPT heads return both local and global point maps at
+448x560. The adapter rejects any different input or output shape.
 
 Multi-view training keeps Distill3R's official `flash_attention` decoder
 backend. The CUDA-enabled Linux PyTorch build must provide Flash SDPA; for a
@@ -251,7 +248,8 @@ completed epoch by default:
 ```text
 outputs/teacher_lora_endodac_lora/epoch_0001.pt
 outputs/teacher_lora_endodac_lora/epoch_0002.pt
-outputs/student_distill3r_256x320_1epoch/epoch_0001.pt
+outputs/student_distill3r_448x560/epoch_0001.pt
+outputs/student_distill3r_448x560/epoch_0002.pt
 ```
 
 The interval is controlled by `training.save_every`; both supplied
@@ -294,9 +292,9 @@ not used by `evaluate.py`.
 ```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate.py \
   --config configs/student_distillation.yaml \
-  --checkpoint outputs/student_distill3r_256x320_1epoch/last.pt \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
   --split test \
-  --output outputs/student_distill3r_256x320_1epoch/evaluation_test_endo3r.json
+  --output outputs/student_distill3r_448x560/evaluation_test_endo3r.json
 ```
 
 ## Student inference visualization
@@ -308,12 +306,12 @@ outputs.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/visualize_depth.py \
-  --checkpoint outputs/student_distill3r_256x320_1epoch/last.pt \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
   --split test \
   --clip-offset 0
 
 CUDA_VISIBLE_DEVICES=0 python tools/visualize_cloud.py \
-  --checkpoint outputs/student_distill3r_256x320_1epoch/last.pt \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
   --split test \
   --clip-offset 0 \
   --point-stride 2
@@ -336,17 +334,17 @@ Every evaluable clip in the selected split is traversed (1474 clips for the
 current test split). Overlapping predictions are accumulated in a temporary
 per-sequence disk-backed array, then the unchanged global scale-and-shift and
 metric calculations are performed in two streaming passes. This keeps host
-memory bounded without truncating a sequence. Student predictions enter this
-adapter at their native 256x320 resolution; its streaming evaluation buffers
-and GT remain at the configured 448x560 evaluation grid. The separate official
-Endo3R entry above intentionally retains its own 320x256 protocol.
+memory bounded without truncating a sequence. The VDA adapter uses the
+configured 448x560 student/cache resolution for prediction and GT; the
+separate official Endo3R entry above intentionally retains its own 320x256
+protocol.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate_vda.py \
   --config configs/student_distillation.yaml \
-  --checkpoint outputs/student_distill3r_256x320_1epoch/last.pt \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
   --split test \
-  --output outputs/student_distill3r_256x320_1epoch/evaluation_test_vda.json
+  --output outputs/student_distill3r_448x560/evaluation_test_vda.json
 ```
 
 The same entry point evaluates the cached VGGT-Omega teacher without loading

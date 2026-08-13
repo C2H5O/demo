@@ -24,9 +24,6 @@ class Distill3RStudentConfig:
 
     image_height: int = 448
     image_width: int = 560
-    output_height: int = 256
-    output_width: int = 320
-    disable_final_dpt_upsample: bool = True
     img_size: int = 560
     patch_size: int = 14
     embed_dim: int = 384
@@ -55,18 +52,6 @@ class Distill3RStudentConfig:
             raise ValueError(
                 "Distill3R input resolution must be divisible by patch_size"
             )
-        if self.disable_final_dpt_upsample:
-            expected_output = (
-                self.image_height * 8 // self.patch_size,
-                self.image_width * 8 // self.patch_size,
-            )
-            if (self.output_height, self.output_width) != expected_output:
-                raise ValueError(
-                    "Disabling the final DPT bilinear x1.75 upsample requires "
-                    "student output_height/output_width={}/{}, got {}/{}".format(
-                        *expected_output, self.output_height, self.output_width
-                    )
-                )
         if self.encoder_type != "dune":
             raise ValueError("The configured Distill3R student must use encoder_type=dune")
         if (self.patch_size, self.embed_dim, self.encoder_depth, self.encoder_heads) != (
@@ -186,11 +171,6 @@ class Distill3RStudent(nn.Module):
         model_kwargs = asdict(self.config)
         model_kwargs.pop("image_height")
         model_kwargs.pop("image_width")
-        model_kwargs.pop("output_height")
-        model_kwargs.pop("output_width")
-        disable_final_dpt_upsample = bool(
-            model_kwargs.pop("disable_final_dpt_upsample")
-        )
         freeze_encoder = bool(model_kwargs.pop("freeze_encoder"))
         use_local_dune = bool(model_kwargs.pop("use_local_dune_submodule"))
         checkpoint_value = str(model_kwargs.pop("pretrained_checkpoint"))
@@ -212,8 +192,6 @@ class Distill3RStudent(nn.Module):
             checkpoint_path,
         ):
             self.student = factory(**model_kwargs)
-        if disable_final_dpt_upsample:
-            self._disable_final_dpt_upsample()
         self._set_decoder_attention_implementation(attention_implementation)
         if freeze_encoder:
             encoder = getattr(self.student, "encoder", None)
@@ -221,36 +199,6 @@ class Distill3RStudent(nn.Module):
                 raise RuntimeError("The official Distill3R student has no encoder to freeze")
             for parameter in encoder.parameters():
                 parameter.requires_grad_(False)
-
-    @staticmethod
-    def _replace_final_dpt_upsample(head: nn.Module, name: str) -> None:
-        """Replace only Fast3R DPT's final patch_size/8 bilinear resize."""
-
-        dpt = getattr(head, "dpt", None)
-        stages = getattr(dpt, "head", None)
-        if not isinstance(stages, nn.Sequential):
-            raise RuntimeError("{} is not an official Fast3R DPT head".format(name))
-        matches = [
-            index
-            for index, stage in enumerate(stages)
-            if getattr(stage, "mode", None) == "bilinear"
-            and abs(float(getattr(stage, "scale_factor", 0.0)) - 1.75) < 1e-8
-        ]
-        if len(matches) != 1:
-            raise RuntimeError(
-                "Expected exactly one bilinear x1.75 stage in {}, found {}".format(
-                    name, len(matches)
-                )
-            )
-        stages[matches[0]] = nn.Identity()
-
-    def _disable_final_dpt_upsample(self) -> None:
-        self._replace_final_dpt_upsample(
-            self.student.downstream_head, "student.downstream_head"
-        )
-        self._replace_final_dpt_upsample(
-            self.student.downstream_head_local, "student.downstream_head_local"
-        )
 
     def _set_decoder_attention_implementation(self, implementation: str) -> None:
         """Select a pinned Fast3R attention backend without editing the submodule."""
@@ -328,18 +276,10 @@ class Distill3RStudent(nn.Module):
             ),
         }
         expected = {
-            "xyz_global": (
-                batch, frames, self.config.output_height, self.config.output_width, 3
-            ),
-            "xyz_local": (
-                batch, frames, self.config.output_height, self.config.output_width, 3
-            ),
-            "conf_global": (
-                batch, frames, self.config.output_height, self.config.output_width
-            ),
-            "conf_local": (
-                batch, frames, self.config.output_height, self.config.output_width
-            ),
+            "xyz_global": (batch, frames, height, width, 3),
+            "xyz_local": (batch, frames, height, width, 3),
+            "conf_global": (batch, frames, height, width),
+            "conf_local": (batch, frames, height, width),
         }
         wrong = {
             name: (tuple(adapted[name].shape), shape)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -127,18 +127,10 @@ class ScaredDistillDataset(Dataset):
         rgb_dataset: ScaredTemporalRGBDataset,
         cache_root: Union[str, Path],
         ground_truth_config: Optional[Dict[str, Any]] = None,
-        target_size: Optional[Tuple[int, int]] = None,
     ) -> None:
         self.rgb_dataset = rgb_dataset
         self.cache_root = Path(cache_root)
         self.ground_truth_config = dict(ground_truth_config or {})
-        self.target_size = (
-            tuple(int(value) for value in target_size)
-            if target_size is not None
-            else None
-        )
-        if self.target_size is not None and any(value <= 0 for value in self.target_size):
-            raise ValueError("target_size must contain positive height/width")
 
     def __len__(self) -> int:
         return len(self.rgb_dataset)
@@ -197,22 +189,11 @@ class ScaredDistillDataset(Dataset):
                     cache_shape, (height, width), cache_path
                 )
             )
-        target_height, target_width = self.target_size or (height, width)
-        target["xyz_global"] = _resize_map(
-            target["xyz_global"], target_height, target_width, "bilinear"
-        )
-        target["xyz_local"] = _resize_map(
-            target["xyz_local"], target_height, target_width, "bilinear"
-        )
-        target["conf_global"] = _resize_map(
-            target["conf_global"], target_height, target_width, "bilinear"
-        )
-        target["conf_local"] = _resize_map(
-            target["conf_local"], target_height, target_width, "bilinear"
-        )
-        valid_mask = _resize_map(
-            valid_mask.float(), target_height, target_width, "nearest"
-        ).bool()
+        target["xyz_global"] = _resize_map(target["xyz_global"], height, width, "bilinear")
+        target["xyz_local"] = _resize_map(target["xyz_local"], height, width, "bilinear")
+        target["conf_global"] = _resize_map(target["conf_global"], height, width, "bilinear")
+        target["conf_local"] = _resize_map(target["conf_local"], height, width, "bilinear")
+        valid_mask = _resize_map(valid_mask.float(), height, width, "nearest").bool()
         result = {
             "images": sample["images"],
             "target": target,
@@ -240,7 +221,7 @@ class ScaredDistillDataset(Dataset):
             ground_truth, ground_truth_valid = load_clip_ground_truth(
                 sample["frame_names"],
                 candidates,
-                (target_height, target_width),
+                (height, width),
                 scale=float(self.ground_truth_config.get("scale", 1.0)),
                 channel=int(self.ground_truth_config.get("channel", 0)),
                 required=bool(self.ground_truth_config.get("required", True)),

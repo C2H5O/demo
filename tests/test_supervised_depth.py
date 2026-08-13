@@ -4,7 +4,6 @@ import torch
 import numpy as np
 
 from datasets.ground_truth import load_clip_ground_truth
-from datasets.scared_clip_dataset import _resize_map
 from losses.distillation_loss import ScaredDistillationLoss
 from losses.supervised_depth_loss import SupervisedDepthLoss
 
@@ -47,16 +46,6 @@ def test_distillation_uses_separate_supervised_depth_bounds() -> None:
     assert loss_function.supervised_depth.config.max_depth == 100.0
 
 
-def test_teacher_targets_resize_to_native_student_output() -> None:
-    point_map = torch.rand(2, 448, 560, 3)
-    confidence = torch.rand(2, 448, 560)
-    valid = torch.ones(2, 448, 560)
-
-    assert _resize_map(point_map, 256, 320, "bilinear").shape == (2, 256, 320, 3)
-    assert _resize_map(confidence, 256, 320, "bilinear").shape == (2, 256, 320)
-    assert _resize_map(valid, 256, 320, "nearest").shape == (2, 256, 320)
-
-
 def test_student_distillation_combines_cache_and_ground_truth() -> None:
     torch.manual_seed(0)
     batch, frames, height, width = 1, 2, 6, 8
@@ -79,9 +68,7 @@ def test_student_distillation_combines_cache_and_ground_truth() -> None:
         "conf_global": confidence,
     }
     valid = torch.ones(batch, frames, height, width, dtype=torch.bool)
-    # RGB remains at the 448x560-equivalent input grid while predictions and
-    # supervision use the smaller native DPT output grid.
-    images = torch.rand(batch, frames, 3, height * 2, width * 2)
+    images = torch.rand(batch, frames, 3, height, width)
     ground_truth = target_local[..., 2] * 2.0
     loss_function = ScaredDistillationLoss(
         {

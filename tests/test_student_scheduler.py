@@ -95,9 +95,6 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     assert config["training"]["amp_initial_scale"] == 128.0
     assert config["student"]["image_height"] == 448
     assert config["student"]["image_width"] == 560
-    assert config["student"]["output_height"] == 256
-    assert config["student"]["output_width"] == 320
-    assert config["student"]["disable_final_dpt_upsample"] is True
     assert config["student"]["patch_size"] == 14
     assert config["student"]["encoder_type"] == "dune"
     assert config["student"]["decoder_depth"] == 6
@@ -107,7 +104,6 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     )
     assert config["student"]["conf_mode"] == ["sigmoid", 0.0, 1.0]
     assert config["student"]["use_local_dune_submodule"] is True
-    assert config["training"]["epochs"] == 1
     assert 448 // 14 == 32
     assert 560 // 14 == 40
 
@@ -117,27 +113,14 @@ class _FakeOfficialDistill3R(torch.nn.Module):
         super().__init__()
         self.kwargs = kwargs
         self.seen_views = None
-        self.downstream_head = self._dense_head()
-        self.downstream_head_local = self._dense_head()
-
-    @staticmethod
-    def _dense_head():
-        resize = torch.nn.Identity()
-        resize.mode = "bilinear"
-        resize.scale_factor = 1.75
-        dpt = torch.nn.Module()
-        dpt.head = torch.nn.Sequential(torch.nn.Identity(), resize)
-        head = torch.nn.Module()
-        head.dpt = dpt
-        return head
 
     def forward(self, views):
         self.seen_views = views
         outputs = []
         for view in views:
-            batch = view["img"].shape[0]
-            xyz = view["img"].new_zeros(batch, 256, 320, 3)
-            confidence = view["img"].new_full((batch, 256, 320), 0.25)
+            batch, _, height, width = view["img"].shape
+            xyz = view["img"].new_zeros(batch, height, width, 3)
+            confidence = view["img"].new_full((batch, height, width), 0.25)
             outputs.append(
                 {
                     "pts3d_in_other_view": xyz,
@@ -149,17 +132,17 @@ class _FakeOfficialDistill3R(torch.nn.Module):
         return outputs
 
 
-def test_official_distill3r_adapter_preserves_448_input_and_native_output() -> None:
+def test_official_distill3r_adapter_preserves_448x560_contract() -> None:
     config = load_config("configs/student_distillation.yaml")["student"]
     model = Distill3RStudent(config, model_factory=_FakeOfficialDistill3R)
     images = torch.rand(2, 3, 3, 448, 560)
 
     output = model(images)
 
-    assert output["xyz_global"].shape == (2, 3, 256, 320, 3)
-    assert output["xyz_local"].shape == (2, 3, 256, 320, 3)
-    assert output["conf_global"].shape == (2, 3, 256, 320)
-    assert output["conf_local"].shape == (2, 3, 256, 320)
+    assert output["xyz_global"].shape == (2, 3, 448, 560, 3)
+    assert output["xyz_local"].shape == (2, 3, 448, 560, 3)
+    assert output["conf_global"].shape == (2, 3, 448, 560)
+    assert output["conf_local"].shape == (2, 3, 448, 560)
     assert output["conf_global"].min().item() == pytest.approx(0.25)
     assert output["conf_local"].max().item() == pytest.approx(0.75)
     assert len(model.student.seen_views) == 3
@@ -170,14 +153,8 @@ def test_official_distill3r_adapter_preserves_448_input_and_native_output() -> N
     assert model.student.kwargs["decoder_depth"] == 6
     assert model.student.kwargs["encoder_type"] == "dune"
     assert model.student.kwargs["conf_mode"] == ["sigmoid", 0.0, 1.0]
-    assert isinstance(model.student.downstream_head.dpt.head[1], torch.nn.Identity)
-    assert not hasattr(model.student.downstream_head.dpt.head[1], "scale_factor")
-    assert isinstance(model.student.downstream_head_local.dpt.head[1], torch.nn.Identity)
     assert "decoder_attention_implementation" not in model.student.kwargs
     assert "pretrained_checkpoint" not in model.student.kwargs
-    assert "output_height" not in model.student.kwargs
-    assert "output_width" not in model.student.kwargs
-    assert "disable_final_dpt_upsample" not in model.student.kwargs
 
 
 def test_distill3r_adapter_rejects_other_runtime_resolution() -> None:

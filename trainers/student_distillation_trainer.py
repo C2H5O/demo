@@ -35,10 +35,6 @@ def _build_dataset(config: Dict[str, Any], split: str) -> ScaredDistillDataset:
         rgb_dataset,
         cache_root,
         config.get("dataset", {}).get("ground_truth"),
-        target_size=(
-            int(config["student"].get("output_height", config["student"]["image_height"])),
-            int(config["student"].get("output_width", config["student"]["image_width"])),
-        ),
     )
     missing = dataset.missing_cache_paths(limit=5)
     if missing:

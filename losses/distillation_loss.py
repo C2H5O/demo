@@ -333,15 +333,6 @@ class ScaredDistillationLoss(nn.Module):
         points = prediction["xyz_local"].float()
         horizontal, vertical = _neighbor_differences(points)
         rgb = _zero_one_images(images, self.config.normalize_mode).mean(dim=2)
-        output_size = tuple(points.shape[-3:-1])
-        if tuple(rgb.shape[-2:]) != output_size:
-            batch, frames = rgb.shape[:2]
-            rgb = F.interpolate(
-                rgb.reshape(batch * frames, 1, *rgb.shape[-2:]),
-                size=output_size,
-                mode="bilinear",
-                align_corners=False,
-            ).reshape(batch, frames, *output_size)
         image_x = (rgb[:, :, :, 1:] - rgb[:, :, :, :-1]).abs()
         image_y = (rgb[:, :, 1:, :] - rgb[:, :, :-1, :]).abs()
         edge_x, edge_y = torch.exp(-10.0 * image_x), torch.exp(-10.0 * image_y)

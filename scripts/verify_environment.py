@@ -15,7 +15,6 @@ EXPECTED_TORCH = "2.3.1"
 EXPECTED_CUDA = "12.1"
 EXPECTED_NUMPY = "1.26.4"
 EXPECTED_RESOLUTION = (448, 560)
-EXPECTED_STUDENT_OUTPUT = (256, 320)
 EXPECTED_DUNE_CHECKPOINT = "./checkpoints/dune/dune_vitsmall14_448.pth"
 EXPECTED_GT_DIRECTORIES = ["data/depth", "data/scene_points"]
 
@@ -56,10 +55,6 @@ def main() -> None:
         int(config["student"]["image_height"]),
         int(config["student"]["image_width"]),
     )
-    student_output = (
-        int(config["student"]["output_height"]),
-        int(config["student"]["output_width"]),
-    )
     teacher_resolution = (
         int(config["teacher"]["image_height"]),
         int(config["teacher"]["image_width"]),
@@ -75,14 +70,6 @@ def main() -> None:
                 (dataset_resolution, student_resolution, teacher_resolution)
             )
         )
-    if student_output != EXPECTED_STUDENT_OUTPUT:
-        raise RuntimeError(
-            "Student output must be 256x320, got {}".format(student_output)
-        )
-    if not bool(config["student"].get("disable_final_dpt_upsample", False)):
-        raise RuntimeError("student.disable_final_dpt_upsample must be true")
-    if int(config["training"]["epochs"]) != 1:
-        raise RuntimeError("training.epochs must be 1 for this experiment")
     student_checkpoint = str(config["student"].get("pretrained_checkpoint", ""))
     if student_checkpoint != EXPECTED_DUNE_CHECKPOINT:
         raise RuntimeError(
@@ -114,13 +101,12 @@ def main() -> None:
             )
         )
     print(
-        "environment OK: Python {} PyTorch {} CUDA {} NumPy {} input {}x{} output {}x{}".format(
+        "environment OK: Python {} PyTorch {} CUDA {} NumPy {} resolution {}x{}".format(
             ".".join(str(value) for value in python_version),
             torch.__version__,
             cuda_version,
             np.__version__,
             *EXPECTED_RESOLUTION,
-            *EXPECTED_STUDENT_OUTPUT,
         )
     )
 
