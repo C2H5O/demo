@@ -382,6 +382,65 @@ path_1 clean, head/raw/depth degrade       -> regression/XYZ path
 F0 already visibly periodic               -> encoder-side feature
 ```
 
+### DPT branch projection-versus-resize trace
+
+After Stage 1 identifies `dpt_act_0` as the first visibly periodic feature,
+the inference-only Stage 2 trace splits the first three real local-DPT branches
+at their internal module boundaries. It captures, from one unchanged forward:
+
+```text
+branch0: 384x32x40 -> Conv2d(1x1), 96x32x40 -> ConvTranspose(k=4,s=4), 96x128x160
+branch1: 384x32x40 -> Conv2d(1x1),192x32x40 -> ConvTranspose(k=2,s=2),192x64x80
+branch2: 384x32x40 -> Conv2d(1x1),384x32x40 -> no resize,             384x32x40
+```
+
+Run the same fixed checkpoint, clip, and frame used by Stage 1:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python diagnostics/trace_distill3r_artifacts_stage2.py \
+  --config configs/student_distillation.yaml \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
+  --split test \
+  --sequence-id dataset_8/keyframe_0 \
+  --clip-offset 0 \
+  --frame-index 0 \
+  --seed 0 \
+  --output-dir diagnostics/artifact_trace_stage2
+```
+
+As in Stage 1, `--clip-index N` may replace sequence/offset selection. Every
+stage always saves the selected frame's native `[C,H,W]` feature plus mean,
+absolute-mean, and L2-norm NPY/nearest-neighbour PNG files. Key aggregate files
+are:
+
+```text
+artifact_trace_stage2_overview.png
+artifact_stage2_metrics.csv
+artifact_stage2_periodicity.json
+artifact_stage2_diagnosis.json
+projection_comparison.json
+branch0_mean_phase_template.npy/.png
+branch1_mean_phase_template.npy/.png
+branch0_deconv_kernel_energy.npy/.png
+branch1_deconv_kernel_energy.npy/.png
+deconv_weight_metrics.json
+artifact_stage2_metadata.json
+```
+
+The 4x4/2x2 mean phase templates average the raw L2-norm map at corresponding
+positions inside every expanded token cell. Kernel-energy maps independently
+show the checkpoint's mean absolute transposed-convolution weight at each
+spatial kernel phase. Stage 2 also verifies that each branch Sequential output
+and its final layer output have zero maximum absolute difference.
+
+If branch0 input/projected remain visually clean and only branch0 resized has a
+large mod-4 ratio/CV, the first confirmed source is the x4 transposed
+convolution. If branch0 and branch1 resized are both strongly phase-imbalanced,
+the evidence points to transposed-convolution resizing generally. If the
+32x40 projected norm structure changes substantially before any resize, inspect
+the projection/F0 interaction, while remembering that a 1x1 convolution cannot
+create a new sub-token spatial lattice.
+
 ## Video-Depth-Anything depth evaluation
 
 `evaluate_vda.py` is a separate evaluation path that reads the existing
