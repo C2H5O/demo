@@ -30,6 +30,7 @@ data/*
 checkpoints/*
 !checkpoints/README.md
 outputs/
+diagnostics/artifact_trace/
 processed/
 teacher_cache/
 external/*

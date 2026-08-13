@@ -322,6 +322,66 @@ the optional interactive point-cloud viewer, install
 `requirements-visualization.txt`, add `--serve --host 0.0.0.0 --port 8080`, and
 forward the server port over SSH.
 
+## Single-forward artifact trace
+
+`diagnostics/trace_distill3r_artifacts.py` locates where the regular token-grid
+artifact first appears without changing the checkpoint, network, dataset, or
+training code. Temporary hooks observe the local head because displayed depth
+comes from `xyz_local[...,2]`. One unchanged `model(images)` call captures:
+
+```text
+decoder output[0,3,4,6]
+four DPT act_postprocess branches
+four scratch projections
+refinenet4 -> refinenet3 -> refinenet2 -> refinenet1
+regression conv1 -> final resize -> conv2 -> raw output
+postprocessed local depth
+```
+
+The checked-in model currently retains its original final bilinear x1.75 stage,
+so the trace reports `path_1/head_conv1` at 256x320 and
+`head_after_resize/raw_output/depth` at 448x560. The diagnostic never replaces
+that stage with `Identity` and never resizes a captured tensor to satisfy an
+expected shape.
+
+Run one fixed test clip and frame as follows:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python diagnostics/trace_distill3r_artifacts.py \
+  --config configs/student_distillation.yaml \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
+  --split test \
+  --sequence-id dataset_8/keyframe_0 \
+  --clip-offset 0 \
+  --frame-index 0 \
+  --seed 0 \
+  --output-dir diagnostics/artifact_trace
+```
+
+Use `--clip-index N` instead of sequence/offset to select an absolute dataset
+clip. Add `--save-full-features` only when the large `[C,H,W]` tensors are also
+needed; native-resolution mean, absolute-mean, L2-norm NPY files and nearest-
+neighbour PNGs are always saved.
+
+`artifact_metrics.csv` computes token-boundary/interior gradient means and their
+ratios from the raw L2-norm maps, never from normalized PNGs. Ratios much larger
+than one indicate a stronger jump at the projected 32x40 token-cell boundary.
+At the native 32x40 decoder stages the cell size is one, so no interior
+gradients exist and the ratio is deliberately `NaN`; compare their nearest-
+neighbour maps directly. `periodicity_metrics.json` groups the same raw spatial
+gradients by modulo phase (phase zero is the token-cell boundary), while
+`artifact_trace_overview.png` presents the main stages in network order.
+
+Interpret the first clear increase as follows:
+
+```text
+F0 clean, F3/F6 degraded                  -> Fast3R decoder
+DPT act_0 first shows 4x4 periodicity     -> ConvTranspose x4 branch
+DPT/scratch clean, path stages degrade    -> RefineNet fusion
+path_1 clean, head/raw/depth degrade       -> regression/XYZ path
+F0 already visibly periodic               -> encoder-side feature
+```
+
 ## Video-Depth-Anything depth evaluation
 
 `evaluate_vda.py` is a separate evaluation path that reads the existing
