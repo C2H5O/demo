@@ -29,7 +29,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("outputs/student_distill3r_448x560/visualization/cloud"),
+        default=Path("outputs/student_distill3r_256x320_1epoch/visualization/cloud"),
     )
     parser.add_argument("--point-stride", type=int, default=2)
     parser.add_argument("--min-depth", type=float, default=1e-4)

@@ -56,10 +56,13 @@ teacher:
     target_layers: all
 
 student:
-  # Official Distill3R CompressedFast3R + DUNE student. Runtime I/O is fixed
-  # to 448x560 (32x40 DUNE patches), matching RGB, teacher cache, and GT.
+  # Keep 448x560 DUNE input (32x40 patches), but expose the native DPT output.
   image_height: 448
   image_width: 560
+  output_height: 256
+  output_width: 320
+  # Remove Fast3R DPT's final patch_size/8 = bilinear x1.75 resize.
+  disable_final_dpt_upsample: true
   img_size: 560
   patch_size: 14
   embed_dim: 384
@@ -114,7 +117,8 @@ dataloader:
   drop_last: false
 
 training:
-  epochs: 20
+  # One-epoch native-output experiment for visual inspection.
+  epochs: 1
   learning_rate: 1.0e-5
   min_learning_rate: 1.0e-6
   weight_decay: 0.05
@@ -129,11 +133,11 @@ training:
   validate_every: 1
   save_every: 1
   use_test_for_evaluation: true
-  output_dir: ./outputs/student_distill3r_448x560
+  output_dir: ./outputs/student_distill3r_256x320_1epoch
   resume: null
 
 evaluation:
-  checkpoint: ./outputs/student_distill3r_448x560/last.pt
+  checkpoint: ./outputs/student_distill3r_256x320_1epoch/last.pt
   split: test
   protocol: endo3r
   # Prefer the RGB source actually present in this project's SCARED copy.
@@ -146,4 +150,4 @@ evaluation:
   pin_memory: true
   persistent_workers: true
   amp: true
-  output: ./outputs/student_distill3r_448x560/evaluation_test_endo3r.json
+  output: ./outputs/student_distill3r_256x320_1epoch/evaluation_test_endo3r.json

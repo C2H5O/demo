@@ -26,7 +26,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("outputs/student_distill3r_448x560/visualization/depth"),
+        default=Path("outputs/student_distill3r_256x320_1epoch/visualization/depth"),
     )
     parser.add_argument("--min-depth", type=float, default=1e-4)
     parser.add_argument("--max-depth", type=float, default=100.0)

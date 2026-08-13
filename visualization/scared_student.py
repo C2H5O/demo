@@ -38,6 +38,20 @@ def depth_to_magma(depth: np.ndarray, valid: np.ndarray, low: float, high: float
     return cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
 
 
+def _resize_rgb_frames(rgb: np.ndarray, output_size: Tuple[int, int]) -> np.ndarray:
+    """Align RGB colors and panels to the student's native output grid."""
+
+    if tuple(rgb.shape[1:3]) == tuple(output_size):
+        return rgb
+    height, width = output_size
+    return np.stack(
+        [
+            cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            for frame in rgb
+        ]
+    )
+
+
 def write_binary_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
     """Write XYZRGB vertices as a compact binary little-endian PLY file."""
     if points.shape != colors.shape or points.ndim != 2 or points.shape[1] != 3:
@@ -95,12 +109,14 @@ def predict_student_clip(
         unnormalize_image(frame, config["dataset"].get("normalize_mode", "imagenet"))
         for frame in sample["images"]
     ])
+    rgb = np.round(rgb.permute(0, 2, 3, 1).numpy() * 255.0).astype(np.uint8)
+    output_size = tuple(int(value) for value in prediction["xyz_local"].shape[-3:-1])
     return {
         "config": config,
         "sample": sample,
         "record": record,
         "dataset_index": dataset_index,
-        "rgb": np.round(rgb.permute(0, 2, 3, 1).numpy() * 255.0).astype(np.uint8),
+        "rgb": _resize_rgb_frames(rgb, output_size),
         "xyz_local": prediction["xyz_local"][0].float().cpu().numpy(),
         "xyz_global": prediction["xyz_global"][0].float().cpu().numpy(),
         "conf_local": prediction["conf_local"][0].float().cpu().numpy(),
@@ -162,6 +178,7 @@ def export_depth_visualization(
         "frame_names": sample["frame_names"],
         "depth_range": [min_depth, max_depth],
         "depth_color_percentiles": [float(color_low), float(color_high)],
+        "student_output_resolution": list(depth.shape[1:]),
         "panel_order": ["rgb", "depth_magma", "local_confidence_viridis"],
         "confidence_note": "Student confidence is sigmoid-normalized and supervised in [0,1].",
     }
@@ -222,6 +239,7 @@ def export_cloud_visualization(
         "point_stride": point_stride,
         "depth_range": [min_depth, max_depth],
         "confidence_threshold": confidence_threshold,
+        "student_output_resolution": list(depth.shape[1:]),
         "confidence_note": "Student confidence is sigmoid-normalized and supervised in [0,1].",
     }
     (output / "cloud_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -265,6 +283,7 @@ def export_clip_visualization(
         for frame in sample["images"]
     ])
     rgb = np.round(rgb.permute(0, 2, 3, 1).numpy() * 255.0).astype(np.uint8)
+    rgb = _resize_rgb_frames(rgb, tuple(depth.shape[1:]))
 
     finite = np.isfinite(depth) & np.isfinite(xyz_global).all(axis=-1)
     valid = finite & (depth > min_depth) & (depth < max_depth)
@@ -314,6 +333,7 @@ def export_clip_visualization(
         "point_stride": point_stride,
         "depth_range": [min_depth, max_depth],
         "depth_color_percentiles": [float(color_low), float(color_high)],
+        "student_output_resolution": list(depth.shape[1:]),
         "confidence_threshold": confidence_threshold,
         "confidence_note": "Student confidence is sigmoid-normalized and supervised in [0,1].",
     }
