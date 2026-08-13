@@ -32,6 +32,7 @@ checkpoints/*
 outputs/
 diagnostics/artifact_trace/
 diagnostics/artifact_trace_stage2/
+diagnostics/branch0_replacement_ablation/
 processed/
 teacher_cache/
 external/*

@@ -441,6 +441,72 @@ the evidence points to transposed-convolution resizing generally. If the
 the projection/F0 interaction, while remembering that a 1x1 convolution cannot
 create a new sub-token spatial lattice.
 
+### Branch0 controlled reconstruction ablation
+
+After Stage 2 confirms strong mod-4 phase imbalance specifically after the x4
+transposed convolution, `diagnostics/ablate_branch0_reconstruction.py` performs
+a zero-shot mechanism ablation. It runs DUNE and the Fast3R decoder exactly
+once, captures the one decoder-token set entering Local DPT, then replays only
+the selected frame's unchanged Local DPT with:
+
+```text
+baseline    trained ConvTranspose2d(k=4,s=4)
+phase_tied  functional ConvTranspose2d using the spatial mean of the trained
+            weight, repeated identically across all 16 phases
+bilinear    F.interpolate(projected, 128x160, bilinear, align_corners=True)
+```
+
+Phase-tied reconstruction uses the original bias and a temporary functional
+weight. It never writes `module.weight.data`, alters the checkpoint, or saves a
+model. Branches 1-3, scratch layers, all RefineNet blocks, the regression head,
+the final bilinear x1.75, and XYZ postprocessing remain unchanged. In the live
+DPT, branch0 enters only at `refinenet1(path2, scratch0)`; therefore `path2` is
+an intentionally identical control across all modes.
+
+Run all three modes on the same fixed Stage-1/Stage-2 sample:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python diagnostics/ablate_branch0_reconstruction.py \
+  --config configs/student_distillation.yaml \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
+  --split test \
+  --sequence-id dataset_8/keyframe_0 \
+  --clip-offset 0 \
+  --frame-index 0 \
+  --seed 0 \
+  --branch0-mode all \
+  --output-dir diagnostics/branch0_replacement_ablation
+```
+
+The default `--branch0-mode baseline` is a minimal replay smoke test. Selecting
+`phase_tied` or `bilinear` also runs baseline from the same cached token set;
+select `all` for the causal comparison, combined metrics, profiles, shared-scale
+depth images, and automatic diagnosis. Main outputs are:
+
+```text
+replacement_metrics.csv
+replacement_periodicity.json
+large_scale_similarity.csv
+replacement_diagnosis.json
+replacement_metadata.json
+branch0_replacement_overview.png
+branch0_mod4_profile.png
+depth_mod14_profile.png
+depth_baseline.npy/.png
+depth_phase_tied.npy/.png
+depth_bilinear.npy/.png
+depth_diff_phase_tied_vs_baseline.npy/.png
+depth_diff_bilinear_vs_baseline.npy/.png
+```
+
+Depth PNGs share one combined p2-p98 range. Overview feature rows also share
+their display range across modes and use nearest-neighbour rendering. Metrics
+are computed only from native float maps. Low-pass Pearson correlation at
+branch0, path1, and depth measures preservation of large-scale structure, not
+GT accuracy. Because neither replacement was trained, results diagnose the
+artifact mechanism only and must not be interpreted as a final architecture or
+performance ranking.
+
 ## Video-Depth-Anything depth evaluation
 
 `evaluate_vda.py` is a separate evaluation path that reads the existing
