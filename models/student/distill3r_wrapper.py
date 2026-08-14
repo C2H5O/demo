@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -10,6 +11,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +42,8 @@ class Distill3RStudentConfig:
     conf_mode: Tuple[str, float, float] = ("sigmoid", 0.0, 1.0)
     load_pretrained: bool = True
     freeze_encoder: bool = False
+    freeze_decoder: bool = False
+    dpt_branch0_resize: str = "deconv"
     pretrained_checkpoint: str = "./checkpoints/dune/dune_vitsmall14_448.pth"
     use_local_dune_submodule: bool = True
 
@@ -82,6 +86,10 @@ class Distill3RStudentConfig:
                 "student.use_local_dune_submodule must remain true so the configured "
                 "local DUNE checkpoint is used"
             )
+        if self.dpt_branch0_resize not in {"deconv", "bilinear"}:
+            raise ValueError(
+                "student.dpt_branch0_resize must be deconv or bilinear"
+            )
         if self.max_views <= 0 or self.max_parallel_views_for_head <= 0:
             raise ValueError("max_views and max_parallel_views_for_head must be positive")
         if self.decoder_attention_implementation not in {
@@ -93,6 +101,28 @@ class Distill3RStudentConfig:
                 "decoder_attention_implementation must be flash_attention, "
                 "pytorch_auto, or pytorch_naive"
             )
+
+
+class BilinearResize(nn.Module):
+    """Parameter-free resize used by the branch0 training control experiment."""
+
+    def __init__(self, scale_factor: float = 4.0, align_corners: bool = True) -> None:
+        super().__init__()
+        self.scale_factor = float(scale_factor)
+        self.align_corners = bool(align_corners)
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return F.interpolate(
+            tensor,
+            scale_factor=self.scale_factor,
+            mode="bilinear",
+            align_corners=self.align_corners,
+        )
+
+    def extra_repr(self) -> str:
+        return "scale_factor={}, align_corners={}".format(
+            self.scale_factor, self.align_corners
+        )
 
 
 def _ensure_official_sources_importable() -> None:
@@ -149,6 +179,24 @@ def _official_model_factory(**kwargs: Any) -> nn.Module:
             "Failed to import the official Distill3R student. Create/activate the "
             "documented Conda environment and initialize all Git submodules."
         ) from error
+    from fast3r.dust3r.heads.dpt_head import DPTOutputAdapter_fix
+
+    student_path = Path(inspect.getfile(CompressedFast3R)).resolve()
+    dpt_path = Path(inspect.getfile(DPTOutputAdapter_fix)).resolve()
+    for label, imported, pinned in (
+        ("Distill3R student", student_path, DISTILL3R_ROOT.resolve()),
+        ("Fast3R DPT", dpt_path, DISTILL3R_FAST3R_ROOT.resolve()),
+    ):
+        try:
+            imported.relative_to(pinned)
+        except ValueError as error:
+            raise RuntimeError(
+                "{} was imported from {}, outside pinned source {}".format(
+                    label, imported, pinned
+                )
+            ) from error
+    print("Imported Distill3R student from: {}".format(student_path))
+    print("Imported Fast3R DPT from: {}".format(dpt_path))
     return CompressedFast3R(**kwargs)
 
 
@@ -172,6 +220,8 @@ class Distill3RStudent(nn.Module):
         model_kwargs.pop("image_height")
         model_kwargs.pop("image_width")
         freeze_encoder = bool(model_kwargs.pop("freeze_encoder"))
+        freeze_decoder = bool(model_kwargs.pop("freeze_decoder"))
+        branch0_resize = str(model_kwargs.pop("dpt_branch0_resize"))
         use_local_dune = bool(model_kwargs.pop("use_local_dune_submodule"))
         checkpoint_value = str(model_kwargs.pop("pretrained_checkpoint"))
         checkpoint_path = Path(checkpoint_value).expanduser()
@@ -193,12 +243,77 @@ class Distill3RStudent(nn.Module):
         ):
             self.student = factory(**model_kwargs)
         self._set_decoder_attention_implementation(attention_implementation)
+        if branch0_resize == "bilinear":
+            self._replace_branch0_resize()
         if freeze_encoder:
-            encoder = getattr(self.student, "encoder", None)
-            if encoder is None:
-                raise RuntimeError("The official Distill3R student has no encoder to freeze")
-            for parameter in encoder.parameters():
-                parameter.requires_grad_(False)
+            self._freeze_module("encoder", "DUNE encoder")
+        if freeze_decoder:
+            self._freeze_module("decoder", "Fast3R decoder")
+
+    def _freeze_module(self, attribute: str, label: str) -> None:
+        module = getattr(self.student, attribute, None)
+        if not isinstance(module, nn.Module):
+            raise RuntimeError("The official Distill3R student has no {}".format(label))
+        for parameter in module.parameters():
+            parameter.requires_grad_(False)
+
+    def dpt_heads(self) -> Tuple[Tuple[str, nn.Module], ...]:
+        heads = []
+        for name, attribute in (
+            ("Global", "downstream_head"),
+            ("Local", "downstream_head_local"),
+        ):
+            head = getattr(self.student, attribute, None)
+            dpt = getattr(head, "dpt", None)
+            if not isinstance(dpt, nn.Module):
+                raise RuntimeError(
+                    "The official Distill3R student has no {} DPT head".format(name)
+                )
+            heads.append((name, dpt))
+        return tuple(heads)
+
+    @staticmethod
+    def _validate_branch0_deconvolution(module: nn.Module, head_name: str) -> None:
+        if not isinstance(module, nn.ConvTranspose2d):
+            raise RuntimeError(
+                "{} DPT branch0 resize is {}, expected ConvTranspose2d".format(
+                    head_name, type(module).__name__
+                )
+            )
+        expected = {
+            "in_channels": 96,
+            "out_channels": 96,
+            "kernel_size": (4, 4),
+            "stride": (4, 4),
+            "padding": (0, 0),
+            "output_padding": (0, 0),
+            "dilation": (1, 1),
+            "groups": 1,
+        }
+        actual = {name: getattr(module, name) for name in expected}
+        if actual != expected:
+            raise RuntimeError(
+                "{} DPT branch0 deconvolution changed: {}".format(head_name, actual)
+            )
+
+    def _replace_branch0_resize(self) -> None:
+        for name, dpt in self.dpt_heads():
+            branches = getattr(dpt, "act_postprocess", None)
+            if not isinstance(branches, nn.ModuleList) or len(branches) != 4:
+                raise RuntimeError("{} DPT act_postprocess structure changed".format(name))
+            branch0 = branches[0]
+            if not isinstance(branch0, nn.Sequential) or len(branch0) != 2:
+                raise RuntimeError("{} DPT branch0 structure changed".format(name))
+            self._validate_branch0_deconvolution(branch0[1], name)
+            branch0[1] = BilinearResize(scale_factor=4.0, align_corners=True)
+
+    def train(self, mode: bool = True) -> "Distill3RStudent":
+        super().train(mode)
+        if self.config.freeze_encoder:
+            self.student.encoder.eval()
+        if self.config.freeze_decoder:
+            self.student.decoder.eval()
+        return self
 
     def _set_decoder_attention_implementation(self, implementation: str) -> None:
         """Select a pinned Fast3R attention backend without editing the submodule."""
@@ -296,6 +411,7 @@ def build_distill3r_student(config: Mapping[str, Any]) -> Distill3RStudent:
 
 
 __all__ = [
+    "BilinearResize",
     "Distill3RStudent",
     "Distill3RStudentConfig",
     "build_distill3r_student",

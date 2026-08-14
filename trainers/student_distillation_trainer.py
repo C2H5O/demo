@@ -6,7 +6,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import torch
 
@@ -19,6 +19,236 @@ from losses.distillation_loss import ScaredDistillationLoss
 from models.student.distill3r_wrapper import Distill3RStudent
 from utils.config import ensure_dir, load_config
 from utils.seed import seed_everything
+
+
+BRANCH0_DECONV_STATE_KEYS = {
+    "student.downstream_head.dpt.act_postprocess.0.1.weight",
+    "student.downstream_head.dpt.act_postprocess.0.1.bias",
+    "student.downstream_head_local.dpt.act_postprocess.0.1.weight",
+    "student.downstream_head_local.dpt.act_postprocess.0.1.bias",
+}
+
+
+def _resolve_project_path(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
+    return path.resolve()
+
+
+def load_bilinear_head_initialization(
+    model: Distill3RStudent, checkpoint_path: str | Path
+) -> None:
+    """Load a baseline student while rejecting every unplanned incompatibility."""
+
+    path = _resolve_project_path(checkpoint_path)
+    if not path.is_file():
+        raise FileNotFoundError("Initial student checkpoint does not exist: {}".format(path))
+    checkpoint = torch.load(str(path), map_location="cpu", weights_only=False)
+    state = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    if not isinstance(state, Mapping):
+        raise TypeError("Initial student checkpoint does not contain a model state dictionary")
+    incompatible = model.load_state_dict(state, strict=False)
+    missing = set(incompatible.missing_keys)
+    unexpected = set(incompatible.unexpected_keys)
+    print("Initial checkpoint missing keys: {}".format(sorted(missing)))
+    print("Initial checkpoint unexpected keys: {}".format(sorted(unexpected)))
+    if missing:
+        raise RuntimeError("Initial checkpoint has unplanned missing keys: {}".format(sorted(missing)))
+    if unexpected != BRANCH0_DECONV_STATE_KEYS:
+        raise RuntimeError(
+            "Initial checkpoint may ignore only the four old branch0 ConvTranspose "
+            "keys; expected={}, actual={}".format(
+                sorted(BRANCH0_DECONV_STATE_KEYS), sorted(unexpected)
+            )
+        )
+    print(
+        "Loaded model weights from {} and intentionally ignored only the old "
+        "Global/Local branch0 ConvTranspose weight and bias. Optimizer and "
+        "scheduler state were not loaded.".format(path)
+    )
+
+
+def validate_head_only_training(model: Distill3RStudent) -> Dict[str, int]:
+    """Fail fast unless the complete Global/Local heads are the only trainable modules."""
+
+    encoder = model.student.encoder
+    decoder = model.student.decoder
+    heads = model.dpt_heads()
+    encoder_trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+    decoder_trainable = sum(p.numel() for p in decoder.parameters() if p.requires_grad)
+    head_trainable = {
+        name: sum(p.numel() for p in head.parameters() if p.requires_grad)
+        for name, head in heads
+    }
+    allowed_ids = {id(p) for _, head in heads for p in head.parameters()}
+    trainable_ids = {id(p) for p in model.parameters() if p.requires_grad}
+    if encoder_trainable or decoder_trainable:
+        raise RuntimeError("Encoder and decoder must have zero trainable parameters")
+    if any(count <= 0 for count in head_trainable.values()):
+        raise RuntimeError("Both complete DPT heads must contain trainable parameters")
+    if trainable_ids != allowed_ids:
+        raise RuntimeError(
+            "Trainable parameter scope is not exactly the Global and Local DPT heads"
+        )
+    if encoder.training or decoder.training:
+        raise RuntimeError("Frozen encoder and decoder must remain in eval mode")
+    if any(not head.training for _, head in heads):
+        raise RuntimeError("Global and Local DPT heads must remain in train mode")
+
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    counts = {
+        "total": total,
+        "trainable": trainable,
+        "frozen": total - trainable,
+        "encoder_trainable": encoder_trainable,
+        "decoder_trainable": decoder_trainable,
+        "global_head_trainable": head_trainable["Global"],
+        "local_head_trainable": head_trainable["Local"],
+    }
+    print("Parameter scope: total={:,} trainable={:,} frozen={:,}".format(total, trainable, total - trainable))
+    print("DUNE Encoder: frozen, eval, trainable params = {}".format(encoder_trainable))
+    print("Fast3R Decoder: frozen, eval, trainable params = {}".format(decoder_trainable))
+    print("Global DPT Head: trainable params = {:,}".format(head_trainable["Global"]))
+    print("Local DPT Head: trainable params = {:,}".format(head_trainable["Local"]))
+    return counts
+
+
+class BilinearHeadShapeCheck:
+    """Capture and validate the first real training batch without another forward."""
+
+    EXPECTED = {
+        "branch0_projected": (96, 32, 40),
+        "branch0_bilinear": (96, 128, 160),
+        "branch1": (192, 64, 80),
+        "branch2": (384, 32, 40),
+        "branch3": (768, 16, 20),
+        "scratch0": (256, 128, 160),
+        "path1": (256, 256, 320),
+        "raw_output": (4, 448, 560),
+    }
+
+    def __init__(self, model: Distill3RStudent) -> None:
+        self.model = model
+        self.handles: List[Any] = []
+        self.shapes: Dict[str, Dict[str, List[Tuple[int, ...]]]] = {}
+
+    def _hook(self, head_name: str, stage: str):
+        def callback(_module: torch.nn.Module, _inputs: Tuple[Any, ...], output: torch.Tensor) -> None:
+            if not torch.is_tensor(output):
+                raise TypeError("{} {} shape hook expected a tensor".format(head_name, stage))
+            self.shapes.setdefault(head_name, {}).setdefault(stage, []).append(tuple(output.shape))
+
+        return callback
+
+    def register(self) -> None:
+        for head_name, dpt in self.model.dpt_heads():
+            modules = {
+                "branch0_projected": dpt.act_postprocess[0][0],
+                "branch0_bilinear": dpt.act_postprocess[0][1],
+                "branch1": dpt.act_postprocess[1],
+                "branch2": dpt.act_postprocess[2],
+                "branch3": dpt.act_postprocess[3],
+                "scratch0": dpt.scratch.layer_rn[0],
+                "path1": dpt.scratch.refinenet1,
+                "raw_output": dpt.head[4],
+            }
+            for stage, module in modules.items():
+                self.handles.append(module.register_forward_hook(self._hook(head_name, stage)))
+
+    def remove(self) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+
+    def validate(self, prediction: Mapping[str, torch.Tensor], batch: int, views: int) -> None:
+        try:
+            for head_name, _ in self.model.dpt_heads():
+                actual_stages = self.shapes.get(head_name, {})
+                for stage, expected in self.EXPECTED.items():
+                    calls = actual_stages.get(stage, [])
+                    if not calls:
+                        raise RuntimeError("{} {} did not run in the first batch".format(head_name, stage))
+                    wrong = [shape for shape in calls if shape[-3:] != expected]
+                    if wrong:
+                        raise RuntimeError(
+                            "{} {} expected [N,{}], got {}".format(
+                                head_name, stage, ",".join(map(str, expected)), wrong
+                            )
+                        )
+                    print("{} Head {}: {}".format(head_name, stage, list(calls[0])))
+            expected_xyz = (batch, views, 448, 560, 3)
+            for name in ("xyz_local", "xyz_global"):
+                if tuple(prediction[name].shape) != expected_xyz:
+                    raise RuntimeError("{} expected {}, got {}".format(name, expected_xyz, tuple(prediction[name].shape)))
+                print("{}: {}".format(name, list(prediction[name].shape)))
+            print("First-batch bilinear-head shape check passed")
+        finally:
+            self.remove()
+
+
+class FrozenUpdateCheck:
+    """Verify the frozen backbones and one gradient-bearing head tensor after step one."""
+
+    def __init__(self, model: Distill3RStudent) -> None:
+        self.model = model
+        self.before: Dict[str, torch.Tensor] = {}
+        self.head_parameter: Optional[torch.nn.Parameter] = None
+        self.head_name: Optional[str] = None
+
+    @staticmethod
+    def _first_parameter(module: torch.nn.Module, label: str) -> torch.nn.Parameter:
+        parameter = next(module.parameters(), None)
+        if parameter is None:
+            raise RuntimeError("{} has no parameter for update validation".format(label))
+        return parameter
+
+    def begin(self) -> None:
+        encoder_parameter = self._first_parameter(self.model.student.encoder, "encoder")
+        decoder_parameter = self._first_parameter(self.model.student.decoder, "decoder")
+        candidates = [
+            (name, parameter)
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+            and parameter.grad is not None
+            and torch.isfinite(parameter.grad).all()
+            and parameter.grad.detach().abs().max().item() > 0
+        ]
+        if not candidates:
+            raise RuntimeError("No finite non-zero DPT-head gradient exists before the first optimizer step")
+        self.head_name, self.head_parameter = max(
+            candidates, key=lambda item: item[1].grad.detach().abs().max().item()
+        )
+        self.before = {
+            "encoder": encoder_parameter.detach().clone(),
+            "decoder": decoder_parameter.detach().clone(),
+            "head": self.head_parameter.detach().clone(),
+        }
+
+    def finish(self) -> None:
+        if self.head_parameter is None:
+            raise RuntimeError("Frozen update check was not initialized")
+        current = {
+            "encoder": self._first_parameter(self.model.student.encoder, "encoder"),
+            "decoder": self._first_parameter(self.model.student.decoder, "decoder"),
+            "head": self.head_parameter,
+        }
+        changes = {
+            name: float((current[name].detach() - previous).abs().max().item())
+            for name, previous in self.before.items()
+        }
+        print(
+            "First-step update check: encoder_parameter_max_abs_change={} "
+            "decoder_parameter_max_abs_change={} head_parameter={} "
+            "head_parameter_max_abs_change={}".format(
+                changes["encoder"], changes["decoder"], self.head_name, changes["head"]
+            )
+        )
+        if changes["encoder"] != 0.0 or changes["decoder"] != 0.0:
+            raise RuntimeError("A frozen encoder/decoder parameter changed during optimizer step")
+        if changes["head"] <= 0.0:
+            raise RuntimeError("The selected gradient-bearing DPT-head parameter did not update")
 
 
 def _move_target(target: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
@@ -202,47 +432,74 @@ def train(
         )
 
     model = Distill3RStudent(config["student"]).to(device)
+    training_config = config["training"]
+    resume_value = resume_override or training_config.get("resume")
+    initial_checkpoint = training_config.get("initial_checkpoint")
+    if resume_value and initial_checkpoint:
+        print(
+            "Resume checkpoint {} takes precedence over model-only initialization {}".format(
+                resume_value, initial_checkpoint
+            )
+        )
+    elif initial_checkpoint:
+        load_bilinear_head_initialization(model, initial_checkpoint)
+    head_only_experiment = bool(
+        config["student"].get("freeze_encoder", False)
+        and config["student"].get("freeze_decoder", False)
+        and config["student"].get("dpt_branch0_resize") == "bilinear"
+    )
+    if head_only_experiment and not resume_value and not initial_checkpoint:
+        raise ValueError(
+            "The bilinear-head experiment requires training.initial_checkpoint; "
+            "random initialization is not allowed"
+        )
+    model.train()
+    if head_only_experiment:
+        for head_name, dpt in model.dpt_heads():
+            print("{} Head branch0 resize: {}".format(head_name, dpt.act_postprocess[0][1]))
+        validate_head_only_training(model)
     loss_function = ScaredDistillationLoss(config["loss"]).to(device)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    initial_learning_rate = float(config["training"]["learning_rate"])
+    if not parameters:
+        raise RuntimeError("The optimizer has no trainable parameters")
+    initial_learning_rate = float(training_config["learning_rate"])
     minimum_learning_rate = float(
-        config["training"].get("min_learning_rate", 0.0)
+        training_config.get("min_learning_rate", 0.0)
     )
     optimizer = torch.optim.AdamW(
         parameters,
         lr=initial_learning_rate,
-        weight_decay=float(config["training"].get("weight_decay", 0.0)),
+        weight_decay=float(training_config.get("weight_decay", 0.0)),
     )
-    accumulation = int(config["training"].get("gradient_accumulation_steps", 1))
+    accumulation = int(training_config.get("gradient_accumulation_steps", 1))
     if accumulation <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
-    epochs = int(config["training"]["epochs"])
+    epochs = int(training_config["epochs"])
     updates_per_epoch = math.ceil(len(train_loader) / accumulation)
     scheduler = _build_scheduler(
         optimizer,
         total_steps=max(updates_per_epoch * epochs, 1),
-        warmup_steps=int(config["training"].get("warmup_steps", 0)),
+        warmup_steps=int(training_config.get("warmup_steps", 0)),
         initial_learning_rate=initial_learning_rate,
         minimum_learning_rate=minimum_learning_rate,
     )
     amp_enabled, amp_dtype, scaler_enabled = _amp_settings(
-        config["training"], device
+        training_config, device
     )
     scaler = torch.cuda.amp.GradScaler(
         enabled=scaler_enabled,
-        init_scale=float(config["training"].get("amp_initial_scale", 128.0)),
+        init_scale=float(training_config.get("amp_initial_scale", 128.0)),
         growth_interval=int(
-            config["training"].get("amp_growth_interval", 2000)
+            training_config.get("amp_growth_interval", 2000)
         ),
     )
-    output_dir = ensure_dir(config["training"]["output_dir"])
+    output_dir = ensure_dir(training_config["output_dir"])
     log_path = output_dir / "metrics.jsonl"
 
     start_epoch = 0
     global_step = 0
-    resume_value = resume_override or config["training"].get("resume")
     if resume_value:
-        resume_path = Path(resume_value)
+        resume_path = _resolve_project_path(resume_value)
         checkpoint = torch.load(str(resume_path), map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -273,6 +530,12 @@ def train(
         )
     )
     optimizer.zero_grad(set_to_none=True)
+    shape_check: Optional[BilinearHeadShapeCheck] = None
+    if head_only_experiment:
+        shape_check = BilinearHeadShapeCheck(model)
+        shape_check.register()
+    update_check = FrozenUpdateCheck(model) if head_only_experiment else None
+    update_check_complete = False
     for epoch in range(start_epoch, epochs):
         model.train()
         for batch_index, batch in enumerate(train_loader):
@@ -288,6 +551,13 @@ def train(
                 enabled=amp_enabled, dtype=amp_dtype
             ):
                 prediction = model(images)
+            if shape_check is not None:
+                shape_check.validate(
+                    prediction,
+                    batch=int(images.shape[0]),
+                    views=int(images.shape[1]),
+                )
+                shape_check = None
             loss, logs = loss_function(
                 prediction,
                 target,
@@ -320,11 +590,16 @@ def train(
                     torch.nn.utils.clip_grad_norm_(parameters, clip_norm)
                 step_succeeded = True
                 if not dry_run:
+                    if update_check is not None and not update_check_complete:
+                        update_check.begin()
                     previous_scale = scaler.get_scale()
                     scaler.step(optimizer)
                     scaler.update()
                     step_succeeded = scaler.get_scale() >= previous_scale
                     if step_succeeded:
+                        if update_check is not None and not update_check_complete:
+                            update_check.finish()
+                            update_check_complete = True
                         scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 if not step_succeeded:

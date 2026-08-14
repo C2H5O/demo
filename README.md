@@ -322,6 +322,69 @@ the optional interactive point-cloud viewer, install
 `requirements-visualization.txt`, add `--serve --host 0.0.0.0 --port 8080`, and
 forward the server port over SSH.
 
+## Formal bilinear-branch0 head retraining control
+
+`configs/student_distillation_head_bilinear.yaml` is independent from the
+baseline configuration. It restores model tensors from the trained baseline,
+strictly discards only the four obsolete Global/Local branch0 transposed-
+convolution tensors, freezes DUNE and Fast3R in evaluation mode, and optimizes
+all parameters in both DPT heads. Branch1/2/3, RefineNet, the regression head,
+the final bilinear x1.75 resize, losses, eight-frame sampling, and 448x560 I/O
+remain unchanged.
+
+Run the one-batch forward/backward check first; it does not update parameters:
+
+```bash
+bash scripts/train_student_head_bilinear.sh --dry-run
+```
+
+Then start the complete independent run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_student_head_bilinear.sh
+```
+
+Resume only this new experiment (this restores its optimizer and scheduler):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_student_head_bilinear.sh \
+  --resume outputs/student_distill3r_448x560_bilinear_head/last.pt
+```
+
+Evaluate with the unchanged Endo3R protocol:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/evaluate_student_head_bilinear.sh
+```
+
+After training, trace the exact same baseline and experiment sample:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python diagnostics/trace_distill3r_artifacts.py \
+  --config configs/student_distillation.yaml \
+  --checkpoint outputs/student_distill3r_448x560/last.pt \
+  --split test --sequence-id dataset_8/keyframe_0 \
+  --clip-offset 0 --frame-index 0 --seed 0 \
+  --output-dir diagnostics/artifact_trace_trained_baseline
+
+CUDA_VISIBLE_DEVICES=0 python diagnostics/trace_distill3r_artifacts.py \
+  --config configs/student_distillation_head_bilinear.yaml \
+  --checkpoint outputs/student_distill3r_448x560_bilinear_head/last.pt \
+  --split test --sequence-id dataset_8/keyframe_0 \
+  --clip-offset 0 --frame-index 0 --seed 0 \
+  --output-dir diagnostics/artifact_trace_trained_bilinear_head
+
+python diagnostics/compare_trained_artifact_traces.py \
+  --baseline-trace diagnostics/artifact_trace_trained_baseline \
+  --experiment-trace diagnostics/artifact_trace_trained_bilinear_head \
+  --output-dir diagnostics/trained_head_artifact_comparison
+```
+
+The comparison checks that both traces identify the same sample, reports
+mod-4/mod-8/mod-14 phase statistics for branch0, scratch0, path1, and depth,
+and writes `depth_original_dpt.*` plus `depth_bilinear_head.*` using one shared
+Magma `vmin`/`vmax` range.
+
 ## Single-forward artifact trace
 
 `diagnostics/trace_distill3r_artifacts.py` locates where the regular token-grid

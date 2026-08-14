@@ -7,11 +7,17 @@ import types
 import pytest
 import torch
 
-from models.student.distill3r_wrapper import Distill3RStudent, _pinned_dune_hub
+from models.student.distill3r_wrapper import (
+    BilinearResize,
+    Distill3RStudent,
+    _pinned_dune_hub,
+)
 from trainers.student_distillation_trainer import (
     _amp_settings,
     _build_scheduler,
+    load_bilinear_head_initialization,
     train,
+    validate_head_only_training,
 )
 from utils.config import load_config
 
@@ -132,6 +138,59 @@ class _FakeOfficialDistill3R(torch.nn.Module):
         return outputs
 
 
+class _FakeDPT(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.act_postprocess = torch.nn.ModuleList(
+            [
+                torch.nn.Sequential(
+                    torch.nn.Conv2d(384, 96, 1),
+                    torch.nn.ConvTranspose2d(96, 96, 4, stride=4),
+                ),
+                torch.nn.Sequential(
+                    torch.nn.Conv2d(384, 192, 1),
+                    torch.nn.ConvTranspose2d(192, 192, 2, stride=2),
+                ),
+                torch.nn.Sequential(torch.nn.Conv2d(384, 384, 1)),
+                torch.nn.Sequential(
+                    torch.nn.Conv2d(384, 768, 1),
+                    torch.nn.Conv2d(768, 768, 3, stride=2, padding=1),
+                ),
+            ]
+        )
+        self.scratch = torch.nn.Module()
+        self.scratch.layer_rn = torch.nn.ModuleList(
+            [torch.nn.Conv2d(channels, 256, 3, padding=1) for channels in (96, 192, 384, 768)]
+        )
+        self.scratch.refinenet1 = torch.nn.Conv2d(256, 256, 3, padding=1)
+        self.scratch.refinenet2 = torch.nn.Conv2d(256, 256, 3, padding=1)
+        self.scratch.refinenet3 = torch.nn.Conv2d(256, 256, 3, padding=1)
+        self.scratch.refinenet4 = torch.nn.Conv2d(256, 256, 3, padding=1)
+        self.head = torch.nn.Sequential(
+            torch.nn.Conv2d(256, 128, 3, padding=1),
+            torch.nn.Upsample(scale_factor=1.75, mode="bilinear", align_corners=True),
+            torch.nn.Conv2d(128, 128, 3, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(128, 4, 1),
+        )
+
+
+class _FakeHead(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dpt = _FakeDPT()
+
+
+class _FakeStructuredDistill3R(torch.nn.Module):
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+        self.encoder = torch.nn.Linear(3, 4)
+        self.decoder = torch.nn.Linear(4, 4)
+        self.decoder.dec_blocks = torch.nn.ModuleList()
+        self.downstream_head = _FakeHead()
+        self.downstream_head_local = _FakeHead()
+
+
 def test_official_distill3r_adapter_preserves_448x560_contract() -> None:
     config = load_config("configs/student_distillation.yaml")["student"]
     model = Distill3RStudent(config, model_factory=_FakeOfficialDistill3R)
@@ -163,6 +222,69 @@ def test_distill3r_adapter_rejects_other_runtime_resolution() -> None:
 
     with pytest.raises(ValueError, match="expects 448x560"):
         model(torch.rand(1, 2, 3, 448, 546))
+
+
+def test_bilinear_head_experiment_replaces_only_branch0_and_freezes_backbones() -> None:
+    config = load_config("configs/student_distillation_head_bilinear.yaml")["student"]
+    model = Distill3RStudent(config, model_factory=_FakeStructuredDistill3R)
+
+    for _, dpt in model.dpt_heads():
+        resize = dpt.act_postprocess[0][1]
+        assert isinstance(resize, BilinearResize)
+        assert resize(torch.rand(1, 96, 3, 5)).shape == (1, 96, 12, 20)
+        assert isinstance(dpt.act_postprocess[1][1], torch.nn.ConvTranspose2d)
+        assert dpt.act_postprocess[1][1].kernel_size == (2, 2)
+        assert dpt.head[1].scale_factor == 1.75
+
+    model.train()
+    counts = validate_head_only_training(model)
+    assert counts["encoder_trainable"] == 0
+    assert counts["decoder_trainable"] == 0
+    assert counts["global_head_trainable"] > 0
+    assert counts["local_head_trainable"] > 0
+    assert model.student.encoder.training is False
+    assert model.student.decoder.training is False
+    assert model.student.downstream_head.training is True
+    assert model.student.downstream_head_local.training is True
+
+
+def test_bilinear_initialization_ignores_exactly_old_branch0_keys(tmp_path) -> None:
+    baseline_config = load_config("configs/student_distillation.yaml")["student"]
+    baseline = Distill3RStudent(baseline_config, model_factory=_FakeStructuredDistill3R)
+    checkpoint = tmp_path / "baseline.pt"
+    torch.save({"model": baseline.state_dict(), "optimizer": {"must": "not load"}}, checkpoint)
+
+    experiment_config = load_config("configs/student_distillation_head_bilinear.yaml")["student"]
+    experiment = Distill3RStudent(experiment_config, model_factory=_FakeStructuredDistill3R)
+    load_bilinear_head_initialization(experiment, checkpoint)
+
+    assert isinstance(
+        experiment.student.downstream_head.dpt.act_postprocess[0][1], BilinearResize
+    )
+    assert torch.equal(experiment.student.encoder.weight, baseline.student.encoder.weight)
+
+
+def test_bilinear_experiment_preserves_baseline_data_loss_and_resolution() -> None:
+    baseline = load_config("configs/student_distillation.yaml")
+    experiment = load_config("configs/student_distillation_head_bilinear.yaml")
+
+    assert experiment["dataset"] == baseline["dataset"]
+    assert experiment["teacher"] == baseline["teacher"]
+    assert experiment["loss"] == baseline["loss"]
+    assert experiment["dataloader"] == baseline["dataloader"]
+    for name, value in baseline["training"].items():
+        if name != "output_dir":
+            assert experiment["training"][name] == value
+    for name, value in baseline["student"].items():
+        if name != "freeze_encoder":
+            assert experiment["student"][name] == value
+    assert experiment["dataset"]["clip_length"] == 8
+    assert (experiment["student"]["image_height"], experiment["student"]["image_width"]) == (448, 560)
+    assert experiment["student"]["freeze_encoder"] is True
+    assert experiment["student"]["freeze_decoder"] is True
+    assert experiment["student"]["dpt_branch0_resize"] == "bilinear"
+    assert experiment["training"]["initial_checkpoint"] == "./outputs/student_distill3r_448x560/last.pt"
+    assert experiment["training"]["output_dir"] == "./outputs/student_distill3r_448x560_bilinear_head"
 
 
 def test_distill3r_requires_configured_local_checkpoint(tmp_path) -> None:
