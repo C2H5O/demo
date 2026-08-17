@@ -47,6 +47,16 @@ VDA_METRIC_NAMES = (
 )
 
 
+def _select_vda_evaluation_config(
+    config: Dict[str, Any],
+) -> Tuple[Dict[str, Any], bool]:
+    """Prefer an explicit VDA section while preserving legacy configs."""
+
+    has_vda_config = "vda_evaluation" in config
+    selected = config.get("vda_evaluation", config.get("evaluation", {}))
+    return dict(selected), has_vda_config
+
+
 # ---------------------------------------------------------------------------
 # BEGIN UNMODIFIED VIDEO-DEPTH-ANYTHING EVALUATION CORE
 # Source:
@@ -679,7 +689,9 @@ def evaluate(
 ) -> Dict[str, Any]:
     """Project adapter around the unchanged VDA evaluation core."""
     config = load_config(config_path)
-    eval_config = dict(config.get("evaluation", {}))
+    # A dedicated section lets an experiment select VDA as its primary test
+    # protocol while retaining the existing Endo3R ``evaluation`` section.
+    eval_config, has_vda_config = _select_vda_evaluation_config(config)
     split = split_override or str(eval_config.get("split", "test"))
     teacher_cache_root = (
         _teacher_cache_split_root(teacher_cache_override, split)
@@ -714,7 +726,14 @@ def evaluate(
                 )
             )
         default_output = teacher_cache_root / "evaluation_vda.json"
-    output_path = output_override or default_output
+    configured_output = (
+        Path(eval_config["output"])
+        if has_vda_config
+        and teacher_cache_root is None
+        and eval_config.get("output")
+        else None
+    )
+    output_path = output_override or configured_output or default_output
     ensure_dir(output_path.parent)
     device = torch.device(
         "cpu"

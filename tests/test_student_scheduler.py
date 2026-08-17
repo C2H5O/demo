@@ -285,6 +285,8 @@ def test_bilinear_experiment_preserves_baseline_data_loss_and_resolution() -> No
     assert experiment["student"]["dpt_branch0_resize"] == "bilinear"
     assert experiment["training"]["initial_checkpoint"] == "./outputs/student_distill3r_448x560/last.pt"
     assert experiment["training"]["output_dir"] == "./outputs/student_distill3r_448x560_bilinear_head"
+    assert experiment["vda_evaluation"]["protocol"] == "video-depth-anything-depth"
+    assert experiment["evaluation"]["protocol"] == "endo3r"
 
 
 def test_distill3r_requires_configured_local_checkpoint(tmp_path) -> None:

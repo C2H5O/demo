@@ -351,10 +351,18 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/train_student_head_bilinear.sh \
   --resume outputs/student_distill3r_448x560_bilinear_head/last.pt
 ```
 
-Evaluate with the unchanged Endo3R protocol:
+Run the experiment's primary test with the existing Video-Depth-Anything
+protocol (AbsRel, RMSE, delta1):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/evaluate_student_head_bilinear.sh
+```
+
+Endo3R remains available as an optional retained comparison, but is not used
+by the command above:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/evaluate_student_head_bilinear_endo3r.sh
 ```
 
 After training, trace the exact same baseline and experiment sample:
@@ -572,8 +580,11 @@ performance ranking.
 
 ## Video-Depth-Anything depth evaluation
 
-`evaluate_vda.py` is a separate evaluation path that reads the existing
-`configs/student_distillation.yaml`; no additional evaluation config is used.
+`evaluate_vda.py` is a separate evaluation path. It prefers a dedicated
+`vda_evaluation` section when present, allowing the bilinear-head experiment to
+use VDA as its primary test while retaining its separate Endo3R `evaluation`
+section. Older configs without `vda_evaluation` continue to fall back to the
+existing `evaluation` settings.
 Project adaptation is limited to SCARED discovery, numeric RGB/GT pairing,
 overlapping Distill3R inference, and conversion of `xyz_local[..., 2]` depth to the
 disparity input expected by the upstream evaluator. The scale-and-shift

@@ -9,12 +9,14 @@ from evaluation.evaluate_vda import (
     _find_sequence_gt_depths,
     _load_student_memory_efficient,
     _load_teacher_cache_clip,
+    _select_vda_evaluation_config,
     _streaming_metrics,
     _streaming_scale_shift,
     _student_depth_to_vda_disparity,
     evaluate,
     evaluate_depth_core,
 )
+from utils.config import load_config
 
 
 def test_output_adapter_converts_depth_to_disparity() -> None:
@@ -23,6 +25,42 @@ def test_output_adapter_converts_depth_to_disparity() -> None:
     disparity = _student_depth_to_vda_disparity(depth)
 
     np.testing.assert_allclose(disparity, [[[1.0, 0.5, 0.25]]])
+
+
+def test_bilinear_experiment_selects_vda_without_removing_endo3r() -> None:
+    config = load_config("configs/student_distillation_head_bilinear.yaml")
+
+    selected, explicit = _select_vda_evaluation_config(config)
+
+    assert explicit is True
+    assert selected["protocol"] == "video-depth-anything-depth"
+    assert selected["split"] == "test"
+    assert selected["checkpoint"].endswith("student_distill3r_448x560_bilinear_head/last.pt")
+    assert selected["output"].endswith("evaluation_test_vda.json")
+    assert config["evaluation"]["protocol"] == "endo3r"
+    assert config["evaluation"]["output"].endswith("evaluation_test_endo3r.json")
+
+
+def test_vda_legacy_config_falls_back_to_existing_evaluation_section() -> None:
+    config = {"evaluation": {"split": "test", "checkpoint": "student.pt"}}
+
+    selected, explicit = _select_vda_evaluation_config(config)
+
+    assert explicit is False
+    assert selected == config["evaluation"]
+
+
+def test_bilinear_evaluation_scripts_default_to_vda_and_retain_endo3r() -> None:
+    vda_script = open(
+        "scripts/evaluate_student_head_bilinear.sh", encoding="utf-8"
+    ).read()
+    endo3r_script = open(
+        "scripts/evaluate_student_head_bilinear_endo3r.sh", encoding="utf-8"
+    ).read()
+
+    assert "python evaluate_vda.py" in vda_script
+    assert "python evaluate.py" not in vda_script
+    assert "python evaluate.py" in endo3r_script
 
 
 def test_teacher_cache_adapter_uses_local_z_depth(tmp_path) -> None:
