@@ -40,16 +40,16 @@ python scripts/verify_environment.py
 
 `environment.yml` creates a new `vggtodistill3r` environment with Python
 3.10.20, PyTorch 2.3.1, torchvision/torchaudio 0.18.1/2.3.1, and the CUDA 12.1
-PyTorch runtime. Download Distill3R's official DUNE 448 checkpoint over HTTPS
+PyTorch runtime. Download the official DUNE-S/14 336 checkpoint over HTTPS
 to the exact path configured by `student.pretrained_checkpoint`:
 
 ```bash
 mkdir -p checkpoints/dune
 curl --fail --location --retry 5 --continue-at - \
-  https://download.europe.naverlabs.com/dune/dune_vitsmall14_448.pth \
-  --output checkpoints/dune/dune_vitsmall14_448.pth.part
-mv checkpoints/dune/dune_vitsmall14_448.pth.part \
-  checkpoints/dune/dune_vitsmall14_448.pth
+  https://download.europe.naverlabs.com/dune/dune_vitsmall14_336.pth \
+  --output checkpoints/dune/dune_vitsmall14_336.pth.part
+mv checkpoints/dune/dune_vitsmall14_336.pth.part \
+  checkpoints/dune/dune_vitsmall14_336.pth
 ```
 
 Model construction reads this configured file directly through DUNE's official
@@ -121,7 +121,7 @@ data/
 checkpoints/
   vggt_omega/vggt_omega_1b_512.pt
   teacher_lora/last.pt
-  dune/dune_vitsmall14_448.pth
+  dune/dune_vitsmall14_336.pth
 external/
   Distill3R/                  # pinned Git submodule (with recursive submodules)
   vggt-omega/                 # optional editable dependency checkout
@@ -322,15 +322,15 @@ the optional interactive point-cloud viewer, install
 `requirements-visualization.txt`, add `--serve --host 0.0.0.0 --port 8080`, and
 forward the server port over SSH.
 
-## Formal bilinear-branch0 head retraining control
+## Original ConvTranspose branch0 head retraining control
 
-`configs/student_distillation_head_bilinear.yaml` is independent from the
-baseline configuration. It restores model tensors from the trained baseline,
-strictly discards only the four obsolete Global/Local branch0 transposed-
-convolution tensors, freezes DUNE and Fast3R in evaluation mode, and optimizes
-all parameters in both DPT heads. Branch1/2/3, RefineNet, the regression head,
-the final bilinear x1.75 resize, losses, eight-frame sampling, and 448x560 I/O
-remain unchanged.
+The legacy path `configs/student_distillation_head_bilinear.yaml` now restores
+the original Distill3R branch0 `ConvTranspose2d(k=4, stride=4)` in both DPT
+heads. It restores all model tensors from the trained baseline, freezes DUNE
+and Fast3R in evaluation mode, and optimizes all parameters in both DPT heads.
+The final bilinear x1.75 resize, losses, eight-frame sampling, and 448x560 I/O
+remain unchanged. The filename is retained so existing launch commands keep
+working.
 
 Run the one-batch forward/backward check first; it does not update parameters:
 
@@ -364,34 +364,6 @@ by the command above:
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/evaluate_student_head_bilinear_endo3r.sh
 ```
-
-After training, trace the exact same baseline and experiment sample:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python diagnostics/trace_distill3r_artifacts.py \
-  --config configs/student_distillation.yaml \
-  --checkpoint outputs/student_distill3r_448x560/last.pt \
-  --split test --sequence-id dataset_8/keyframe_0 \
-  --clip-offset 0 --frame-index 0 --seed 0 \
-  --output-dir diagnostics/artifact_trace_trained_baseline
-
-CUDA_VISIBLE_DEVICES=0 python diagnostics/trace_distill3r_artifacts.py \
-  --config configs/student_distillation_head_bilinear.yaml \
-  --checkpoint outputs/student_distill3r_448x560_bilinear_head/last.pt \
-  --split test --sequence-id dataset_8/keyframe_0 \
-  --clip-offset 0 --frame-index 0 --seed 0 \
-  --output-dir diagnostics/artifact_trace_trained_bilinear_head
-
-python diagnostics/compare_trained_artifact_traces.py \
-  --baseline-trace diagnostics/artifact_trace_trained_baseline \
-  --experiment-trace diagnostics/artifact_trace_trained_bilinear_head \
-  --output-dir diagnostics/trained_head_artifact_comparison
-```
-
-The comparison checks that both traces identify the same sample, reports
-mod-4/mod-8/mod-14 phase statistics for branch0, scratch0, path1, and depth,
-and writes `depth_original_dpt.*` plus `depth_bilinear_head.*` using one shared
-Magma `vmin`/`vmax` range.
 
 ## Single-forward artifact trace
 

@@ -11,7 +11,7 @@ teacher:
 
 student:
   source: ./external/Distill3R
-  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
+  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
 
 output:
   root: ./outputs

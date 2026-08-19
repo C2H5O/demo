@@ -55,18 +55,18 @@ def load_bilinear_head_initialization(
     print("Initial checkpoint unexpected keys: {}".format(sorted(unexpected)))
     if missing:
         raise RuntimeError("Initial checkpoint has unplanned missing keys: {}".format(sorted(missing)))
-    if unexpected != BRANCH0_DECONV_STATE_KEYS:
+    expected_unexpected = (
+        BRANCH0_DECONV_STATE_KEYS
+        if model.config.dpt_branch0_resize == "bilinear"
+        else set()
+    )
+    if unexpected != expected_unexpected:
         raise RuntimeError(
-            "Initial checkpoint may ignore only the four old branch0 ConvTranspose "
-            "keys; expected={}, actual={}".format(
-                sorted(BRANCH0_DECONV_STATE_KEYS), sorted(unexpected)
+            "Initial checkpoint has unplanned unexpected keys; expected={}, actual={}".format(
+                sorted(expected_unexpected), sorted(unexpected)
             )
         )
-    print(
-        "Loaded model weights from {} and intentionally ignored only the old "
-        "Global/Local branch0 ConvTranspose weight and bias. Optimizer and "
-        "scheduler state were not loaded.".format(path)
-    )
+    print("Loaded model weights from {}. Optimizer and scheduler state were not loaded.".format(path))
 
 
 def validate_head_only_training(model: Distill3RStudent) -> Dict[str, int]:

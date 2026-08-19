@@ -15,7 +15,7 @@ EXPECTED_TORCH = "2.3.1"
 EXPECTED_CUDA = "12.1"
 EXPECTED_NUMPY = "1.26.4"
 EXPECTED_RESOLUTION = (448, 560)
-EXPECTED_DUNE_CHECKPOINT = "./checkpoints/dune/dune_vitsmall14_448.pth"
+EXPECTED_DUNE_CHECKPOINT = "./checkpoints/dune/dune_vitsmall14_336.pth"
 EXPECTED_GT_DIRECTORIES = ["data/depth", "data/scene_points"]
 
 

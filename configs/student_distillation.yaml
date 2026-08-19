@@ -79,8 +79,10 @@ student:
   conf_mode: [sigmoid, 0.0, 1.0]
   load_pretrained: true
   freeze_encoder: false
-  # Load the official DUNE-S/14 448 encoder checkpoint directly from this path.
-  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
+  # Preserve the original Distill3R DPT branch0 ConvTranspose2d implementation.
+  dpt_branch0_resize: deconv
+  # Load the official DUNE-S/14 336 encoder checkpoint directly from this path.
+  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
   # Keep DUNE imports pinned to the recursive Distill3R submodule checkout.
   use_local_dune_submodule: true
 
@@ -106,7 +108,7 @@ loss:
   supervised_depth_max_depth: 100.0
 
 dataloader:
-  batch_size: 1
+  batch_size: 8
   num_workers: 4
   pin_memory: false
   persistent_workers: false

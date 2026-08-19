@@ -72,9 +72,9 @@ student:
   # Formal control: both backbones stay fixed and in eval mode.
   freeze_encoder: true
   freeze_decoder: true
-  # The only architecture change: branch0 ConvTranspose4 -> bilinear x4.
-  dpt_branch0_resize: bilinear
-  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
+  # Restore the original Distill3R branch0 ConvTranspose2d(k=4, stride=4).
+  dpt_branch0_resize: deconv
+  pretrained_checkpoint: ./checkpoints/dune/dune_vitsmall14_336.pth
   use_local_dune_submodule: true
 
 loss:
@@ -99,7 +99,7 @@ loss:
   supervised_depth_max_depth: 100.0
 
 dataloader:
-  batch_size: 1
+  batch_size: 8
   num_workers: 4
   pin_memory: false
   persistent_workers: false

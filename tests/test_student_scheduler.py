@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from models.student.distill3r_wrapper import (
-    BilinearResize,
     Distill3RStudent,
     _pinned_dune_hub,
 )
@@ -95,7 +94,7 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     assert config["dataset"]["ground_truth"]["scale"] == 0.001
     assert config["loss"]["supervised_depth_min_depth"] == 1e-4
     assert config["loss"]["supervised_depth_max_depth"] == 100.0
-    assert config["dataloader"]["batch_size"] == 1
+    assert config["dataloader"]["batch_size"] == 8
     assert config["training"]["gradient_accumulation_steps"] == 32
     assert config["training"]["amp_dtype"] == "auto"
     assert config["training"]["amp_initial_scale"] == 128.0
@@ -106,8 +105,9 @@ def test_rectangular_training_resolution_and_patch_grid() -> None:
     assert config["student"]["decoder_depth"] == 6
     assert config["student"]["decoder_attention_implementation"] == "flash_attention"
     assert config["student"]["pretrained_checkpoint"] == (
-        "./checkpoints/dune/dune_vitsmall14_448.pth"
+        "./checkpoints/dune/dune_vitsmall14_336.pth"
     )
+    assert config["student"]["dpt_branch0_resize"] == "deconv"
     assert config["student"]["conf_mode"] == ["sigmoid", 0.0, 1.0]
     assert config["student"]["use_local_dune_submodule"] is True
     assert 448 // 14 == 32
@@ -224,14 +224,15 @@ def test_distill3r_adapter_rejects_other_runtime_resolution() -> None:
         model(torch.rand(1, 2, 3, 448, 546))
 
 
-def test_bilinear_head_experiment_replaces_only_branch0_and_freezes_backbones() -> None:
+def test_original_head_uses_convtranspose_and_freezes_backbones() -> None:
     config = load_config("configs/student_distillation_head_bilinear.yaml")["student"]
     model = Distill3RStudent(config, model_factory=_FakeStructuredDistill3R)
 
     for _, dpt in model.dpt_heads():
         resize = dpt.act_postprocess[0][1]
-        assert isinstance(resize, BilinearResize)
-        assert resize(torch.rand(1, 96, 3, 5)).shape == (1, 96, 12, 20)
+        assert isinstance(resize, torch.nn.ConvTranspose2d)
+        assert resize.kernel_size == (4, 4)
+        assert resize.stride == (4, 4)
         assert isinstance(dpt.act_postprocess[1][1], torch.nn.ConvTranspose2d)
         assert dpt.act_postprocess[1][1].kernel_size == (2, 2)
         assert dpt.head[1].scale_factor == 1.75
@@ -248,7 +249,7 @@ def test_bilinear_head_experiment_replaces_only_branch0_and_freezes_backbones() 
     assert model.student.downstream_head_local.training is True
 
 
-def test_bilinear_initialization_ignores_exactly_old_branch0_keys(tmp_path) -> None:
+def test_original_head_initialization_loads_convtranspose_weights(tmp_path) -> None:
     baseline_config = load_config("configs/student_distillation.yaml")["student"]
     baseline = Distill3RStudent(baseline_config, model_factory=_FakeStructuredDistill3R)
     checkpoint = tmp_path / "baseline.pt"
@@ -259,7 +260,8 @@ def test_bilinear_initialization_ignores_exactly_old_branch0_keys(tmp_path) -> N
     load_bilinear_head_initialization(experiment, checkpoint)
 
     assert isinstance(
-        experiment.student.downstream_head.dpt.act_postprocess[0][1], BilinearResize
+        experiment.student.downstream_head.dpt.act_postprocess[0][1],
+        torch.nn.ConvTranspose2d,
     )
     assert torch.equal(experiment.student.encoder.weight, baseline.student.encoder.weight)
 
@@ -282,7 +284,11 @@ def test_bilinear_experiment_preserves_baseline_data_loss_and_resolution() -> No
     assert (experiment["student"]["image_height"], experiment["student"]["image_width"]) == (448, 560)
     assert experiment["student"]["freeze_encoder"] is True
     assert experiment["student"]["freeze_decoder"] is True
-    assert experiment["student"]["dpt_branch0_resize"] == "bilinear"
+    assert experiment["student"]["dpt_branch0_resize"] == "deconv"
+    assert experiment["student"]["pretrained_checkpoint"].endswith(
+        "dune_vitsmall14_336.pth"
+    )
+    assert experiment["dataloader"]["batch_size"] == 8
     assert experiment["training"]["initial_checkpoint"] == "./outputs/student_distill3r_448x560/last.pt"
     assert experiment["training"]["output_dir"] == "./outputs/student_distill3r_448x560_bilinear_head"
     assert experiment["vda_evaluation"]["protocol"] == "video-depth-anything-depth"
@@ -300,7 +306,7 @@ def test_distill3r_requires_configured_local_checkpoint(tmp_path) -> None:
 def test_distill3r_hub_redirect_loads_configured_checkpoint(
     monkeypatch, tmp_path
 ) -> None:
-    checkpoint = tmp_path / "dune_vitsmall14_448.pth"
+    checkpoint = tmp_path / "dune_vitsmall14_336.pth"
     checkpoint.write_bytes(b"test checkpoint path")
     encoder = torch.nn.Identity()
     seen = []

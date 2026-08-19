@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +43,7 @@ class Distill3RStudentConfig:
     freeze_encoder: bool = False
     freeze_decoder: bool = False
     dpt_branch0_resize: str = "deconv"
-    pretrained_checkpoint: str = "./checkpoints/dune/dune_vitsmall14_448.pth"
+    pretrained_checkpoint: str = "./checkpoints/dune/dune_vitsmall14_336.pth"
     use_local_dune_submodule: bool = True
 
     def validate(self) -> None:
@@ -86,9 +85,10 @@ class Distill3RStudentConfig:
                 "student.use_local_dune_submodule must remain true so the configured "
                 "local DUNE checkpoint is used"
             )
-        if self.dpt_branch0_resize not in {"deconv", "bilinear"}:
+        if self.dpt_branch0_resize != "deconv":
             raise ValueError(
-                "student.dpt_branch0_resize must be deconv or bilinear"
+                "student.dpt_branch0_resize must be deconv so the original "
+                "Distill3R ConvTranspose2d branch is preserved"
             )
         if self.max_views <= 0 or self.max_parallel_views_for_head <= 0:
             raise ValueError("max_views and max_parallel_views_for_head must be positive")
@@ -101,28 +101,6 @@ class Distill3RStudentConfig:
                 "decoder_attention_implementation must be flash_attention, "
                 "pytorch_auto, or pytorch_naive"
             )
-
-
-class BilinearResize(nn.Module):
-    """Parameter-free resize used by the branch0 training control experiment."""
-
-    def __init__(self, scale_factor: float = 4.0, align_corners: bool = True) -> None:
-        super().__init__()
-        self.scale_factor = float(scale_factor)
-        self.align_corners = bool(align_corners)
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return F.interpolate(
-            tensor,
-            scale_factor=self.scale_factor,
-            mode="bilinear",
-            align_corners=self.align_corners,
-        )
-
-    def extra_repr(self) -> str:
-        return "scale_factor={}, align_corners={}".format(
-            self.scale_factor, self.align_corners
-        )
 
 
 def _ensure_official_sources_importable() -> None:
@@ -243,8 +221,10 @@ class Distill3RStudent(nn.Module):
         ):
             self.student = factory(**model_kwargs)
         self._set_decoder_attention_implementation(attention_implementation)
-        if branch0_resize == "bilinear":
-            self._replace_branch0_resize()
+        if branch0_resize != "deconv":
+            raise RuntimeError("Only the original Distill3R deconvolution is supported")
+        if model_factory is None:
+            self.validate_original_branch0_resize()
         if freeze_encoder:
             self._freeze_module("encoder", "DUNE encoder")
         if freeze_decoder:
@@ -296,7 +276,9 @@ class Distill3RStudent(nn.Module):
                 "{} DPT branch0 deconvolution changed: {}".format(head_name, actual)
             )
 
-    def _replace_branch0_resize(self) -> None:
+    def validate_original_branch0_resize(self) -> None:
+        """Verify that both official DPT heads retain their transposed convolution."""
+
         for name, dpt in self.dpt_heads():
             branches = getattr(dpt, "act_postprocess", None)
             if not isinstance(branches, nn.ModuleList) or len(branches) != 4:
@@ -305,7 +287,6 @@ class Distill3RStudent(nn.Module):
             if not isinstance(branch0, nn.Sequential) or len(branch0) != 2:
                 raise RuntimeError("{} DPT branch0 structure changed".format(name))
             self._validate_branch0_deconvolution(branch0[1], name)
-            branch0[1] = BilinearResize(scale_factor=4.0, align_corners=True)
 
     def train(self, mode: bool = True) -> "Distill3RStudent":
         super().train(mode)
@@ -411,7 +392,6 @@ def build_distill3r_student(config: Mapping[str, Any]) -> Distill3RStudent:
 
 
 __all__ = [
-    "BilinearResize",
     "Distill3RStudent",
     "Distill3RStudentConfig",
     "build_distill3r_student",
