@@ -12,3 +12,6 @@ __all__ = [
     "ScaredDistillationLossConfig",
     "SupervisedDepthLoss",
 ]
+from losses.vggtomast3r_loss import VggToMast3RLoss, VggToMast3RLossConfig
+
+__all__ += ["VggToMast3RLoss", "VggToMast3RLossConfig"]

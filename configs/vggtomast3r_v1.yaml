@@ -1,0 +1,110 @@
+experiment:
+  name: vggtomast3r_v1
+  hypothesis: explicit two-view MASt3R cross-attention improves depth, patch artifacts, and pair geometry
+  seed: 42
+
+seed: 42
+device: cuda
+
+dataset:
+  name: scared
+  root: ./data/SCARED
+  train_manifest_path: null
+  test_manifest_path: null
+  frame_source: auto
+  pair_mode: true
+  pair_stride: 2
+  pair_step: 1
+  image_height: 448
+  image_width: 560
+  resize_mode: resize
+  normalize_mode: minus_one_one
+  ground_truth:
+    enabled: true
+    required: true
+    directory_keys: [depth_directory, scene_points_directory]
+    relative_directories: [data/depth, data/scene_points]
+    scale: 0.001
+    channel: 0
+
+teacher:
+  pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
+  lora_checkpoint: ./checkpoints/teacher_lora/last.pt
+  cache_root: ./data/teacher_cache_vggtomast3r_pair2_lora_448x560
+  frozen: true
+  freeze_backbone: true
+  freeze_heads: true
+  image_resolution: 560
+  preprocess_mode: max_size
+  image_height: 448
+  image_width: 560
+  min_depth: 0.1
+  max_depth: 150.0
+  lora:
+    enabled: true
+    type: lora
+    rank: 4
+    alpha: 1
+    dropout: 0.0
+    target: mlp
+    target_layers: all
+
+student:
+  architecture: dune_mast3r
+  image_height: 448
+  image_width: 560
+  patch_size: 14
+  checkpoint: ./checkpoints/mast3r/dunemast3r_cvpr25_vitsmall.pth
+  dune_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
+  freeze_encoder: true
+  normalize_mode: minus_one_one
+
+loss:
+  lambda_point: 1.0
+  lambda_supervised_depth: 0.1
+  charbonnier_eps: 0.001
+  confidence_floor: 0.02
+  point_scale_mode: avg_distance
+  min_depth: 0.1
+  max_depth: 150.0
+  supervised_depth_scale_alignment: median
+  supervised_depth_loss: log_l1
+  supervised_depth_min_depth: 0.0001
+  supervised_depth_max_depth: 100.0
+  all_other_losses: disabled
+
+dataloader:
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+
+training:
+  epochs: 20
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-6
+  weight_decay: 0.05
+  warmup_fraction: 0.05
+  gradient_accumulation_steps: 1
+  gradient_clip_norm: 1.0
+  amp: true
+  amp_dtype: auto
+  log_every: 10
+  save_every: 1
+  output_dir: ./outputs/vggtomast3r_v1
+  resume: null
+
+evaluation:
+  checkpoint: ./outputs/vggtomast3r_v1/last.pt
+  split: test
+  protocol: endo3r
+  frame_source: auto
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  amp: true
+  patch_artifact: true
+  patch_size: 14
+  output: ./outputs/vggtomast3r_v1/evaluation_test_endo3r.json

@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import torch
+
+from evaluation.vggtomast3r_metrics import patch_boundary_artifact
+from losses.vggtomast3r_loss import VggToMast3RLoss
+
+
+def _loss_inputs():
+    pred_ref = torch.ones(1, 4, 5, 3, requires_grad=True)
+    pred_other = torch.ones(1, 4, 5, 3, requires_grad=True)
+    target = {
+        "pts3d_ref": torch.ones_like(pred_ref),
+        "pts3d_other_in_ref": torch.ones_like(pred_other),
+        "confidence_ref": torch.ones(1, 4, 5),
+        "confidence_other": torch.ones(1, 4, 5),
+        "valid_mask_ref": torch.ones(1, 4, 5, dtype=torch.bool),
+        "valid_mask_other": torch.ones(1, 4, 5, dtype=torch.bool),
+    }
+    target["pts3d_ref"][..., 2] = 2.0
+    target["pts3d_other_in_ref"][..., 2] = 2.0
+    prediction = {"pts3d_ref": pred_ref, "pts3d_other_in_ref": pred_other}
+    return prediction, target
+
+
+def test_gt_mask_and_only_two_losses() -> None:
+    prediction, target = _loss_inputs()
+    gt = torch.full((1, 4, 5), 2.0)
+    mask = torch.ones_like(gt, dtype=torch.bool)
+    mask[:, 0] = False
+    function = VggToMast3RLoss({"lambda_point": 1.0, "lambda_supervised_depth": 0.1})
+    total, logs = function(prediction, target, gt, mask)
+    total.backward()
+    assert torch.isfinite(total)
+    assert set(key for key in logs if key.startswith("loss_")) == {
+        "loss_total", "loss_teacher_point_raw", "loss_teacher_point_weighted",
+        "loss_scared_depth_raw", "loss_scared_depth_weighted",
+    }
+
+
+def test_patch_artifact_metric_detects_patch_boundary_jump() -> None:
+    depth = torch.ones(28, 28)
+    depth[:, 14:] += 5.0
+    result = patch_boundary_artifact(depth, patch_size=14)
+    assert result["patch_boundary_gradient"] > result["non_boundary_gradient"]
+    assert result["patch_artifact_ratio"] > 1.0
