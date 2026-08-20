@@ -7,6 +7,60 @@ from typing import Tuple
 import torch
 
 
+CAMERA_FROM_WORLD_CONVENTION = "camera-from-world: X_cam = R @ X_world + t"
+
+
+def _validate_extrinsics(extrinsics: torch.Tensor) -> None:
+    if extrinsics.shape[-2:] not in {(3, 4), (4, 4)}:
+        raise ValueError(
+            "extrinsics must end in [3,4] or [4,4], got {}".format(
+                tuple(extrinsics.shape)
+            )
+        )
+
+
+def world_to_camera(
+    points_world: torch.Tensor, camera_from_world: torch.Tensor
+) -> torch.Tensor:
+    """Transform ``[...,3]`` world points with ``X_cam = R X_world + t``."""
+    _validate_extrinsics(camera_from_world)
+    rotation = camera_from_world[..., :3, :3].to(points_world)
+    translation = camera_from_world[..., :3, 3].to(points_world)
+    for _ in range(points_world.ndim - translation.ndim):
+        rotation = rotation.unsqueeze(-3)
+        translation = translation.unsqueeze(-2)
+    return (
+        torch.matmul(points_world.unsqueeze(-2), rotation.transpose(-1, -2))
+        .squeeze(-2)
+        .add(translation)
+    )
+
+
+def camera_to_world(
+    points_camera: torch.Tensor, camera_from_world: torch.Tensor
+) -> torch.Tensor:
+    """Invert a camera-from-world pose for arbitrary point-map leading dims."""
+    _validate_extrinsics(camera_from_world)
+    rotation = camera_from_world[..., :3, :3].to(points_camera)
+    translation = camera_from_world[..., :3, 3].to(points_camera)
+    for _ in range(points_camera.ndim - translation.ndim):
+        rotation = rotation.unsqueeze(-3)
+        translation = translation.unsqueeze(-2)
+    return torch.matmul((points_camera - translation).unsqueeze(-2), rotation).squeeze(-2)
+
+
+def camera_to_camera(
+    points_source: torch.Tensor,
+    source_camera_from_world: torch.Tensor,
+    target_camera_from_world: torch.Tensor,
+) -> torch.Tensor:
+    """Move source-camera points into the target camera via world coordinates."""
+    return world_to_camera(
+        camera_to_world(points_source, source_camera_from_world),
+        target_camera_from_world,
+    )
+
+
 def unproject_depth_to_points(
     depth: torch.Tensor,
     intrinsics: torch.Tensor,
