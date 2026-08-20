@@ -148,16 +148,23 @@ python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
   --resume outputs/vggtomast3r_v1/last.pt
 
 python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
+python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
+  --protocol endo3r
 python visualize_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
   --checkpoint outputs/vggtomast3r_v1/last.pt
 ```
 
-Evaluation reports AbsRel, SqRel, RMSE, RMSE-log, delta1, delta2, and delta3
-through the existing Endo3R implementation. The optional patch diagnostic
-reports mean depth gradient on DUNE 14-pixel boundaries, mean non-boundary
-gradient, and their ratio. Visualization uses one fixed configured depth range
-for teacher/student/GT panels and labels PLY/NPZ output as
-`pair-local / reference-camera coordinates`.
+Evaluation defaults to the existing Video-Depth-Anything protocol: pair
+predictions are averaged by source frame, converted from reference-view Z depth
+to disparity, globally scale/shift aligned per sequence, and scored with
+AbsRel, RMSE, and delta1. It reuses the old evaluator's per-sequence memmap and
+two streaming metric passes. The retained `--protocol endo3r` path reports
+AbsRel, SqRel, RMSE, RMSE-log, delta1, delta2, and delta3, plus the optional
+DUNE 14-pixel patch-boundary diagnostic. Both paths infer the second camera by
+reversing the input pair; neither treats `pts3d_other_in_ref[...,2]` as
+second-camera depth. Visualization uses one fixed configured depth range for
+teacher/student/GT panels and labels PLY/NPZ output as `pair-local /
+reference-camera coordinates`.
 
 ## Known limitations and V2
 

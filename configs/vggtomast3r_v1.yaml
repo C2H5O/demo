@@ -97,6 +97,20 @@ training:
   resume: null
 
 evaluation:
+  protocol: vda
+
+vda_evaluation:
+  checkpoint: ./outputs/vggtomast3r_v1/last.pt
+  split: test
+  protocol: vda
+  frame_source: auto
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  amp: true
+  output: ./outputs/vggtomast3r_v1/evaluation_test_vda.json
+
+endo3r_evaluation:
   checkpoint: ./outputs/vggtomast3r_v1/last.pt
   split: test
   protocol: endo3r

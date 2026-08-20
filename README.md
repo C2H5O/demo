@@ -18,6 +18,7 @@ python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --spl
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --dry-run
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
 python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
+python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --protocol endo3r
 ```
 
 The pair output `pts3d_other_in_ref` is expressed in the reference camera. Its
@@ -25,6 +26,8 @@ Z coordinate is not second-camera depth; evaluation uses reverse-pair
 `pts3d_ref[...,2]` for the second frame. See
 [`docs/vggtomast3r_v1.md`](docs/vggtomast3r_v1.md) for the cache schema,
 coordinate derivation, checkpoint setup, loss, tests, and server commands.
+The default command uses the retained Video-Depth-Anything scale/shift-aligned
+depth protocol; `--protocol endo3r` keeps the existing Endo3R comparison.
 
 ## Training design
 

@@ -51,9 +51,13 @@ def evaluate(
     limit_pairs: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
-    eval_config = dict(config.get("evaluation", {}))
+    eval_config = dict(
+        config.get("endo3r_evaluation", config.get("evaluation", {}))
+    )
     if str(eval_config.get("protocol", "endo3r")).lower() != "endo3r":
-        raise ValueError("vggtomast3r V1 evaluation.protocol must be endo3r")
+        raise ValueError(
+            "vggtomast3r V1 endo3r_evaluation.protocol must be endo3r"
+        )
     split = split_override or str(eval_config.get("split", "test"))
     checkpoint_path = checkpoint_override or Path(eval_config["checkpoint"])
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
