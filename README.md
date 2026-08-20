@@ -4,6 +4,28 @@ This independent project implements a two-stage endoscopic reconstruction
 pipeline derived selectively from `vggt_omega_distill`, PC-Depth, and EndoDAC.
 Those source projects are reference-only and are not imported at runtime.
 
+## VGGT-to-MASt3R V1 experiment
+
+Branch `vggtomast3r` adds a strict two-frame `(I_t,I_{t+2})` experiment while
+preserving the complete Distill3R baseline. It uses the pinned official
+DUNE-S/14 encoder, MASt3R binocular decoder, and MASt3R dense point head at
+448x560. DUNE is frozen; only the MASt3R decoder and downstream heads train.
+
+Main entry points:
+
+```bash
+python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train
+python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --dry-run
+python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
+python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
+```
+
+The pair output `pts3d_other_in_ref` is expressed in the reference camera. Its
+Z coordinate is not second-camera depth; evaluation uses reverse-pair
+`pts3d_ref[...,2]` for the second frame. See
+[`docs/vggtomast3r_v1.md`](docs/vggtomast3r_v1.md) for the cache schema,
+coordinate derivation, checkpoint setup, loss, tests, and server commands.
+
 ## Training design
 
 1. Stage one loads pretrained VGGT-Omega, freezes every original backbone and
