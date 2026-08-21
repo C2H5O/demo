@@ -29,6 +29,8 @@ class _MockOfficial(nn.Module):
     def forward(self, view1, view2):
         image1, image2 = view1["img"], view2["img"]
         b, _, h, w = image1.shape
+        assert view1["instance"] == ["reference_{}".format(i) for i in range(b)]
+        assert view2["instance"] == ["other_{}".format(i) for i in range(b)]
         gain = self.mast3r.downstream_head1.weight.reshape(1, 1, 1)
         ref_z = image1.mean(dim=1) * gain
         other_z = image2.mean(dim=1) * 0 + 7.0 * gain
@@ -45,6 +47,24 @@ def test_dune_mast3r_output_shapes() -> None:
     outputs = model(torch.zeros(1, 2, 3, 448, 560))
     assert outputs["pts3d_ref"].shape == (1, 448, 560, 3)
     assert outputs["pts3d_other_in_ref"].shape == (1, 448, 560, 3)
+
+
+def test_official_view_metadata_disables_false_symmetrization() -> None:
+    student = _student()
+    image = torch.zeros(4, 3, 448, 560)
+
+    reference = student._view(image, "reference")
+    other = student._view(image, "other")
+
+    assert len(reference["instance"]) == len(other["instance"]) == 4
+    assert all(left != right for left, right in zip(reference["instance"], other["instance"]))
+    # Mirror the official is_symmetrized predicate: the ordinary batch must
+    # not look like interleaved (A,B),(B,A) pairs.
+    assert not all(
+        reference["instance"][i] == other["instance"][i + 1]
+        and reference["instance"][i + 1] == other["instance"][i]
+        for i in range(0, 4, 2)
+    )
 
 
 def test_dune_frozen_and_eval_during_train() -> None:

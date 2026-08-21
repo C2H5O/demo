@@ -125,10 +125,23 @@ class DuneMast3RStudent(nn.Module):
         return self
 
     @staticmethod
-    def _view(image: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _view(image: torch.Tensor, instance_prefix: str) -> Dict[str, Any]:
+        """Build the complete metadata contract expected by official MASt3R.
+
+        ``instance`` is consumed by DUSt3R's ``is_symmetrized`` helper.  These
+        V1 batches contain ordinary ordered pairs rather than interleaved
+        ``(A,B),(B,A)`` pairs, so every view gets a distinct stable identifier.
+        """
         batch, _, height, width = image.shape
         true_shape = torch.tensor([height, width], device=image.device, dtype=torch.long)
-        return {"img": image, "true_shape": true_shape.unsqueeze(0).expand(batch, -1)}
+        return {
+            "img": image,
+            "true_shape": true_shape.unsqueeze(0).expand(batch, -1),
+            "instance": [
+                "{}_{}".format(instance_prefix, index)
+                for index in range(batch)
+            ],
+        }
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         if images.ndim != 5 or images.shape[1] != 2 or images.shape[2] != 3:
@@ -136,7 +149,10 @@ class DuneMast3RStudent(nn.Module):
         batch, _, _, height, width = images.shape
         if (height, width) != (self.config.image_height, self.config.image_width):
             raise ValueError("DUNE-MASt3R V1 expects 448x560, got {}x{}".format(height, width))
-        pred1, pred2 = self.model(self._view(images[:, 0]), self._view(images[:, 1]))
+        pred1, pred2 = self.model(
+            self._view(images[:, 0], "reference"),
+            self._view(images[:, 1], "other"),
+        )
         if "pts3d" not in pred1 or "pts3d_in_other_view" not in pred2:
             raise KeyError("Official DUNE-MASt3R output is missing point maps")
         output = {
