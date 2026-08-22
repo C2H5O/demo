@@ -19,7 +19,7 @@ from datasets.scared_pair_dataset import (
 from losses.vggtomast3r_loss import VggToMast3RLoss
 from models.student.dune_mast3r_adapter import DuneMast3RStudent
 from trainers.student_distillation_trainer import _amp_settings, _build_scheduler
-from utils.checkpoint import atomic_torch_save
+from utils.checkpoint import atomic_torch_save, require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 from utils.seed import seed_everything
 
@@ -41,13 +41,14 @@ def _build_dataset(config: Dict[str, Any], split: str) -> ScaredPairDistillDatas
         rgb,
         Path(cache_root) / split,
         config.get("dataset", {}).get("ground_truth"),
-        expected_teacher_variant="lora",
-        expected_lora_checkpoint=str(config.get("teacher", {}).get("lora_checkpoint", "")),
+        expected_base_checkpoint=str(
+            config.get("teacher", {}).get("pretrained_checkpoint", "")
+        ),
     )
     missing = dataset.missing_cache_paths(limit=5)
     if missing:
         raise FileNotFoundError(
-            "Teacher pair caches are incomplete for {}: {}. Run generate_teacher_pair_cache.py first.".format(
+            "Teacher frame caches are incomplete for {}: {}. Run generate_teacher_frame_cache.py first.".format(
                 split, ", ".join(str(path) for path in missing)
             )
         )
@@ -141,6 +142,12 @@ def train(
     config = load_config(config_path)
     if not bool(config.get("teacher", {}).get("frozen", True)):
         raise ValueError("V1 requires a frozen teacher")
+    if str(config.get("teacher", {}).get("variant")) != "base":
+        raise ValueError("V1 frame caches require teacher.variant=base")
+    if config.get("teacher", {}).get("lora_checkpoint"):
+        raise ValueError("V1 frame caches must not use a LoRA checkpoint")
+    if str(config.get("teacher", {}).get("cache_protocol")) != "frame_local_v1":
+        raise ValueError("V1 requires teacher.cache_protocol=frame_local_v1")
     seed_everything(int(config.get("seed", 42)))
     requested_device = str(config.get("device", "cuda"))
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
@@ -179,6 +186,7 @@ def train(
     resume_value = resume_override or training_config.get("resume")
     if resume_value:
         checkpoint = torch.load(str(_project_path(resume_value)), map_location="cpu", weights_only=False)
+        require_student_cache_protocol(checkpoint)
         model.load_state_dict(checkpoint["model"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])

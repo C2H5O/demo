@@ -7,14 +7,15 @@ Those source projects are reference-only and are not imported at runtime.
 ## VGGT-to-MASt3R V1 experiment
 
 Branch `vggtomast3r` adds a strict two-frame `(I_t,I_{t+2})` experiment while
-preserving the complete Distill3R baseline. It uses the pinned official
+preserving the complete Distill3R baseline. Teacher supervision now comes from
+independent frozen base-teacher frame caches, without LoRA. It uses the pinned official
 DUNE-S/14 encoder, MASt3R binocular decoder, and MASt3R dense point head at
 448x560. DUNE is frozen; only the MASt3R decoder and downstream heads train.
 
 Main entry points:
 
 ```bash
-python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train
+python generate_teacher_frame_cache.py --config configs/vggtomast3r_v1.yaml --split train
 python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train --pair-index 0
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --dry-run
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
@@ -22,9 +23,9 @@ python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
 python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --protocol endo3r
 ```
 
-The pair output `pts3d_other_in_ref` is expressed in the reference camera. Its
-Z coordinate is not second-camera depth; evaluation uses reverse-pair
-`pts3d_ref[...,2]` for the second frame. See
+The student exposes `pts3d_ref` and `pts3d_other_local`, each in its own camera.
+Independent frame caches are composed at load time into 2-frame or 8-frame
+samples; they are never presented as a shared global/reference coordinate system. See
 [`docs/vggtomast3r_v1.md`](docs/vggtomast3r_v1.md) for the cache schema,
 coordinate derivation, checkpoint setup, loss, tests, and server commands.
 The default command uses the retained Video-Depth-Anything scale/shift-aligned
@@ -144,6 +145,7 @@ The default local asset layout is:
 data/
   SCARED/
   teacher_cache_endodac_lora_448x560/
+  teacher_cache_vggtomega_base_frame_448x560/
 checkpoints/
   vggt_omega/vggt_omega_1b_512.pt
   teacher_lora/last.pt

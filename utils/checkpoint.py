@@ -9,6 +9,21 @@ import torch
 import torch.nn as nn
 
 
+FRAME_LOCAL_CACHE_PROTOCOL = "frame_local_v1"
+
+
+def require_student_cache_protocol(
+    checkpoint: Dict[str, Any], expected: str = FRAME_LOCAL_CACHE_PROTOCOL
+) -> None:
+    """Reject checkpoints trained against a different teacher-target geometry."""
+    actual = checkpoint.get("config", {}).get("teacher", {}).get("cache_protocol")
+    if actual != expected:
+        raise ValueError(
+            "Student checkpoint uses incompatible teacher cache protocol {!r}; "
+            "expected {!r}".format(actual, expected)
+        )
+
+
 def atomic_torch_save(path: Path, state: Dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

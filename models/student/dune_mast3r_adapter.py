@@ -44,7 +44,7 @@ def _project_path(value: str) -> Path:
 
 
 class DuneMast3RStudent(nn.Module):
-    """Expose exactly two reference-frame point maps at full SCARED resolution."""
+    """Expose one camera-local point map for each image in an ordered pair."""
 
     def __init__(
         self,
@@ -149,15 +149,22 @@ class DuneMast3RStudent(nn.Module):
         batch, _, _, height, width = images.shape
         if (height, width) != (self.config.image_height, self.config.image_width):
             raise ValueError("DUNE-MASt3R V1 expects 448x560, got {}x{}".format(height, width))
-        pred1, pred2 = self.model(
-            self._view(images[:, 0], "reference"),
-            self._view(images[:, 1], "other"),
+        # Independent single-frame teacher targets have no shared world gauge.
+        # Decode both pair directions in one 2B call and take pred1 from each
+        # direction, because pred1 is expressed in its own reference camera.
+        bidirectional_reference = torch.cat((images[:, 0], images[:, 1]), dim=0)
+        bidirectional_other = torch.cat((images[:, 1], images[:, 0]), dim=0)
+        pred1, _ = self.model(
+            self._view(bidirectional_reference, "reference"),
+            self._view(bidirectional_other, "other"),
         )
-        if "pts3d" not in pred1 or "pts3d_in_other_view" not in pred2:
-            raise KeyError("Official DUNE-MASt3R output is missing point maps")
+        if "pts3d" not in pred1:
+            raise KeyError("Official DUNE-MASt3R output is missing pred1 pts3d")
+        if pred1["pts3d"].shape[0] != 2 * batch:
+            raise RuntimeError("Bidirectional MASt3R batch did not return 2B reference maps")
         output = {
-            "pts3d_ref": pred1["pts3d"],
-            "pts3d_other_in_ref": pred2["pts3d_in_other_view"],
+            "pts3d_ref": pred1["pts3d"][:batch],
+            "pts3d_other_local": pred1["pts3d"][batch:],
         }
         expected = (batch, height, width, 3)
         wrong = {key: tuple(value.shape) for key, value in output.items() if tuple(value.shape) != expected}

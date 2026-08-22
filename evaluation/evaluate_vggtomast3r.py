@@ -24,6 +24,7 @@ from evaluation.evaluate_depth import (
 )
 from evaluation.vggtomast3r_metrics import patch_boundary_artifact
 from models.student.dune_mast3r_adapter import DuneMast3RStudent
+from utils.checkpoint import require_student_cache_protocol
 from utils.config import load_config
 
 
@@ -61,6 +62,7 @@ def evaluate(
     split = split_override or str(eval_config.get("split", "test"))
     checkpoint_path = checkpoint_override or Path(eval_config["checkpoint"])
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    require_student_cache_protocol(checkpoint)
     model_config = checkpoint.get("config", {}).get("student", config["student"])
     device = torch.device(str(config.get("device", "cuda")))
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -118,10 +120,8 @@ def evaluate(
                 images = sample["images"].unsqueeze(0).to(device)
                 with torch.cuda.amp.autocast(enabled=amp_enabled):
                     forward = model(images)
-                    reverse = model(images.flip(1))
-                # Never use pts3d_other_in_ref[...,2] as second-camera depth.
                 depth_a = forward["pts3d_ref"][0, ..., 2]
-                depth_b = reverse["pts3d_ref"][0, ..., 2]
+                depth_b = forward["pts3d_other_local"][0, ..., 2]
                 _add_depth(depth_sums, depth_counts, sample["frame_names"][0], depth_a)
                 _add_depth(depth_sums, depth_counts, sample["frame_names"][1], depth_b)
         processed_pairs += len(pair_indices)
@@ -176,8 +176,8 @@ def evaluate(
         }
     result = {
         "protocol": "Official Endo3R SCARED depth evaluation",
-        "prediction_semantics": "each frame depth is pts3d_ref[...,2]; second frames use reverse pair inference",
-        "forbidden_semantics": "pts3d_other_in_ref[...,2] is not second-camera depth",
+        "prediction_semantics": "camera-A/B depth uses pts3d_ref/pts3d_other_local Z",
+        "other_output_semantics": "pts3d_other_local is camera-B local and is not fused with camera A",
         "checkpoint": str(checkpoint_path),
         "split": split,
         "processed_pair_count": processed_pairs,

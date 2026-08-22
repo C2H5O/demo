@@ -1,4 +1,4 @@
-"""Minimal V1 objective: pair-local teacher points plus reference SCARED depth."""
+"""Minimal V1 objective: per-frame local teacher points plus reference GT depth."""
 
 from __future__ import annotations
 
@@ -71,8 +71,8 @@ class VggToMast3RLoss(nn.Module):
     def _teacher_point_loss(
         self, prediction: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        pred = torch.stack((prediction["pts3d_ref"], prediction["pts3d_other_in_ref"]), dim=1)
-        teacher = torch.stack((target["pts3d_ref"], target["pts3d_other_in_ref"]), dim=1)
+        pred = torch.stack((prediction["pts3d_ref"], prediction["pts3d_other_local"]), dim=1)
+        teacher = torch.stack((target["pts3d_ref"], target["pts3d_other_local"]), dim=1)
         valid = torch.stack((target["valid_mask_ref"], target["valid_mask_other"]), dim=1).bool()
         confidence = torch.stack((target["confidence_ref"], target["confidence_other"]), dim=1).float()
         if pred.shape != teacher.shape or pred.ndim != 5 or pred.shape[-1] != 3:
@@ -106,7 +106,7 @@ class VggToMast3RLoss(nn.Module):
         point = 0.5 * (ref + other)
         return point, {
             "point_ref": ref,
-            "point_other_in_ref": other,
+            "point_other_local": other,
             "student_pair_scale": pred_scale.mean(),
             "teacher_pair_scale": teacher_scale.mean(),
             "teacher_valid_fraction": valid.float().mean(),

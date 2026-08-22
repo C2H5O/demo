@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 
 import numpy as np
+import pytest
 import torch
 
 import evaluate_vggtomast3r as dispatcher
@@ -12,14 +13,19 @@ from evaluation.evaluate_vggtomast3r_vda import (
     _select_evaluation_config,
     evaluate,
 )
+from utils.checkpoint import require_student_cache_protocol
 from utils.config import load_config
 
 
 class _ReferenceDepthModel(torch.nn.Module):
     def forward(self, images: torch.Tensor):
-        depth = images[:, 0, 0]
-        zeros = torch.zeros(*depth.shape, 2, dtype=depth.dtype)
-        return {"pts3d_ref": torch.cat((zeros, depth.unsqueeze(-1)), -1)}
+        depth_a = images[:, 0, 0]
+        depth_b = images[:, 1, 0]
+        zeros = torch.zeros(*depth_a.shape, 2, dtype=depth_a.dtype)
+        return {
+            "pts3d_ref": torch.cat((zeros, depth_a.unsqueeze(-1)), -1),
+            "pts3d_other_local": torch.cat((zeros, depth_b.unsqueeze(-1)), -1),
+        }
 
 
 def test_vggtomast3r_defaults_to_vda_and_retains_endo3r() -> None:
@@ -65,7 +71,7 @@ def test_dispatcher_routes_explicit_endo3r(monkeypatch, tmp_path) -> None:
     assert calls[0][0] == "endo3r"
 
 
-def test_pair_adapter_uses_forward_and_reverse_reference_depth() -> None:
+def test_pair_adapter_uses_two_camera_local_depths() -> None:
     images = torch.zeros(1, 2, 3, 2, 3)
     images[:, 0, 0] = 2.0
     images[:, 1, 0] = 4.0
@@ -84,3 +90,11 @@ def test_v1_vda_reuses_streaming_vda_core() -> None:
     assert "pts3d_other_in_ref" not in inspect.getsource(
         _pair_reference_disparities
     )
+
+
+def test_student_checkpoint_requires_frame_local_protocol() -> None:
+    require_student_cache_protocol(
+        {"config": {"teacher": {"cache_protocol": "frame_local_v1"}}}
+    )
+    with pytest.raises(ValueError, match="incompatible teacher cache protocol"):
+        require_student_cache_protocol({"config": {}})

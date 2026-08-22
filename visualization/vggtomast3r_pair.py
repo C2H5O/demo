@@ -1,4 +1,4 @@
-"""Fixed-range two-view V1 panel and pair-local/reference-camera PLY export."""
+"""Fixed-range V1 panel with separate camera-local point-cloud exports."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from PIL import Image
 
 from datasets.scared_pair_dataset import ScaredPairDistillDataset, make_scared_pair_rgb_dataset
 from models.student.dune_mast3r_adapter import DuneMast3RStudent
+from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 from visualization.scared_student import depth_to_magma, write_binary_ply
 
@@ -35,11 +36,11 @@ def export_pair_visualization(
     dataset = ScaredPairDistillDataset(
         rgb_dataset, Path(config["teacher"]["cache_root"]) / split,
         config["dataset"].get("ground_truth"),
-        expected_teacher_variant="lora",
-        expected_lora_checkpoint=str(config["teacher"].get("lora_checkpoint", "")),
+        expected_base_checkpoint=str(config["teacher"]["pretrained_checkpoint"]),
     )
     sample = dataset[pair_index]
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    require_student_cache_protocol(checkpoint)
     device = torch.device(str(config.get("device", "cuda")))
     model = DuneMast3RStudent(checkpoint.get("config", {}).get("student", config["student"]), device=device)
     model.load_state_dict(checkpoint["model"], strict=True)
@@ -47,7 +48,7 @@ def export_pair_visualization(
     with torch.inference_mode():
         prediction = model(sample["images"].unsqueeze(0).to(device))
     ref_points = prediction["pts3d_ref"][0].float().cpu()
-    other_points = prediction["pts3d_other_in_ref"][0].float().cpu()
+    other_points = prediction["pts3d_other_local"][0].float().cpu()
     student_depth = ref_points[..., 2].numpy()
     teacher_depth = sample["target"]["pts3d_ref"][..., 2].numpy()
     gt_depth = sample["ground_truth_depth_ref"].numpy()
@@ -73,22 +74,26 @@ def export_pair_visualization(
         Image.fromarray(image).save(output / "{}.png".format(name))
     Image.fromarray(np.concatenate(panels, axis=1)).save(output / "pair_panel.png")
 
-    points = torch.stack((ref_points, other_points)).numpy()
-    colors = np.stack((rgb_a, rgb_b))
-    valid = np.isfinite(points).all(axis=-1)
-    sampled = np.zeros(valid.shape, dtype=bool)
-    sampled[:, ::point_stride, ::point_stride] = True
-    valid &= sampled
-    write_binary_ply(output / "pair_local_reference_camera.ply", points[valid], colors[valid])
+    for name, points, colors in (
+        ("reference_camera_local", ref_points.numpy(), rgb_a),
+        ("other_camera_local", other_points.numpy(), rgb_b),
+    ):
+        valid = np.isfinite(points).all(axis=-1)
+        sampled = np.zeros(valid.shape, dtype=bool)
+        sampled[::point_stride, ::point_stride] = True
+        valid &= sampled
+        write_binary_ply(output / "{}.ply".format(name), points[valid], colors[valid])
     np.savez_compressed(
-        output / "pair_local_reference_camera.npz",
+        output / "pair_frame_local.npz",
         pts3d_ref=ref_points.numpy(),
-        pts3d_other_in_ref=other_points.numpy(),
-        coordinate_system=np.asarray("pair-local / reference-camera coordinates"),
+        pts3d_other_local=other_points.numpy(),
+        coordinate_system=np.asarray(
+            ["reference camera-local", "other camera-local"]
+        ),
         frame_names=np.asarray(sample["frame_names"]),
     )
     metadata: Dict[str, Any] = {
-        "coordinate_system": "pair-local / reference-camera coordinates",
+        "coordinate_system": "two independent camera-local coordinate systems",
         "depth_color_range": [min_depth, max_depth],
         "error_color_range": [0.0, max_depth - min_depth],
         "frame_names": sample["frame_names"],

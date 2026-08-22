@@ -52,7 +52,7 @@ def test_dune_mast3r_output_shapes() -> None:
     model = _student()
     outputs = model(torch.zeros(1, 2, 3, 448, 560))
     assert outputs["pts3d_ref"].shape == (1, 448, 560, 3)
-    assert outputs["pts3d_other_in_ref"].shape == (1, 448, 560, 3)
+    assert outputs["pts3d_other_local"].shape == (1, 448, 560, 3)
 
 
 def test_official_view_metadata_disables_false_symmetrization() -> None:
@@ -96,12 +96,12 @@ def test_reference_depth_is_z() -> None:
     assert torch.equal(model.reference_depth(images), output["pts3d_ref"][..., 2])
 
 
-def test_other_in_ref_is_not_other_camera_depth() -> None:
+def test_other_local_matches_reverse_reference_camera() -> None:
     model = _student()
     images = torch.stack((torch.ones(3, 448, 560), torch.full((3, 448, 560), 2.0))).unsqueeze(0)
     forward = model(images)
     reverse = model(images.flip(1))
-    assert not torch.equal(forward["pts3d_other_in_ref"][..., 2], reverse["pts3d_ref"][..., 2])
+    assert torch.equal(forward["pts3d_other_local"], reverse["pts3d_ref"])
 
 
 def test_resolution_448x560() -> None:
@@ -125,7 +125,7 @@ class _NonFiniteThenFinite(nn.Module):
         points = torch.full(
             (images.shape[0], 2, 3, 3), value, device=images.device
         )
-        return {"pts3d_ref": points, "pts3d_other_in_ref": points.clone()}
+        return {"pts3d_ref": points, "pts3d_other_local": points.clone()}
 
 
 def test_amp_nonfinite_output_retries_once_in_fp32() -> None:

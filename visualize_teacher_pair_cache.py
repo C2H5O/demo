@@ -3,71 +3,54 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from visualization.vggtomast3r_teacher_cache import (
-    _default_output,
-    export_teacher_pair_cache_visualization,
-    resolve_config_pair,
-)
+import numpy as np
+
+from datasets.scared_pair_dataset import make_scared_pair_rgb_dataset, pair_metadata
+from datasets.teacher_frame_cache import frame_metadata_from_pair
+from utils.config import load_config
+from visualization.vggtomast3r_teacher_frame_cache import export_composed_teacher_frames
+
+
+def _rgb(image) -> np.ndarray:
+    return np.round(
+        ((image.float().clamp(-1, 1) + 1.0) * 127.5).permute(1, 2, 0).numpy()
+    ).astype(np.uint8)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Visualize a VGG-to-MASt3R V1 teacher pair cache"
+        description="Visualize two independently inferred base-teacher frame caches"
     )
     parser.add_argument("--config", type=Path, default=Path("configs/vggtomast3r_v1.yaml"))
     parser.add_argument("--split", choices=("train", "test"), default="train")
-    parser.add_argument("--pair-index", type=int, default=None)
+    parser.add_argument("--pair-index", type=int, default=0)
     parser.add_argument(
-        "--sequence-id",
-        default=None,
-        help="Example: dataset_2/keyframe_1; use with --frame-id-a",
-    )
-    parser.add_argument("--frame-id-a", type=int, default=None)
-    parser.add_argument(
-        "--cache",
+        "--output-dir",
         type=Path,
-        default=None,
-        help="Direct cache path; bypasses config/split/pair-index resolution",
+        default=Path("outputs/vggtomast3r_teacher_frame_visualization"),
     )
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=Path("outputs/vggtomast3r_teacher_cache_visualization"),
-    )
-    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--min-depth", type=float, default=0.1)
     parser.add_argument("--max-depth", type=float, default=10.0)
     parser.add_argument("--point-stride", type=int, default=4)
-    parser.add_argument("--confidence-threshold", type=float, default=0.0)
     args = parser.parse_args()
 
-    rgb = None
-    expected_variant = None
-    expected_lora = None
-    if args.cache is None:
-        cache_path, rgb, config, pair_index = resolve_config_pair(
-            args.config,
-            args.split,
-            args.pair_index,
-            args.sequence_id,
-            args.frame_id_a,
-        )
-        print("Resolved pair_index={}".format(pair_index))
-        expected_variant = "lora"
-        expected_lora = str(config["teacher"].get("lora_checkpoint", ""))
-    else:
-        cache_path = args.cache
-    output_dir = args.output_dir or _default_output(cache_path, args.output_root)
-    output = export_teacher_pair_cache_visualization(
-        cache_path=cache_path,
-        output_dir=output_dir,
-        rgb=rgb,
-        min_depth=args.min_depth,
-        max_depth=args.max_depth,
-        point_stride=args.point_stride,
-        confidence_threshold=args.confidence_threshold,
-        expected_teacher_variant=expected_variant,
-        expected_lora_checkpoint=expected_lora,
+    config = load_config(args.config)
+    dataset = make_scared_pair_rgb_dataset(config["dataset"], args.split)
+    if not 0 <= args.pair_index < len(dataset):
+        parser.error("--pair-index is outside the dataset")
+    sample = dataset[args.pair_index]
+    frames = frame_metadata_from_pair(pair_metadata(dataset, args.pair_index))
+    rgb = np.stack([_rgb(image) for image in sample["images"]])
+    output = export_composed_teacher_frames(
+        Path(config["teacher"]["cache_root"]) / args.split,
+        frames,
+        args.output_dir,
+        (int(config["teacher"]["image_height"]), int(config["teacher"]["image_width"])),
+        str(config["teacher"]["pretrained_checkpoint"]),
+        rgb,
+        args.min_depth,
+        args.max_depth,
+        args.point_stride,
     )
     print(output)
 

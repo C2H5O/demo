@@ -1,207 +1,155 @@
 # VGGT-to-MASt3R V1
 
-## Branch and scientific hypothesis
+## 当前实验协议
 
-- Branch: `vggtomast3r`
-- Base: `origin/feature/distill3r-student` at `b311d13db39ab6f75499449588b3429350e7a309`
-- Question: replacing the single-frame Distill3R dense head with the official
-  DUNE encoder, binocular MASt3R decoder, and MASt3R point head should isolate
-  whether explicit two-view cross-attention improves depth accuracy, DUNE
-  patch/grid artifacts, and pair geometry consistency.
+- Branch：`vggtomast3r`
+- Base：`origin/feature/distill3r-student@b311d13`
+- Student 输入：ordered `(I_t,I_{t+2})`，`pair_stride=2`，`pair_step=1`
+- Teacher：冻结的 pretrained VGGT-Omega base；不注入、不加载 LoRA
+- Teacher 推理粒度：一次只输入一个 RGB frame
+- Teacher cache：每个源 frame 一个 FP32 NPZ；2 帧和 8 帧样本在读取时组合
+- 分辨率：`448×560`
 
-V1 changes the student architecture and cache granularity only. It does not add
-descriptor, confidence, pose, camera, temporal, smoothness, normal, global,
-local/global-consistency, or sparse-global-alignment losses.
+这一协议由用户在 2026-08-22 明确替换了原先的 LoRA two-frame teacher
+协议。它不再声称只改变 student architecture；teacher conditioning 和 teacher
+variant 都是实验变量，正式比较必须相应重跑 baseline。
 
-## Pinned official implementation
+## Teacher frame cache
 
-The project keeps the old `external/Distill3R` baseline and adds HTTPS
-submodules:
+入口：
 
-- `external/MASt3R` at `f5209afc300cec36239a7ac992263f36847bbba0`
-- `external/MASt3R/dust3r` at `3cc8c88c413bb9e34c41db0e0eef99c2ee010b12`
-- `external/DUNE` at `1e1a111c287b674b7af546e7b74db42255e9bcfa`
-
-No official source is modified. `models/student/official_mast3r.py` is the only
-external import/load boundary. It invokes official
-`load_dune_mast3r_model`, while replacing its runtime
-`torch.hub.load("naver/dune", ...)` call with the pinned local DUNE loader and
-local `dune_vitsmall14_448.pth`. This is necessary because the joint checkpoint
-intentionally omits DUNE backbone tensors and the official loader otherwise
-downloads them at runtime.
-
-## Architecture and parameter policy
-
-```text
-448x560 RGB pair in [-1,1]
-    -> frozen DUNE-S/14 encoder (32x40 token grid)
-    -> official MASt3R binocular decoder (trainable)
-    -> official MASt3R DPT point/descriptor/confidence heads (trainable)
-    -> expose pointmaps only
+```bash
+python generate_teacher_frame_cache.py \
+  --config configs/vggtomast3r_v1.yaml --split train
+python generate_teacher_frame_cache.py \
+  --config configs/vggtomast3r_v1.yaml --split test
 ```
 
-The checkpoint-compatible descriptor/confidence branches remain present, but
-V1 does not supervise or consume them. All DUNE parameters have
-`requires_grad=False`, the encoder remains in `eval()` during training, and the
-optimizer assertion rejects DUNE parameters. Unused MASt3R image encoder
-parameters are frozen; only `decoder_embed`, both decoder block stacks,
-`dec_norm`, and both downstream heads are trainable.
+兼容入口 `generate_teacher_pair_cache.py` 会调用相同的 frame generator，
+不会再运行 pair-conditioned teacher。该兼容入口不接受 `--limit`，因为 pair 数量
+与去重后的 frame 数量不同；小规模检查请直接使用 frame 入口的 `--limit`（单位为帧）。
 
-## Pair definition and input protocol
+Generator 强制：
 
-- Ordered pair: `(I_t, I_{t+2})`; direction is never shuffled.
-- `pair_stride: 2`, `pair_step: 1`, exactly two frames.
-- RGB, teacher, student, and GT remain `448x560`; no square crop.
-- DUNE patch size is 14, so the token grid is `32x40`.
+- `teacher.variant=base`
+- `teacher.frozen=true`
+- `teacher.lora_checkpoint=null`
+- `inject_lora=False`、`load_lora=False`
+- 输入 shape `[1,3,448,560]`，模型内部 sequence length 为 1
+- `cache_dtype=float32`
 
-The old 8-frame dataset, cache, student, trainer, evaluation, and configuration
-remain intact.
-
-## Coordinate systems and student output
-
-The existing VGGT-Omega convention is camera-from-world:
+默认目录：
 
 ```text
-X_cam = R X_world + t
+data/teacher_cache_vggtomega_base_frame_448x560/
+  train|test/
+    dataset_XX/keyframe_X/sequence_id/frame_FRAMEINDEX_FRAMEID.npz
 ```
 
-The adapter exposes:
+Schema `vggtomega-base-frame-v1`：
+
+```text
+dataset_id, keyframe_id, sequence_id
+frame_id, frame_index, frame_name
+image_shape, teacher_variant, inference_frame_count
+depth, xyz_local, confidence, valid_mask
+intrinsics, extrinsics
+coordinate_convention, cache_format_version
+base_checkpoint, metadata_json
+```
+
+`depth/xyz_local/confidence` 保存为 FP32。旧 pair cache、旧 8-frame cache、
+LoRA cache 或非单帧推理 cache 均不能通过新 reader 的 schema 检查。
+
+## 2 帧与 8 帧组合
+
+`datasets.teacher_frame_cache.compose_teacher_frame_caches` 接收有序的 2 个或
+8 个 frame metadata，并堆叠：
 
 ```python
 {
-    "pts3d_ref": ...,          # [B,448,560,3], frame A in camera A
-    "pts3d_other_in_ref": ..., # [B,448,560,3], frame B in camera A
+    "depth": ...,       # [T,H,W]
+    "xyz_local": ...,   # [T,H,W,3]
+    "confidence": ...,  # [T,H,W]
+    "valid_mask": ...,  # [T,H,W]
+    "intrinsics": ...,  # [T,3,3]
+    "extrinsics": ...,  # [T,3,4]
 }
 ```
 
-For B targets, the exporter computes
-`X_world_b = R_b.T @ (X_b - t_b)`, then
-`X_a = R_a @ X_world_b + t_a`. It never compares B-local teacher points to a
-B-in-A student output.
+这里的每一帧都在各自的 camera-local 坐标系。单帧独立推理不产生跨帧共享的
+world gauge，因此禁止从这些 cache 构造 `B-in-A`、global fused cloud 或跨帧 pose
+监督。8 帧组合只是复用八个独立 frame cache，不会重新运行 teacher。
 
-`pts3d_ref[...,2]` is reference-camera depth. In contrast,
-`pts3d_other_in_ref[...,2]` is **not** frame B depth. Full-frame evaluation runs
-the reverse pair `(I_b,I_a)` and uses the reverse prediction's
-`pts3d_ref[...,2]`.
+## Student 与 loss
 
-## Pair cache schema
+Student 继续使用 pinned official DUNE-S/14 + MASt3R binocular decoder/head。
+DUNE frozen/eval，decoder 与 downstream heads trainable。
 
-Default root:
-`data/teacher_cache_vggtomast3r_pair2_lora_448x560/{train,test}`.
-Base-teacher caches require an explicit, separate `--cache-root`.
+为匹配两个独立 local teacher target，训练把 `(A,B)` 和 `(B,A)` 合并成一个
+`2B` MASt3R batch，并分别取两半的 `pred1["pts3d"]`：
 
-Each `vggtomast3r-pair-v1` NPZ contains:
-
-```text
-frame_id_a, frame_id_b, frame_name_a, frame_name_b, pair_stride
-image_shape, teacher_variant, lora_checkpoint
-depth_a, depth_b
-xyz_local_a, xyz_local_b, xyz_global_a, xyz_global_b
-pts3d_a_in_a, pts3d_b_in_a
-confidence_a, confidence_b, valid_mask_a, valid_mask_b
-intrinsics_a, intrinsics_b, extrinsics_a, extrinsics_b
-coordinate_convention, cache_format_version, metadata_json
+```python
+{
+    "pts3d_ref": ...,         # A in camera A
+    "pts3d_other_local": ..., # B in camera B
+}
 ```
 
-The reader validates version, frame identity, stride, resolution, and pointmap
-shape, and explicitly rejects legacy 8-frame caches.
-
-## Loss
+不再暴露或监督 `pts3d_other_in_ref`。两帧 local maps 共同做
+confidence-weighted、joint-scale-normalized Charbonnier point loss；SCARED metric
+depth 仍只监督 `pts3d_ref[...,2]`：
 
 ```text
-L_total = 1.0 * L_teacher_point + 0.1 * L_SCARED_reference_depth
+L_total = 1.0 * L_teacher_frame_local_point
+        + 0.1 * L_SCARED_reference_depth
 ```
 
-`L_teacher_point` applies the existing average-distance scale convention jointly
-to both reference-camera pointmaps, then uses confidence-weighted Charbonnier
-XYZ distance. VGGT-Omega confidence is a detached weight only.
-`L_SCARED_reference_depth` reuses the existing GT mask, mm-to-m conversion,
-valid range, and log-L1 loss, only on `pts3d_ref[...,2]`. Unlike the original
-scale-aligned depth helper, V1 disables median scale alignment here. The point
-term already normalizes student and teacher independently; aligning the depth
-term as well makes the complete objective invariant to student output scale.
-That unconstrained direction can drive MASt3R's exponential depth
-parameterization to FP32 overflow. Direct metric-depth supervision is therefore
-the required scale anchor while retaining exactly the declared two loss terms.
-Logs include raw and weighted values for both terms.
+旧 pair-cache 协议训练出的 checkpoint 缺少 `teacher.cache_protocol=frame_local_v1`，
+trainer 会拒绝 resume，evaluation 与 visualization 也会拒绝加载，避免跨协议误用。
 
-## Workflow
+因为双向 local 解码把有效 decoder batch 扩成 `2B`，默认 dataloader batch 从
+4 调整为 2（有效方向 batch 仍为 4）；如显存允许可在 YAML 中提高。
 
-From a clean server:
+## 可视化
+
+```bash
+python visualize_teacher_pair_cache.py \
+  --config configs/vggtomast3r_v1.yaml --split train --pair-index 0
+```
+
+脚本从两个 frame cache 组合结果，同时输出固定色阶和 p1–p99 自适应色阶、原始
+FP32 NPY、confidence 与两个独立 camera-local PLY。它不会把两帧点云融合，并在
+metadata 中明确记录坐标警告。
+
+## 服务器流程
 
 ```bash
 git clone --recursive --branch vggtomast3r https://github.com/C2H5O/demo.git vggtomast3r
 cd vggtomast3r
 git submodule update --init --recursive
-
-# Reuse the server's working PyTorch/CUDA environment.
 pip install -r requirements.txt
 pip install -r requirements-vggtomast3r.txt
 bash scripts/download_vggtomast3r_checkpoints.sh
 python scripts/verify_vggtomast3r_environment.py
 
-# Place existing project assets at the configured relative paths:
+# Required assets:
 # data/SCARED
 # checkpoints/vggt_omega/vggt_omega_1b_512.pt
-# checkpoints/teacher_lora/last.pt
 
-python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train
-python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split test
-python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml \
-  --split train --pair-index 0
+python generate_teacher_frame_cache.py --config configs/vggtomast3r_v1.yaml --split train
+python generate_teacher_frame_cache.py --config configs/vggtomast3r_v1.yaml --split test
+python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train --pair-index 0
 
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --dry-run
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
-python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
-  --resume outputs/vggtomast3r_v1/last.pt
-
 python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
-python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
-  --protocol endo3r
-python visualize_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
-  --checkpoint outputs/vggtomast3r_v1/last.pt
+python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --protocol endo3r
 ```
 
-The teacher-cache visualizer reads the strict pair cache directly and never
-loads VGGT-Omega, DUNE-MASt3R, or a student checkpoint. It exports labeled RGB,
-local-depth, confidence, and pair-reference-Z panels plus four PLY files: one
-for each camera-local cloud, one teacher-global cloud, and one pair-local/
-reference-camera cloud.
-The B-in-A Z panel is explicitly labeled as not being camera-B depth. A cache
-can also be addressed directly with `--cache path/to/pair_*.npz`.
-Pairs from a training diagnostic can be located without knowing their shuffled
-batch index, for example:
+## 验证边界
 
-```bash
-python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml \
-  --split train --sequence-id dataset_2/keyframe_1 --frame-id-a 25
-```
-
-Evaluation defaults to the existing Video-Depth-Anything protocol: pair
-predictions are averaged by source frame, converted from reference-view Z depth
-to disparity, globally scale/shift aligned per sequence, and scored with
-AbsRel, RMSE, and delta1. It reuses the old evaluator's per-sequence memmap and
-two streaming metric passes. The retained `--protocol endo3r` path reports
-AbsRel, SqRel, RMSE, RMSE-log, delta1, delta2, and delta3, plus the optional
-DUNE 14-pixel patch-boundary diagnostic. Both paths infer the second camera by
-reversing the input pair; neither treats `pts3d_other_in_ref[...,2]` as
-second-camera depth. Visualization uses one fixed configured depth range for
-teacher/student/GT panels and labels PLY/NPZ output as `pair-local /
-reference-camera coordinates`.
-
-## Known limitations and V2
-
-- Full teacher cache generation and long training are intentionally not run on
-  a local development machine.
-- Real SCARED, VGGT-Omega, LoRA, joint MASt3R, and DUNE checkpoint loading must
-  be smoke-tested on the training server.
-- Pair geometry consistency is represented by both pointmaps in one reference
-  frame; an additional scalar metric is optional and does not block V1.
-- V1 does not run `sparse_global_alignment`.
-
-Planned V2 only:
-
-```text
-8-frame clip -> pair graph -> DUNE-MASt3R pair inference -> MASt3R matching
--> sparse global alignment -> camera poses + global reconstruction
-```
+本地 unit tests 不依赖真实 SCARED 或大 checkpoint。真实 base checkpoint 的
+单帧 448×560 forward、少量 cache smoke、训练 dry-run 与完整 cache/训练必须在
+GPU 服务器验证。本实现保留旧 Distill3R 8-frame dataset/cache/trainer，不覆盖旧
+cache root。

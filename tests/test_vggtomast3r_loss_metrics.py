@@ -13,15 +13,15 @@ def _loss_inputs():
     pred_other = torch.ones(1, 4, 5, 3, requires_grad=True)
     target = {
         "pts3d_ref": torch.ones_like(pred_ref),
-        "pts3d_other_in_ref": torch.ones_like(pred_other),
+        "pts3d_other_local": torch.ones_like(pred_other),
         "confidence_ref": torch.ones(1, 4, 5),
         "confidence_other": torch.ones(1, 4, 5),
         "valid_mask_ref": torch.ones(1, 4, 5, dtype=torch.bool),
         "valid_mask_other": torch.ones(1, 4, 5, dtype=torch.bool),
     }
     target["pts3d_ref"][..., 2] = 2.0
-    target["pts3d_other_in_ref"][..., 2] = 2.0
-    prediction = {"pts3d_ref": pred_ref, "pts3d_other_in_ref": pred_other}
+    target["pts3d_other_local"][..., 2] = 2.0
+    prediction = {"pts3d_ref": pred_ref, "pts3d_other_local": pred_other}
     return prediction, target
 
 

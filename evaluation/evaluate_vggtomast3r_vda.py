@@ -15,6 +15,7 @@ import torch
 import evaluation.evaluate_vda as vda_core
 from datasets.scared_pair_dataset import make_scared_pair_rgb_dataset
 from models.student.dune_mast3r_adapter import DuneMast3RStudent
+from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
 
@@ -42,6 +43,7 @@ def _load_model(
         checkpoint = torch.load(
             str(checkpoint_path), map_location="cpu", weights_only=False
         )
+    require_student_cache_protocol(checkpoint)
     checkpoint_config = (
         checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
     )
@@ -74,9 +76,8 @@ def _pair_reference_disparities(
 ) -> np.ndarray:
     """Predict camera-local A/B depth using reference output in both orders."""
     forward = model(images)
-    reverse = model(images.flip(1))
     depth_a = forward["pts3d_ref"][0, ..., 2].float().cpu().numpy()
-    depth_b = reverse["pts3d_ref"][0, ..., 2].float().cpu().numpy()
+    depth_b = forward["pts3d_other_local"][0, ..., 2].float().cpu().numpy()
     return np.stack(
         (
             vda_core._student_depth_to_vda_disparity(depth_a),
@@ -258,11 +259,11 @@ def evaluate(
         ),
         "skipped_sequences_without_gt": skipped_sequences,
         "prediction_semantics": (
-            "A/B camera-local depth uses pts3d_ref[...,2] from forward/reverse "
-            "pair inference, then reciprocal disparity"
+            "A/B camera-local depth uses pts3d_ref/pts3d_other_local Z, "
+            "then reciprocal disparity"
         ),
-        "forbidden_semantics": (
-            "pts3d_other_in_ref[...,2] is not second-camera depth"
+        "other_output_semantics": (
+            "pts3d_other_local is camera-B local and is not fused with camera A"
         ),
         "prediction_storage": "per-sequence disk memmap",
         "streaming_two_pass": True,

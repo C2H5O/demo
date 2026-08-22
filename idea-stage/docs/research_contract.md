@@ -2,19 +2,19 @@
 
 ## Selected Idea
 
-- **Description**: 在保持 VGGT-Omega+LoRA teacher、SCARED protocol、分辨率和 supervision 不变时，以官方 DUNE+MASt3R binocular architecture 替换单帧 Distill3R head。
-- **Source**: 用户提供的 V1 实验规范。
-- **Selection rationale**: 单变量隔离 student architecture，直接检验 two-view cross-attention。
+- **Description**: 使用冻结 VGGT-Omega base 对每个 SCARED frame 独立生成可复用 cache，再用 DUNE+MASt3R binocular architecture 组合两帧训练。
+- **Source**: 用户于 2026-08-22 更新的 teacher cache 协议。
+- **Selection rationale**: 消除 LoRA 和 teacher sequence-length conditioning，令 2/8 帧样本复用同一批 frame-local pseudo labels。
 
 ## Core Claims
 
 1. 显式 two-view cross-attention 可能改善 SCARED reference-view depth accuracy。
 2. 官方 MASt3R binocular decoder/point head 可能降低 14-pixel ViT grid artifact。
-3. 两个 pointmap 在同一 reference-camera 坐标系中，可用于检验 pair-local geometry consistency；V1 不声称完成全局重建。
+3. 两个 teacher pointmap 分别位于各自 camera-local 坐标系；本协议不声称提供跨帧 pose、pair-local 融合或全局重建监督。
 
 ## Method Summary
 
-严格输入 ordered `(I_t,I_{t+2})`。VGGT-Omega+LoRA teacher 同时处理两帧，缓存 A-local、B-local、world points，并把 B world points转换到 A camera。Student 从官方 joint checkpoint 初始化，DUNE encoder frozen，MASt3R decoder/head trainable，训练接口只暴露 `pts3d_ref` 和 `pts3d_other_in_ref`。
+Teacher 使用冻结 pretrained VGGT-Omega base，每次只处理一个 frame，并保存 FP32 depth/local points/confidence。2 帧或 8 帧样本在 reader 中组合独立 frame cache。Student 从官方 joint checkpoint 初始化，DUNE encoder frozen，MASt3R decoder/head trainable；双向 2B 解码后暴露 `pts3d_ref` 和 `pts3d_other_local`。
 
 Loss 仅包含 confidence-weighted pair point distillation 与 reference-frame SCARED GT depth。第二帧自身 depth 必须通过 reverse-pair reference output 获得。
 
@@ -41,7 +41,8 @@ Loss 仅包含 confidence-weighted pair point distillation 与 reference-frame S
 ## Key Decisions
 
 - 不从 `dune_vitsmall14_336.pth` 随机初始化 decoder；使用官方 joint checkpoint 加固定 DUNE-S/14 448 backbone。
-- 不使用 `pts3d_other_in_ref[...,2]` 作为 second-view depth。
+- 不从独立 frame cache 构造虚假的 `pts3d_other_in_ref` 或共享 global 坐标。
+- 不加载 teacher LoRA；旧 pair-cache checkpoint 不跨协议 resume。
 - V1 不加入 descriptor/confidence/global alignment 等变量。
 
 ## Status
