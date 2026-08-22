@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from evaluation.vggtomast3r_metrics import patch_boundary_artifact
 from losses.vggtomast3r_loss import VggToMast3RLoss
+from utils.config import load_config
 
 
 def _loss_inputs():
@@ -44,3 +46,39 @@ def test_patch_artifact_metric_detects_patch_boundary_jump() -> None:
     result = patch_boundary_artifact(depth, patch_size=14)
     assert result["patch_boundary_gradient"] > result["non_boundary_gradient"]
     assert result["patch_artifact_ratio"] > 1.0
+
+
+def test_v1_supervised_depth_anchors_absolute_scale() -> None:
+    config = load_config("configs/vggtomast3r_v1.yaml")
+    assert config["loss"]["supervised_depth_scale_alignment"] == "none"
+
+    prediction, target = _loss_inputs()
+    gt = torch.full((1, 4, 5), 2.0)
+    mask = torch.ones_like(gt, dtype=torch.bool)
+    function = VggToMast3RLoss(config["loss"])
+    _, base_logs = function(prediction, target, gt, mask)
+
+    scaled_prediction = {
+        name: value * 10.0 for name, value in prediction.items()
+    }
+    _, scaled_logs = function(scaled_prediction, target, gt, mask)
+
+    # The normalized teacher point term remains scale invariant. The existing
+    # supervised-depth term is not: it now anchors global student scale.
+    assert abs(
+        scaled_logs["loss_teacher_point_raw"]
+        - base_logs["loss_teacher_point_raw"]
+    ) < 1e-6
+    assert scaled_logs["loss_scared_depth_raw"] > base_logs["loss_scared_depth_raw"]
+    assert scaled_logs["supervised_depth_scale"] == 1.0
+
+
+def test_v1_rejects_fully_scale_invariant_objective() -> None:
+    with pytest.raises(ValueError, match="output scale unconstrained"):
+        VggToMast3RLoss(
+            {
+                "lambda_point": 1.0,
+                "lambda_supervised_depth": 0.1,
+                "supervised_depth_scale_alignment": "median",
+            }
+        )

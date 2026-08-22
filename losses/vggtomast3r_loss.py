@@ -20,7 +20,7 @@ class VggToMast3RLossConfig:
     point_scale_mode: str = "avg_distance"
     min_depth: float = 0.1
     max_depth: float = 150.0
-    supervised_depth_scale_alignment: str = "median"
+    supervised_depth_scale_alignment: str = "none"
     supervised_depth_loss: str = "log_l1"
     supervised_depth_min_depth: float = 1e-4
     supervised_depth_max_depth: float = 100.0
@@ -49,6 +49,16 @@ class VggToMast3RLoss(nn.Module):
             raise ValueError("V1 reuses point_scale_mode=avg_distance")
         if self.config.all_other_losses != "disabled":
             raise ValueError("V1 requires all_other_losses=disabled")
+        if self.config.lambda_supervised_depth <= 0:
+            raise ValueError(
+                "V1 requires positive metric-depth supervision to anchor "
+                "the scale-invariant teacher point objective"
+            )
+        if self.config.supervised_depth_scale_alignment != "none":
+            raise ValueError(
+                "V1 supervised depth must use scale_alignment=none; aligning "
+                "both loss terms leaves MASt3R output scale unconstrained"
+            )
         self.supervised_depth = SupervisedDepthLoss(
             {
                 "min_depth": self.config.supervised_depth_min_depth,

@@ -116,8 +116,14 @@ L_total = 1.0 * L_teacher_point + 0.1 * L_SCARED_reference_depth
 to both reference-camera pointmaps, then uses confidence-weighted Charbonnier
 XYZ distance. VGGT-Omega confidence is a detached weight only.
 `L_SCARED_reference_depth` reuses the existing GT mask, mm-to-m conversion,
-valid range, median scale alignment, and log-L1 loss, only on
-`pts3d_ref[...,2]`. Logs include raw and weighted values for both terms.
+valid range, and log-L1 loss, only on `pts3d_ref[...,2]`. Unlike the original
+scale-aligned depth helper, V1 disables median scale alignment here. The point
+term already normalizes student and teacher independently; aligning the depth
+term as well makes the complete objective invariant to student output scale.
+That unconstrained direction can drive MASt3R's exponential depth
+parameterization to FP32 overflow. Direct metric-depth supervision is therefore
+the required scale anchor while retaining exactly the declared two loss terms.
+Logs include raw and weighted values for both terms.
 
 ## Workflow
 
