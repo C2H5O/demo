@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import pytest
 
 from models.student.dune_mast3r_adapter import DuneMast3RStudent
-from trainers.vggtomast3r_trainer import build_v1_optimizer
+from trainers.vggtomast3r_trainer import (
+    _forward_with_fp32_retry,
+    _prediction_is_finite,
+    _tensor_numeric_summary,
+    build_v1_optimizer,
+)
 
 
 class _MockMast3R(nn.Module):
@@ -106,3 +112,40 @@ def test_resolution_448x560() -> None:
         assert "448x560" in str(error)
     else:
         raise AssertionError("Square input must be rejected")
+
+
+class _NonFiniteThenFinite(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, images: torch.Tensor):
+        self.calls += 1
+        value = float("inf") if self.calls == 1 else 2.0
+        points = torch.full(
+            (images.shape[0], 2, 3, 3), value, device=images.device
+        )
+        return {"pts3d_ref": points, "pts3d_other_in_ref": points.clone()}
+
+
+def test_amp_nonfinite_output_retries_once_in_fp32() -> None:
+    model = _NonFiniteThenFinite()
+    images = torch.zeros(1, 2, 3, 2, 3)
+
+    prediction, retried, finite = _forward_with_fp32_retry(
+        model, images, amp_enabled=True, amp_dtype=torch.float16
+    )
+
+    assert retried is True
+    assert finite is True
+    assert model.calls == 2
+    assert _prediction_is_finite(prediction)
+
+
+def test_numeric_summary_reports_nonfinite_fraction() -> None:
+    summary = _tensor_numeric_summary(
+        torch.tensor([1.0, float("inf"), float("nan")])
+    )
+
+    assert summary["finite_fraction"] == pytest.approx(1.0 / 3.0)
+    assert summary["finite_min"] == summary["finite_max"] == 1.0

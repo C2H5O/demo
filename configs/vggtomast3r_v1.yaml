@@ -91,6 +91,7 @@ training:
   gradient_clip_norm: 1.0
   amp: true
   amp_dtype: auto
+  max_amp_fp32_fallbacks_per_epoch: 8
   log_every: 10
   save_every: 1
   output_dir: ./outputs/vggtomast3r_v1

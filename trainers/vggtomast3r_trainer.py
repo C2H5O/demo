@@ -81,6 +81,57 @@ def _append_jsonl(path: Path, record: Dict[str, Any]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _prediction_is_finite(prediction: Dict[str, torch.Tensor]) -> bool:
+    if not prediction:
+        return False
+    checks = [torch.isfinite(value).all() for value in prediction.values()]
+    return bool(torch.stack(checks).all())
+
+
+def _tensor_numeric_summary(value: torch.Tensor) -> Dict[str, Any]:
+    detached = value.detach()
+    finite = torch.isfinite(detached)
+    finite_values = detached[finite]
+    return {
+        "shape": list(detached.shape),
+        "dtype": str(detached.dtype),
+        "finite_fraction": float(finite.float().mean().cpu()),
+        "finite_min": (
+            float(finite_values.min().float().cpu())
+            if finite_values.numel()
+            else None
+        ),
+        "finite_max": (
+            float(finite_values.max().float().cpu())
+            if finite_values.numel()
+            else None
+        ),
+    }
+
+
+def _forward_with_fp32_retry(
+    model: torch.nn.Module,
+    images: torch.Tensor,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+) -> tuple[Dict[str, torch.Tensor], bool, bool]:
+    """Retry an AMP-only numeric failure without masking invalid outputs."""
+    with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=amp_dtype):
+        prediction = model(images)
+    prediction_finite = _prediction_is_finite(prediction)
+    if prediction_finite or not amp_enabled:
+        return prediction, False, prediction_finite
+
+    # The failed graph is never used for backward. Release it before the
+    # higher-memory full-precision retry of the same batch.
+    del prediction
+    if images.device.type == "cuda":
+        torch.cuda.empty_cache()
+    with torch.cuda.amp.autocast(enabled=False):
+        prediction = model(images.float())
+    return prediction, True, _prediction_is_finite(prediction)
+
+
 def train(
     config_path: Path,
     dry_run: bool = False,
@@ -157,6 +208,14 @@ def train(
     for epoch in range(start_epoch, epochs):
         model.train()
         supervised_pixels_seen = False
+        fp32_fallbacks = 0
+        max_fp32_fallbacks = int(
+            training_config.get("max_amp_fp32_fallbacks_per_epoch", 8)
+        )
+        if max_fp32_fallbacks < 0:
+            raise ValueError(
+                "training.max_amp_fp32_fallbacks_per_epoch cannot be negative"
+            )
         for batch_index, batch in enumerate(loader):
             images = batch["images"].to(device, non_blocking=True)
             target = _move_target(batch["target"], device)
@@ -165,9 +224,77 @@ def train(
             if gt is not None:
                 gt = gt.to(device, non_blocking=True)
                 gt_valid = gt_valid.to(device, non_blocking=True)
-            with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=amp_dtype):
-                prediction = model(images)
+            prediction, used_fp32_fallback, prediction_finite = _forward_with_fp32_retry(
+                model, images, amp_enabled, amp_dtype
+            )
+            if used_fp32_fallback:
+                fp32_fallbacks += 1
+                event = {
+                    "event": "amp_nonfinite_output_fp32_retry",
+                    "epoch": epoch,
+                    "batch_index": batch_index,
+                    "global_step": global_step,
+                    "amp_dtype": str(amp_dtype),
+                    "fp32_retry_finite": prediction_finite,
+                    "sequence_id": batch.get("sequence_id"),
+                    "frame_names": batch.get("frame_names"),
+                }
+                _append_jsonl(output_dir / "numeric_events.jsonl", event)
+                print(
+                    "Numeric warning: AMP output was non-finite; "
+                    "retried batch in FP32 (epoch={} batch={} global_step={} "
+                    "retry_finite={})".format(
+                        epoch,
+                        batch_index,
+                        global_step,
+                        event["fp32_retry_finite"],
+                    ),
+                    flush=True,
+                )
+            if not prediction_finite:
+                diagnostic = {
+                    "event": "nonfinite_output_after_fp32_retry",
+                    "epoch": epoch,
+                    "batch_index": batch_index,
+                    "global_step": global_step,
+                    "amp_enabled": amp_enabled,
+                    "amp_dtype": str(amp_dtype),
+                    "sequence_id": batch.get("sequence_id"),
+                    "frame_names": batch.get("frame_names"),
+                    "images": _tensor_numeric_summary(images),
+                    "prediction": {
+                        name: _tensor_numeric_summary(value)
+                        for name, value in prediction.items()
+                    },
+                    "nonfinite_parameters": [
+                        name
+                        for name, parameter in model.named_parameters()
+                        if not torch.isfinite(parameter).all()
+                    ][:20],
+                }
+                _append_jsonl(output_dir / "numeric_events.jsonl", diagnostic)
+                raise FloatingPointError(
+                    "Student output remained non-finite after FP32 retry at "
+                    "epoch={} batch={} global_step={}; see {}".format(
+                        epoch,
+                        batch_index,
+                        global_step,
+                        output_dir / "numeric_events.jsonl",
+                    )
+                )
+            if used_fp32_fallback and fp32_fallbacks > max_fp32_fallbacks:
+                raise FloatingPointError(
+                    "AMP required more than {} FP32 fallbacks in epoch {}; "
+                    "stop and investigate numeric_events.jsonl".format(
+                        max_fp32_fallbacks, epoch
+                    )
+                )
+            with torch.cuda.amp.autocast(
+                enabled=amp_enabled and not used_fp32_fallback,
+                dtype=amp_dtype,
+            ):
                 loss, last_logs = loss_function(prediction, target, gt, gt_valid)
+            last_logs["amp_fp32_fallback"] = float(used_fp32_fallback)
             supervised_pixels_seen = supervised_pixels_seen or (
                 float(last_logs.get("supervised_depth_valid_fraction", 0.0)) > 0.0
             )
