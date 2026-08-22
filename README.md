@@ -15,6 +15,7 @@ Main entry points:
 
 ```bash
 python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train
+python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train --pair-index 0
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --dry-run
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
 python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml

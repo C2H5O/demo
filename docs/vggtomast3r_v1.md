@@ -147,6 +147,8 @@ python scripts/verify_vggtomast3r_environment.py
 
 python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split train
 python generate_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml --split test
+python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml \
+  --split train --pair-index 0
 
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml --dry-run
 python train_vggtomast3r.py --config configs/vggtomast3r_v1.yaml
@@ -158,6 +160,21 @@ python evaluate_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
   --protocol endo3r
 python visualize_vggtomast3r.py --config configs/vggtomast3r_v1.yaml \
   --checkpoint outputs/vggtomast3r_v1/last.pt
+```
+
+The teacher-cache visualizer reads the strict pair cache directly and never
+loads VGGT-Omega, DUNE-MASt3R, or a student checkpoint. It exports labeled RGB,
+local-depth, confidence, and pair-reference-Z panels plus four PLY files: one
+for each camera-local cloud, one teacher-global cloud, and one pair-local/
+reference-camera cloud.
+The B-in-A Z panel is explicitly labeled as not being camera-B depth. A cache
+can also be addressed directly with `--cache path/to/pair_*.npz`.
+Pairs from a training diagnostic can be located without knowing their shuffled
+batch index, for example:
+
+```bash
+python visualize_teacher_pair_cache.py --config configs/vggtomast3r_v1.yaml \
+  --split train --sequence-id dataset_2/keyframe_1 --frame-id-a 25
 ```
 
 Evaluation defaults to the existing Video-Depth-Anything protocol: pair
