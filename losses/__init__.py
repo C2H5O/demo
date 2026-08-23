@@ -13,5 +13,14 @@ __all__ = [
     "SupervisedDepthLoss",
 ]
 from losses.vggtomast3r_loss import VggToMast3RLoss, VggToMast3RLossConfig
+from losses.crossclip_projection_loss import (
+    CrossClipProjectionLoss,
+    CrossClipProjectionLossConfig,
+)
 
-__all__ += ["VggToMast3RLoss", "VggToMast3RLossConfig"]
+__all__ += [
+    "CrossClipProjectionLoss",
+    "CrossClipProjectionLossConfig",
+    "VggToMast3RLoss",
+    "VggToMast3RLossConfig",
+]
