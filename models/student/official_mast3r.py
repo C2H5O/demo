@@ -15,6 +15,7 @@ import torch.nn as nn
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MAST3R_ROOT = PROJECT_ROOT / "external" / "MASt3R"
 DUNE_ROOT = PROJECT_ROOT / "external" / "DUNE"
+FAST3R_ROOT = PROJECT_ROOT / "external" / "Distill3R" / "external" / "fast3r"
 
 
 def _prepend_package_path(package_name: str, path: Path) -> None:
@@ -47,6 +48,31 @@ def ensure_official_sources_importable() -> None:
     # plain sys.path insertion is insufficient once they are in sys.modules.
     _prepend_package_path("models", MAST3R_ROOT / "dust3r" / "croco" / "models")
     _prepend_package_path("utils", DUNE_ROOT / "utils")
+
+
+def ensure_fast3r_source_importable() -> None:
+    """Expose the pinned Fast3R package without importing its decoder."""
+    package = FAST3R_ROOT / "fast3r"
+    if not package.is_dir():
+        raise RuntimeError("Pinned Fast3R source is incomplete: {}".format(package))
+    value = str(FAST3R_ROOT)
+    if value not in sys.path:
+        sys.path.insert(0, value)
+
+
+def load_pinned_dune_encoder(
+    dune_checkpoint: Path, device: torch.device
+) -> nn.Module:
+    """Load only the pinned DUNE encoder checkpoint; never construct a decoder."""
+    ensure_official_sources_importable()
+    if not dune_checkpoint.is_file():
+        raise FileNotFoundError(
+            "Local DUNE encoder checkpoint not found: {}".format(dune_checkpoint)
+        )
+    from model.dune import load_dune_encoder_from_checkpoint
+
+    encoder, _ = load_dune_encoder_from_checkpoint(str(dune_checkpoint))
+    return encoder.to(device)
 
 
 @contextmanager
@@ -96,6 +122,7 @@ def load_pinned_dune_mast3r(
 
 
 __all__ = [
-    "DUNE_ROOT", "MAST3R_ROOT", "ensure_official_sources_importable",
-    "load_pinned_dune_mast3r", "local_dune_hub",
+    "DUNE_ROOT", "FAST3R_ROOT", "MAST3R_ROOT",
+    "ensure_fast3r_source_importable", "ensure_official_sources_importable",
+    "load_pinned_dune_encoder", "load_pinned_dune_mast3r", "local_dune_hub",
 ]
