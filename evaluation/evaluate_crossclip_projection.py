@@ -17,9 +17,11 @@ from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_PROTOCOL,
     make_crossclip_rgb_dataset,
 )
-from datasets.ground_truth import frame_id
 from evaluation.depth_metrics import METRIC_NAMES
-from evaluation.evaluate_depth import _evaluate_sequence as evaluate_endo3r_sequence
+from evaluation.evaluate_depth import (
+    _evaluate_sequence as evaluate_endo3r_sequence,
+    extract_frame_id,
+)
 from models.student.dune_fast3r_head import DuneFast3RHeadStudent
 from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
@@ -270,7 +272,7 @@ def evaluate_endo3r(
                         model, sample["images"].unsqueeze(0).to(device)
                     ).cpu().numpy()
                 for name, depth in zip(sample["frame_names"], depths):
-                    identifier = frame_id(name)
+                    identifier = extract_frame_id(name)
                     if identifier in sums:
                         sums[identifier] += depth
                         counts[identifier] += 1

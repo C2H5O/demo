@@ -35,15 +35,11 @@ data/*
 checkpoints/*
 !checkpoints/README.md
 outputs/
-diagnostics/artifact_trace/
-diagnostics/artifact_trace_stage2/
-diagnostics/branch0_replacement_ablation/
 processed/
 teacher_cache/
 external/*
 !external/README.md
 !external/Distill3R
-!external/MASt3R
 !external/DUNE
 
 # Generated model/data formats (defense in depth outside the directories above)

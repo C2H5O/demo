@@ -1,4 +1,4 @@
-name: vggtodistill3r
+name: vggtofast3r
 channels:
   - pytorch
   - nvidia

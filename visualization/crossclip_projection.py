@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -23,18 +24,54 @@ from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
 
+def _opencv() -> Any:
+    try:
+        return importlib.import_module("cv2")
+    except ImportError as error:
+        raise RuntimeError(
+            "Cross-clip visualization requires opencv-python"
+        ) from error
+
+
 def _depth_to_magma(
     depth: np.ndarray, valid: np.ndarray, low: float, high: float
 ) -> np.ndarray:
-    from visualization.scared_student import depth_to_magma
-
-    return depth_to_magma(depth, valid, low, high)
+    cv2 = _opencv()
+    normalized = np.zeros(depth.shape, dtype=np.float32)
+    normalized[valid] = np.clip(
+        (depth[valid] - low) / max(high - low, 1e-8), 0.0, 1.0
+    )
+    gray = np.round(normalized * 255.0).astype(np.uint8)
+    colored_bgr = cv2.applyColorMap(gray, cv2.COLORMAP_MAGMA)
+    colored_bgr[~valid] = 0
+    return cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
 
 
 def _write_binary_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
-    from visualization.scared_student import write_binary_ply
-
-    write_binary_ply(path, points, colors)
+    if points.shape != colors.shape or points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("points and colors must both have shape [N,3]")
+    vertices = np.empty(
+        len(points),
+        dtype=[
+            ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+            ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+        ],
+    )
+    vertices["x"], vertices["y"], vertices["z"] = (
+        points[:, 0], points[:, 1], points[:, 2]
+    )
+    vertices["red"], vertices["green"], vertices["blue"] = (
+        colors[:, 0], colors[:, 1], colors[:, 2]
+    )
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        "element vertex {}\n".format(len(vertices))
+        + "property float x\nproperty float y\nproperty float z\n"
+        + "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+    )
+    with path.open("wb") as handle:
+        handle.write(header.encode("ascii"))
+        vertices.tofile(handle)
 
 
 def _rgb(images: torch.Tensor, normalize_mode: str) -> np.ndarray:

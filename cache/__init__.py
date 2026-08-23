@@ -1,3 +1,4 @@
-from cache.teacher_cache_dataset import TeacherCacheDataset
+from cache.align_crossclip_teacher_cache import align_crossclip_teacher_cache
+from cache.generate_crossclip_teacher_cache import generate_crossclip_teacher_cache
 
-__all__ = ["TeacherCacheDataset"]
+__all__ = ["align_crossclip_teacher_cache", "generate_crossclip_teacher_cache"]

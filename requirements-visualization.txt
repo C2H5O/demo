@@ -1,2 +1,0 @@
-# Optional dependency for tools/visualize_cloud.py --serve.
-viser>=0.2.23,<1

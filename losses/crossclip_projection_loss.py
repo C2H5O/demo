@@ -9,8 +9,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from losses.teacher_self_supervised.geometry_warp import surface_normals
 from utils.crossclip_geometry import project_student_points_to_teacher
+
+
+def surface_normals(points: torch.Tensor) -> torch.Tensor:
+    """Compute camera-oriented normals for ``[B,3,H,W]`` point maps."""
+    if points.ndim != 4 or points.shape[1] != 3:
+        raise ValueError("points must have shape [B,3,H,W]")
+    horizontal = points[:, :, 1:-1, 2:] - points[:, :, 1:-1, :-2]
+    vertical = points[:, :, 2:, 1:-1] - points[:, :, :-2, 1:-1]
+    normals = F.normalize(
+        torch.cross(horizontal, vertical, dim=1), dim=1, eps=1e-6
+    )
+    normals = F.pad(normals, (1, 1, 1, 1))
+    view = F.normalize(-points, dim=1, eps=1e-6)
+    flip = (normals * view).sum(dim=1, keepdim=True) < 0
+    return torch.where(flip, -normals, normals)
 
 
 @dataclass(frozen=True)

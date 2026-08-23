@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 
-from models.student.official_mast3r import (
+from models.student.upstream_sources import (
     PROJECT_ROOT,
     ensure_fast3r_source_importable,
     load_pinned_dune_encoder,

@@ -30,7 +30,7 @@ def make_crossclip_rgb_dataset(
 ) -> ScaredTemporalRGBDataset:
     """Build every legal 16-frame clip: C_0 ... C_(n-16), never crossing sequences."""
     config = dict(dataset_config)
-    for key in ("pair_mode", "pair_stride", "pair_step", "random_clip_sampling"):
+    for key in ("random_clip_sampling", "teacher_neighbor_offset"):
         config.pop(key, None)
     config.update(
         {

@@ -1,9 +1,6 @@
 [submodule "external/Distill3R"]
 	path = external/Distill3R
 	url = https://github.com/TheFourthKaramazov/Distill3R.git
-[submodule "external/MASt3R"]
-	path = external/MASt3R
-	url = https://github.com/naver/mast3r.git
 [submodule "external/DUNE"]
 	path = external/DUNE
 	url = https://github.com/naver/dune.git

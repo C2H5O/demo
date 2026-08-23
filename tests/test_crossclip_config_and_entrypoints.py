@@ -24,7 +24,6 @@ def test_crossclip_config_encodes_fixed_method_contract() -> None:
     teacher = config["teacher"]
     assert teacher["variant"] == "base"
     assert teacher["cache_protocol"] == "crossclip_local_v1"
-    assert teacher["lora_checkpoint"] is None
     assert teacher["cache_dtype"] == "float32"
     assert teacher["raw_cache_root"] != teacher["aligned_cache_root"]
 

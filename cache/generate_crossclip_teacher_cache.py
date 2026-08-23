@@ -49,8 +49,6 @@ def generate_crossclip_teacher_cache(
         raise ValueError("Cross-clip caches require the pretrained base teacher")
     if not bool(teacher_config.get("frozen", True)):
         raise ValueError("Cross-clip teacher must be frozen")
-    if teacher_config.get("lora_checkpoint"):
-        raise ValueError("Cross-clip teacher cache generation forbids LoRA/fine-tuning")
     if str(teacher_config.get("cache_dtype", "float32")).lower() != "float32":
         raise ValueError("Cross-clip teacher caches require FP32 storage")
     if int(dataset_config.get("clip_length", 16)) != 16:
@@ -76,13 +74,8 @@ def generate_crossclip_teacher_cache(
     device = torch.device(str(config.get("device", "cuda")))
     if device.type != "cuda":
         raise RuntimeError("VGGT-Omega cross-clip cache generation requires CUDA")
-    teacher = VGGTOmegaTeacher.from_config(
-        teacher_config,
-        device=device,
-        load_lora=False,
-        inject_lora=False,
-    ).freeze_for_distillation()
-    if teacher.uses_lora or any(parameter.requires_grad for parameter in teacher.parameters()):
+    teacher = VGGTOmegaTeacher.from_config(teacher_config, device=device)
+    if any(parameter.requires_grad for parameter in teacher.parameters()):
         raise RuntimeError("Cross-clip teacher is not the fully frozen base model")
 
     total = len(dataset) if limit is None else min(len(dataset), int(limit))

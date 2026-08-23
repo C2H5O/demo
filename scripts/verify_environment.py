@@ -1,4 +1,4 @@
-"""Fail fast unless the active environment matches the training contract."""
+"""Fail fast unless the environment and current experiment config agree."""
 
 from __future__ import annotations
 
@@ -15,100 +15,47 @@ EXPECTED_TORCH = "2.3.1"
 EXPECTED_CUDA = "12.1"
 EXPECTED_NUMPY = "1.26.4"
 EXPECTED_RESOLUTION = (448, 560)
-EXPECTED_DUNE_CHECKPOINT = "./checkpoints/dune/dune_vitsmall14_336.pth"
-EXPECTED_GT_DIRECTORIES = ["data/depth", "data/scene_points"]
 
 
 def main() -> None:
-    python_version = sys.version_info[:3]
-    torch_version = torch.__version__.split("+")[0]
-    cuda_version = torch.version.cuda
-    if python_version != EXPECTED_PYTHON:
-        raise RuntimeError(
-            "Expected Python {}, got {}".format(EXPECTED_PYTHON, python_version)
-        )
-    if torch_version != EXPECTED_TORCH:
-        raise RuntimeError(
-            "Expected PyTorch {}, got {}".format(EXPECTED_TORCH, torch.__version__)
-        )
-    if cuda_version != EXPECTED_CUDA:
-        raise RuntimeError(
-            "Expected PyTorch CUDA runtime {}, got {}".format(
-                EXPECTED_CUDA, cuda_version
-            )
-        )
-    if np.__version__ != EXPECTED_NUMPY:
-        raise RuntimeError(
-            "Expected NumPy {}, got {}".format(EXPECTED_NUMPY, np.__version__)
-        )
+    versions = {
+        "python": sys.version_info[:3],
+        "torch": torch.__version__.split("+")[0],
+        "cuda": torch.version.cuda,
+        "numpy": np.__version__,
+    }
+    expected = {
+        "python": EXPECTED_PYTHON,
+        "torch": EXPECTED_TORCH,
+        "cuda": EXPECTED_CUDA,
+        "numpy": EXPECTED_NUMPY,
+    }
+    if versions != expected:
+        raise RuntimeError("Environment mismatch: expected {}; got {}".format(expected, versions))
 
     root = Path(__file__).resolve().parents[1]
-    with (root / "configs" / "student_distillation.yaml").open(
+    with (root / "configs" / "crossclip_teacher_projection.yaml").open(
         "r", encoding="utf-8"
     ) as handle:
         config = yaml.safe_load(handle)
-    dataset_resolution = (
-        int(config["dataset"]["image_height"]),
-        int(config["dataset"]["image_width"]),
-    )
-    student_resolution = (
-        int(config["student"]["image_height"]),
-        int(config["student"]["image_width"]),
-    )
-    teacher_resolution = (
-        int(config["teacher"]["image_height"]),
-        int(config["teacher"]["image_width"]),
-    )
-    if not (
-        dataset_resolution
-        == student_resolution
-        == teacher_resolution
-        == EXPECTED_RESOLUTION
-    ):
-        raise RuntimeError(
-            "Dataset/student/teacher resolutions must all be 448x560: {}".format(
-                (dataset_resolution, student_resolution, teacher_resolution)
-            )
-        )
-    student_checkpoint = str(config["student"].get("pretrained_checkpoint", ""))
-    if student_checkpoint != EXPECTED_DUNE_CHECKPOINT:
-        raise RuntimeError(
-            "student.pretrained_checkpoint must be {}, got {}".format(
-                EXPECTED_DUNE_CHECKPOINT, student_checkpoint
-            )
-        )
-    student_conf_mode = list(config["student"].get("conf_mode", []))
-    if student_conf_mode != ["sigmoid", 0.0, 1.0]:
-        raise RuntimeError(
-            "student.conf_mode must be [sigmoid, 0.0, 1.0], got {}".format(
-                student_conf_mode
-            )
-        )
-    gt_directories = list(
-        config["dataset"].get("ground_truth", {}).get("relative_directories", [])
-    )
-    if gt_directories != EXPECTED_GT_DIRECTORIES:
-        raise RuntimeError(
-            "Ground-truth relative directories must be {}, got {}".format(
-                EXPECTED_GT_DIRECTORIES, gt_directories
-            )
-        )
-    evaluation_gt = str(config.get("evaluation", {}).get("gt_relative_directory", ""))
-    if evaluation_gt != "data/depth":
-        raise RuntimeError(
-            "evaluation.gt_relative_directory must be data/depth, got {}".format(
-                evaluation_gt
-            )
-        )
-    print(
-        "environment OK: Python {} PyTorch {} CUDA {} NumPy {} resolution {}x{}".format(
-            ".".join(str(value) for value in python_version),
-            torch.__version__,
-            cuda_version,
-            np.__version__,
-            *EXPECTED_RESOLUTION,
-        )
-    )
+    dataset = config["dataset"]
+    student = config["student"]
+    teacher = config["teacher"]
+    resolutions = {
+        (int(dataset["image_height"]), int(dataset["image_width"])),
+        (int(student["image_height"]), int(student["image_width"])),
+    }
+    if resolutions != {EXPECTED_RESOLUTION}:
+        raise RuntimeError("Dataset/student resolutions must both be 448x560")
+    if dataset["clip_length"] != 16 or dataset["window_stride"] != 1:
+        raise RuntimeError("Cross-clip data must use 16 frames at stride one")
+    if list(student["encoder_layers"]) != [2, 5, 8, 11]:
+        raise RuntimeError("DUNE encoder layers must be [2,5,8,11]")
+    if not student["freeze_encoder"] or student["use_fast3r_decoder"]:
+        raise RuntimeError("DUNE must be frozen and the Fast3R decoder disabled")
+    if teacher["variant"] != "base" or not teacher["frozen"]:
+        raise RuntimeError("Teacher must be the frozen base model")
+    print("environment and cross-clip config OK")
 
 
 if __name__ == "__main__":

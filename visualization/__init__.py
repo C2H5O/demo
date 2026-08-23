@@ -1,3 +1,3 @@
-from visualization.visualize_confidence import confidence_to_uint8
+from visualization.crossclip_projection import export_crossclip_visualization
 
-__all__ = ["confidence_to_uint8"]
+__all__ = ["export_crossclip_visualization"]

@@ -6,7 +6,7 @@ import json
 import math
 import random
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +19,6 @@ from datasets.crossclip_teacher_dataset import (
 )
 from losses.crossclip_projection_loss import CrossClipProjectionLoss
 from models.student.dune_fast3r_head import DuneFast3RHeadStudent
-from trainers.student_distillation_trainer import _amp_settings, _build_scheduler
 from utils.checkpoint import atomic_torch_save, require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 from utils.seed import seed_everything
@@ -73,6 +72,64 @@ def build_crossclip_optimizer(
         lr=float(training_config["learning_rate"]),
         weight_decay=float(training_config.get("weight_decay", 0.05)),
     )
+
+
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+    warmup_steps: int,
+    initial_learning_rate: float,
+    minimum_learning_rate: float,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps cannot be negative")
+    if initial_learning_rate <= 0:
+        raise ValueError("initial_learning_rate must be positive")
+    if not 0.0 <= minimum_learning_rate <= initial_learning_rate:
+        raise ValueError(
+            "minimum_learning_rate must be between zero and initial_learning_rate"
+        )
+    minimum_ratio = minimum_learning_rate / initial_learning_rate
+
+    def multiplier(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        progress = float(step - warmup_steps) / float(
+            max(total_steps - warmup_steps, 1)
+        )
+        cosine = 0.5 * (
+            1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
+        )
+        return minimum_ratio + (1.0 - minimum_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
+
+
+def _amp_settings(
+    training_config: Dict[str, Any], device: torch.device
+) -> Tuple[bool, torch.dtype, bool]:
+    enabled = bool(training_config.get("amp", True)) and device.type == "cuda"
+    requested = str(training_config.get("amp_dtype", "auto")).lower()
+    if requested not in {"auto", "float16", "bfloat16"}:
+        raise ValueError("training.amp_dtype must be auto, float16, or bfloat16")
+    bf16_supported = bool(
+        device.type == "cuda"
+        and hasattr(torch.cuda, "is_bf16_supported")
+        and torch.cuda.is_bf16_supported()
+    )
+    if requested == "bfloat16" and enabled and not bf16_supported:
+        raise RuntimeError(
+            "training.amp_dtype=bfloat16 but this CUDA device does not support BF16"
+        )
+    dtype = (
+        torch.bfloat16
+        if enabled
+        and (requested == "bfloat16" or (requested == "auto" and bf16_supported))
+        else torch.float16
+    )
+    return enabled, dtype, enabled and dtype == torch.float16
 
 
 def _move_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
@@ -138,8 +195,8 @@ def train_crossclip_projection(
     teacher = config.get("teacher", {})
     if str(teacher.get("cache_protocol")) != CROSSCLIP_CACHE_PROTOCOL:
         raise ValueError("teacher.cache_protocol must be crossclip_local_v1")
-    if str(teacher.get("variant")) != "base" or teacher.get("lora_checkpoint"):
-        raise ValueError("This experiment requires the frozen base teacher without LoRA")
+    if str(teacher.get("variant")) != "base":
+        raise ValueError("This experiment requires the frozen base teacher")
     if not bool(teacher.get("frozen", True)):
         raise ValueError("Teacher must be frozen")
     dataset_config = config.get("dataset", {})

@@ -41,7 +41,6 @@ teacher:
   variant: base
   cache_protocol: crossclip_local_v1
   pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
-  lora_checkpoint: null
   raw_cache_root: ./data/teacher_cache_crossclip_base_raw_448x560
   aligned_cache_root: ./data/teacher_cache_crossclip_base_aligned_448x560
   use_aligned_cache: true

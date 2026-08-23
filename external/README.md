@@ -1,31 +1,17 @@
-# External source dependencies
+# Pinned upstream sources
 
-The official Distill3R repository is pinned as a Git submodule at:
+The current experiment requires only:
 
 ```text
-external/Distill3R/
+external/DUNE/
+external/Distill3R/          # supplies external/fast3r and its DPT head
 ```
 
-Initialize Distill3R and its DUNE/Fast3R/VGGT dependencies with HTTPS URLs:
+Initialize them with:
 
 ```bash
 git submodule sync --recursive
 git submodule update --init --recursive
 ```
 
-If VGGT-Omega is not installed globally, place a source checkout at:
-
-```text
-external/vggt-omega/
-```
-
-Then install it into the active environment from the project root:
-
-```bash
-pip install -e external/vggt-omega
-```
-
-The optional VGGT-Omega checkout is intentionally excluded from Git. Teacher
-runtime code imports the installed package and never reaches into an earlier
-project by hard-coded path. Student runtime code imports the pinned official
-Distill3R submodule through the project adapter.
+VGGT-Omega is an installed Python package rather than a tracked submodule.
