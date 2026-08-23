@@ -68,6 +68,11 @@ def generate_crossclip_teacher_cache(
     base_checkpoint = str(teacher_config["pretrained_checkpoint"])
     min_depth = float(teacher_config.get("min_depth", 0.1))
     max_depth = float(teacher_config.get("max_depth", 150.0))
+    minimum_valid_fraction = float(
+        teacher_config.get("minimum_valid_fraction", 1.0e-3)
+    )
+    if not 0.0 < minimum_valid_fraction <= 1.0:
+        raise ValueError("teacher.minimum_valid_fraction must be in (0,1]")
     device = torch.device(str(config.get("device", "cuda")))
     if device.type != "cuda":
         raise RuntimeError("VGGT-Omega cross-clip cache generation requires CUDA")
@@ -134,11 +139,46 @@ def generate_crossclip_teacher_cache(
                 )
             )
 
-        def fp32(name: str) -> np.ndarray:
-            value = adapted[name][0].detach().cpu().float().numpy()
-            return np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0).astype(
+        valid_array = adapted["valid_mask"][0].detach().cpu().numpy().astype(np.bool_)
+        valid_fraction = valid_array.reshape(16, -1).mean(axis=1).astype(np.float32)
+        bad_frames = np.flatnonzero(valid_fraction < minimum_valid_fraction).tolist()
+        if bad_frames:
+            raise RuntimeError(
+                "Teacher valid fraction fell below {} for frames {}".format(
+                    minimum_valid_fraction, bad_frames
+                )
+            )
+
+        def dense_fp32(name: str) -> np.ndarray:
+            value = adapted[name][0].detach().cpu().float().numpy().astype(
                 np.float32, copy=False
             )
+            valid = valid_array[..., None] if value.ndim == 4 else valid_array
+            valid = np.broadcast_to(valid, value.shape)
+            if not np.isfinite(value[valid]).all():
+                raise FloatingPointError(
+                    "Teacher {} is non-finite at valid pixels".format(name)
+                )
+            return np.where(valid, value, 0.0).astype(np.float32, copy=False)
+
+        def camera_fp32(name: str) -> np.ndarray:
+            value = adapted[name][0].detach().cpu().float().numpy().astype(
+                np.float32, copy=False
+            )
+            if not np.isfinite(value).all():
+                raise FloatingPointError(
+                    "Teacher {} contains a non-finite camera matrix".format(name)
+                )
+            return value
+
+        depth_array = dense_fp32("depth")
+        local_array = dense_fp32("xyz_local")
+        global_array = dense_fp32("xyz_global")
+        confidence_array = dense_fp32("conf_local")
+        intrinsics_array = camera_fp32("intrinsics")
+        extrinsics_array = camera_fp32("extrinsics")
+        valid_depth = depth_array[valid_array]
+        valid_confidence = confidence_array[valid_array]
 
         highlight = sample.get("highlight_masks")
         if highlight is None:
@@ -156,6 +196,11 @@ def generate_crossclip_teacher_cache(
             "teacher_variant": "base",
             "base_checkpoint": base_checkpoint,
             "cache_stage": "raw",
+            "minimum_valid_fraction": minimum_valid_fraction,
+            "valid_fraction_per_frame": valid_fraction.tolist(),
+            "valid_depth_min": float(valid_depth.min()),
+            "valid_depth_max": float(valid_depth.max()),
+            "valid_confidence_mean": float(valid_confidence.mean()),
         }
         _atomic_npz(
             path,
@@ -166,14 +211,14 @@ def generate_crossclip_teacher_cache(
                 "frame_names": np.asarray(metadata["frame_names"], dtype=np.str_),
                 "input_height": np.asarray(expected_shape[0], dtype=np.int64),
                 "input_width": np.asarray(expected_shape[1], dtype=np.int64),
-                "depth": fp32("depth"),
-                "xyz_local": fp32("xyz_local"),
-                "xyz_global": fp32("xyz_global"),
-                "confidence": fp32("conf_local"),
-                "valid_mask": adapted["valid_mask"][0].detach().cpu().numpy().astype(np.bool_),
+                "depth": depth_array,
+                "xyz_local": local_array,
+                "xyz_global": global_array,
+                "confidence": confidence_array,
+                "valid_mask": valid_array,
                 "highlight_mask": highlight_array,
-                "intrinsics": fp32("intrinsics"),
-                "extrinsics": fp32("extrinsics"),
+                "intrinsics": intrinsics_array,
+                "extrinsics": extrinsics_array,
                 "pose_convention": np.asarray(WORLD_TO_CAMERA_POSE_CONVENTION, dtype=np.str_),
                 "point_coordinate_system": np.asarray(LOCAL_CAMERA_COORDINATE_SYSTEM, dtype=np.str_),
                 "teacher_variant": np.asarray("base", dtype=np.str_),

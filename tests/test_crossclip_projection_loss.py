@@ -75,6 +75,22 @@ def test_projection_loss_zero_for_equal_depth_and_positive_for_ten_percent_scale
     assert scaled.item() > 0.04
 
 
+def test_zero_teacher_confidence_falls_back_to_uniform_projection_weight() -> None:
+    teacher_depth = torch.full((1, 15, 3, 4), 2.0)
+    points = _identity_plane(frames=15) * 1.1
+    side = _teacher_side(teacher_depth)
+    side["confidence"].zero_()
+    mask = torch.zeros(1, 15, 1, 3, 4, dtype=torch.bool)
+    loss, effective_weight, _ = compute_cross_clip_projection_loss(
+        points,
+        side,
+        mask,
+        CrossClipProjectionLossConfig(use_confidence_weight=True),
+    )
+    assert loss.item() > 0.04
+    assert effective_weight.item() > 0.0
+
+
 def test_invalid_projection_points_are_masked_without_nan() -> None:
     points = _identity_plane(height=2, width=3)
     points[0, 0, 0, 0] = torch.tensor([float("nan"), 0.0, 1.0])

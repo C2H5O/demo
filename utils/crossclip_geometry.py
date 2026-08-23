@@ -14,9 +14,8 @@ def resize_crop_intrinsics(
     resized_size: Tuple[int, int],
     crop_left: float = 0.0,
     crop_top: float = 0.0,
-    horizontal_flip: bool = False,
 ) -> torch.Tensor:
-    """Update pinhole K for resize then crop (and optional image-coordinate flip)."""
+    """Update pinhole K for deterministic resize followed by crop."""
     original_height, original_width = original_size
     resized_height, resized_width = resized_size
     if min(original_height, original_width, resized_height, resized_width) <= 0:
@@ -28,8 +27,6 @@ def resize_crop_intrinsics(
     output[..., 1, 1] *= sy
     output[..., 0, 2] = output[..., 0, 2] * sx - float(crop_left)
     output[..., 1, 2] = output[..., 1, 2] * sy - float(crop_top)
-    if horizontal_flip:
-        output[..., 0, 2] = (float(resized_width) - 1.0) - output[..., 0, 2]
     return output
 
 

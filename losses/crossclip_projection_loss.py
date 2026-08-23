@@ -72,6 +72,13 @@ def compute_cross_clip_projection_loss(
         if config.use_confidence_weight
         else torch.ones_like(residual)
     )
+    if config.use_confidence_weight:
+        confidence_sum = torch.where(valid, weights, torch.zeros_like(weights)).flatten(1).sum(1)
+        valid_count = valid.flatten(1).sum(1)
+        fallback = (confidence_sum <= config.projection_eps) & (valid_count > 0)
+        weights = torch.where(
+            fallback[:, None, None, None], torch.ones_like(weights), weights
+        )
     per_sample, valid_weight = _samplewise_masked_mean(residual, weights, valid)
     potential = float(student_points.shape[1] * student_points.shape[2] * student_points.shape[3])
     valid_ratio = valid.flatten(1).float().sum(1) / potential
@@ -190,13 +197,13 @@ class CrossClipProjectionLoss(nn.Module):
         self._assert_absolute_mapping(batch, "teacher_left", slice(0, 15))
         self._assert_absolute_mapping(batch, "teacher_right", slice(1, 16))
         highlight = batch["highlight_masks"].bool()
-        left_per, _, left_ratio = compute_cross_clip_projection_loss(
+        left_per, left_weight, left_ratio = compute_cross_clip_projection_loss(
             points[:, 0:15],
             batch["teacher_left"],
             highlight[:, 0:15],
             self.config,
         )
-        right_per, _, right_ratio = compute_cross_clip_projection_loss(
+        right_per, right_weight, right_ratio = compute_cross_clip_projection_loss(
             points[:, 1:16],
             batch["teacher_right"],
             highlight[:, 1:16],
@@ -206,7 +213,8 @@ class CrossClipProjectionLoss(nn.Module):
         right_exists = batch["teacher_right"]["exists"].to(points.dtype)
         side_count = left_exists + right_exists
         projection_per = (left_per * left_exists + right_per * right_exists) / side_count.clamp_min(1.0)
-        projection = projection_per.mean()
+        supervised_sample = (side_count > 0).to(points.dtype)
+        projection = (projection_per * supervised_sample).sum() / supervised_sample.sum().clamp_min(1.0)
         left = (left_per * left_exists).sum() / left_exists.sum().clamp_min(1.0)
         right = (right_per * right_exists).sum() / right_exists.sum().clamp_min(1.0)
         left_valid_ratio = (left_ratio * left_exists).sum() / left_exists.sum().clamp_min(1.0)
@@ -234,6 +242,10 @@ class CrossClipProjectionLoss(nn.Module):
             "loss/smooth": smooth,
             "stats/proj_left_valid_ratio": left_valid_ratio,
             "stats/proj_right_valid_ratio": right_valid_ratio,
+            "stats/proj_left_weight_sum": (left_weight * left_exists).sum()
+            / left_exists.sum().clamp_min(1.0),
+            "stats/proj_right_weight_sum": (right_weight * right_exists).sum()
+            / right_exists.sum().clamp_min(1.0),
         }
         return total, {
             name: float(value.detach().cpu()) for name, value in tensors.items()

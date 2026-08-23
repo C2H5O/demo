@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 import torch
 
 from cache.align_crossclip_teacher_cache import estimate_teacher_overlap_scale
@@ -67,6 +68,14 @@ def _write_cache(root, dataset, index, stage="aligned"):
     depth = np.ones((16, height, width), dtype=np.float32)
     points = np.zeros((16, height, width, 3), dtype=np.float32)
     points[..., 2] = depth
+    metadata_record = {
+        **metadata,
+        "minimum_valid_fraction": 0.001,
+        "valid_fraction_per_frame": [1.0] * 16,
+        "valid_depth_min": 1.0,
+        "valid_depth_max": 1.0,
+        "valid_confidence_mean": 1.0,
+    }
     path = crossclip_teacher_cache_path(root, metadata)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -92,7 +101,7 @@ def _write_cache(root, dataset, index, stage="aligned"):
         cache_stage=np.asarray(stage),
         alignment_scale=np.asarray(1.0, dtype=np.float32),
         cache_format_version=np.asarray(CROSSCLIP_CACHE_FORMAT_VERSION),
-        metadata_json=np.asarray(json.dumps(metadata)),
+        metadata_json=np.asarray(json.dumps(metadata_record)),
     )
     return path
 
@@ -139,6 +148,20 @@ def test_single_16_frame_sequence_has_no_projection_teacher(tmp_path) -> None:
     assert not sample["teacher_left"]["exists"]
     assert not sample["teacher_right"]["exists"]
     assert not sample["teacher_left"]["valid_mask"].any()
+
+
+def test_degenerate_teacher_intrinsics_fail_closed(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 32)])
+    path = _write_cache(tmp_path, rgb, 7)
+    with np.load(path, allow_pickle=False) as cache:
+        arrays = {key: cache[key].copy() for key in cache.files}
+    arrays["intrinsics"][:, 0, 0] = 0.0
+    np.savez_compressed(path, **arrays)
+    dataset = ScaredCrossClipProjectionDataset(
+        rgb, tmp_path, BASE_CHECKPOINT, expected_stage="aligned"
+    )
+    with pytest.raises(RuntimeError, match="focal length"):
+        dataset[8]
 
 
 def test_teacher_overlap_scale_uses_common_frames_and_ignores_highlight() -> None:

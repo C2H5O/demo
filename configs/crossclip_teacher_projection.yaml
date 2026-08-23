@@ -1,0 +1,141 @@
+experiment:
+  name: crossclip_teacher_projection
+  hypothesis: >-
+    Frozen 16-frame VGGT-Omega context predictions can supervise an
+    independently encoded DUNE ViT-S/14 plus Fast3R DPT point head through
+    adjacent-clip teacher-coordinate projection.
+
+seed: 42
+device: cuda
+
+dataset:
+  name: scared
+  root: ./data/SCARED
+  train_manifest_path: null
+  test_manifest_path: null
+  frame_source: auto
+  clip_length: 16
+  sample_stride: 1
+  window_stride: 1
+  drop_incomplete_clip: true
+  random_clip_sampling: true
+  teacher_neighbor_offset: 1
+  image_height: 448
+  image_width: 560
+  resize_mode: resize
+  normalize_mode: minus_one_one
+  highlight:
+    enabled: true
+    absolute_threshold: 250.0
+    candidate_threshold: 230.0
+    relative_threshold: 0.95
+    minimum_component_size: 5000
+    keep_components: smaller
+    dilation_radius: 2
+    median_kernel: 31
+    inpaint_blur_sigma: 8.0
+    decay_window_size: 10
+    decay_coefficient: 20.0
+
+teacher:
+  variant: base
+  cache_protocol: crossclip_local_v1
+  pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
+  lora_checkpoint: null
+  raw_cache_root: ./data/teacher_cache_crossclip_base_raw_448x560
+  aligned_cache_root: ./data/teacher_cache_crossclip_base_aligned_448x560
+  use_aligned_cache: true
+  cache_dtype: float32
+  frozen: true
+  freeze_backbone: true
+  freeze_heads: true
+  min_depth: 0.1
+  max_depth: 150.0
+  minimum_valid_fraction: 0.001
+  scale_alignment:
+    enabled: true
+    confidence_threshold: 0.0
+    minimum_valid_pixels: 64
+    ignore_highlight: true
+    eps: 1.0e-6
+    report: ./outputs/crossclip_teacher_projection/teacher_scale_audit_{split}.json
+
+student:
+  architecture: dune_fast3r_dpt
+  image_height: 448
+  image_width: 560
+  encoder_variant: dune_vitsmall14_448
+  encoder_layers: [2, 5, 8, 11]
+  encoder_dim: 384
+  encoder_blocks: 12
+  patch_size: 14
+  dune_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
+  freeze_encoder: true
+  use_fast3r_decoder: false
+  normalize_mode: minus_one_one
+  head_feature_dim: 256
+  head_last_dim: 128
+
+loss:
+  mode: crossclip_projection_highlight_smooth
+  lambda_projection: 1.0
+  lambda_highlight: 0.01
+  lambda_smooth: 0.1
+  projection_eps: 1.0e-6
+  projection_ignore_highlight: false
+  use_confidence_weight: true
+
+dataloader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+
+training:
+  epochs: 20
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-6
+  weight_decay: 0.05
+  warmup_fraction: 0.05
+  gradient_accumulation_steps: 1
+  gradient_clip_norm: 1.0
+  amp: true
+  amp_dtype: auto
+  log_every: 10
+  save_every: 1
+  output_dir: ./outputs/crossclip_teacher_projection
+  resume: null
+
+evaluation:
+  protocol: vda
+
+vda_evaluation:
+  checkpoint: ./outputs/crossclip_teacher_projection/last.pt
+  split: test
+  protocol: vda
+  frame_source: auto
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  amp: true
+  output: ./outputs/crossclip_teacher_projection/evaluation_test_vda.json
+
+endo3r_evaluation:
+  checkpoint: ./outputs/crossclip_teacher_projection/last.pt
+  split: test
+  protocol: endo3r
+  frame_source: auto
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  amp: true
+  output: ./outputs/crossclip_teacher_projection/evaluation_test_endo3r.json
+
+visualization:
+  output_dir: ./outputs/crossclip_teacher_projection/visualization
+  min_depth: 0.1
+  max_depth: 10.0
+  adaptive_percentiles: [5.0, 95.0]
+  point_stride: 4

@@ -4,6 +4,18 @@ This independent project implements a two-stage endoscopic reconstruction
 pipeline derived selectively from `vggt_omega_distill`, PC-Depth, and EndoDAC.
 Those source projects are reference-only and are not imported at runtime.
 
+## Cross-clip teacher projection experiment
+
+Branch `feature/crossclip-teacher-projection` adds the frozen 16-frame teacher
+projection experiment. It uses DUNE blocks `[2,5,8,11]` with only Fast3R's DPT
+point head, stride-one neighboring teacher clips, and the exclusive projection,
+highlight-surface, and smoothness objective. VDA is the default evaluation and
+Endo3R remains available. Full cache, training, evaluation, and visualization
+commands are in
+[`docs/crossclip_teacher_projection.md`](docs/crossclip_teacher_projection.md);
+geometry contracts are in
+[`docs/coordinate_conventions.md`](docs/coordinate_conventions.md).
+
 ## VGGT-to-MASt3R V1 experiment
 
 Branch `vggtomast3r` adds a strict two-frame `(I_t,I_{t+2})` experiment while

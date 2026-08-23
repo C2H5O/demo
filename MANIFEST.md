@@ -78,3 +78,11 @@
 | 2026-08-22 14:39 | /experiment-bridge | refine-logs/EXPERIMENT_CODE_REVIEW.md | implementation | latest code review |
 | 2026-08-22 14:39 | /experiment-bridge | refine-logs/EXPERIMENT_RESULTS_20260822_143910.md | implementation | versioned local verification results |
 | 2026-08-22 14:39 | /experiment-bridge | refine-logs/EXPERIMENT_RESULTS.md | implementation | latest local verification results |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_PLAN_20260823_160218.md | implementation | frozen-teacher cross-clip projection experiment plan |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_PLAN.md | implementation | latest plan copy |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_TRACKER_20260823_160218.md | implementation | run status after local implementation and static validation |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_TRACKER.md | implementation | latest tracker copy |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_RESULTS_20260823_160218.md | implementation | implementation results and explicit pending scientific evidence |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_RESULTS.md | implementation | latest results copy |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_CODE_REVIEW_20260823_160218.md | implementation | GPT-5.6-Sol xhigh review, fixes, and approval |
+| 2026-08-23 16:02 | /experiment-bridge | refine-logs/EXPERIMENT_CODE_REVIEW.md | implementation | latest code-review copy |

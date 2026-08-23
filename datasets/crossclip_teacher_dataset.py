@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -163,6 +164,77 @@ def validate_crossclip_teacher_cache(
     for key in ("valid_mask", "highlight_mask"):
         if cache[key].dtype != np.bool_:
             raise RuntimeError("Cross-clip cache {} must be boolean".format(key))
+    valid = cache["valid_mask"]
+    valid_counts = valid.reshape(16, -1).sum(axis=1)
+    if np.any(valid_counts <= 0):
+        raise RuntimeError(
+            "Cross-clip cache has frames without valid teacher pixels: {}".format(
+                np.flatnonzero(valid_counts <= 0).tolist()
+            )
+        )
+    depth = cache["depth"]
+    points = cache["xyz_local"]
+    confidence = cache["confidence"]
+    if np.any(depth[valid] <= 0.0):
+        raise RuntimeError("Cross-clip cache has non-positive valid depth")
+    if np.any(confidence[valid] < 0.0):
+        raise RuntimeError("Cross-clip cache has negative valid confidence")
+    if not np.allclose(points[..., 2][valid], depth[valid], rtol=1e-3, atol=1e-4):
+        raise RuntimeError("Cross-clip cache xyz_local Z is inconsistent with depth")
+    intrinsics = cache["intrinsics"]
+    if np.any(intrinsics[:, 0, 0] <= 1e-6) or np.any(intrinsics[:, 1, 1] <= 1e-6):
+        raise RuntimeError("Cross-clip cache intrinsics have non-positive focal length")
+    if np.any(np.abs(np.linalg.det(intrinsics.astype(np.float64))) <= 1e-9):
+        raise RuntimeError("Cross-clip cache intrinsics are singular")
+    expected_bottom = np.broadcast_to(
+        np.asarray([0.0, 0.0, 1.0], dtype=np.float32), (16, 3)
+    )
+    if not np.allclose(intrinsics[:, 2, :], expected_bottom, rtol=0.0, atol=1e-4):
+        raise RuntimeError("Cross-clip cache intrinsics have an invalid bottom row")
+    rotations = cache["extrinsics"][:, :3, :3].astype(np.float64)
+    determinants = np.linalg.det(rotations)
+    if np.any(np.abs(determinants - 1.0) > 5e-2):
+        raise RuntimeError("Cross-clip cache extrinsic rotations are degenerate")
+    try:
+        cache_metadata = json.loads(str(cache["metadata_json"].item()))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("Cross-clip cache metadata_json is invalid") from error
+    statistic_keys = {
+        "minimum_valid_fraction",
+        "valid_fraction_per_frame",
+        "valid_depth_min",
+        "valid_depth_max",
+        "valid_confidence_mean",
+    }
+    missing_statistics = statistic_keys - set(cache_metadata)
+    if missing_statistics:
+        raise RuntimeError(
+            "Cross-clip cache metadata lacks integrity statistics {}".format(
+                sorted(missing_statistics)
+            )
+        )
+    fractions = valid_counts.astype(np.float64) / float(height * width)
+    if not np.allclose(
+        fractions,
+        np.asarray(cache_metadata["valid_fraction_per_frame"], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        raise RuntimeError("Cross-clip cache valid-fraction metadata is stale")
+    if np.any(fractions < float(cache_metadata["minimum_valid_fraction"])):
+        raise RuntimeError("Cross-clip cache valid fraction is below its declared minimum")
+    observed_statistics = (
+        float(depth[valid].min()),
+        float(depth[valid].max()),
+        float(confidence[valid].mean()),
+    )
+    declared_statistics = (
+        float(cache_metadata["valid_depth_min"]),
+        float(cache_metadata["valid_depth_max"]),
+        float(cache_metadata["valid_confidence_mean"]),
+    )
+    if not np.allclose(observed_statistics, declared_statistics, rtol=1e-5, atol=1e-6):
+        raise RuntimeError("Cross-clip cache integrity statistics are stale")
     scale = float(cache["alignment_scale"].item())
     if not np.isfinite(scale) or scale <= 0.0:
         raise RuntimeError("Cross-clip cache alignment_scale must be positive and finite")
@@ -220,7 +292,6 @@ def _load_overlap_side(
         result: Dict[str, Any] = {
             "exists": torch.tensor(True),
             "depth": torch.from_numpy(cache["depth"][teacher_slice].copy()).detach(),
-            "xyz_local": torch.from_numpy(cache["xyz_local"][teacher_slice].copy()).detach(),
             "confidence": torch.from_numpy(cache["confidence"][teacher_slice].copy()).detach(),
             "valid_mask": torch.from_numpy(cache["valid_mask"][teacher_slice].copy()).detach(),
             "intrinsics": torch.from_numpy(cache["intrinsics"][teacher_slice].copy()).detach(),
@@ -249,7 +320,6 @@ def _empty_overlap_side(
     return {
         "exists": torch.tensor(False),
         "depth": torch.zeros(15, height, width),
-        "xyz_local": torch.zeros(15, height, width, 3),
         "confidence": torch.zeros(15, height, width),
         "valid_mask": torch.zeros(15, height, width, dtype=torch.bool),
         "intrinsics": torch.zeros(15, 3, 3),

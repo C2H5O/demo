@@ -106,6 +106,8 @@ def _aligned_arrays(
             "alignment_scale": scale,
             "alignment_reference_clip_start": reference_start,
             "overlap_frame_scale_ratios": list(frame_ratios),
+            "valid_depth_min": float(metadata["valid_depth_min"]) * scale,
+            "valid_depth_max": float(metadata["valid_depth_max"]) * scale,
         }
     )
     arrays["metadata_json"] = np.asarray(
@@ -126,6 +128,8 @@ def align_crossclip_teacher_cache(
     config = load_config(config_path)
     teacher_config = dict(config["teacher"])
     alignment = dict(teacher_config.get("scale_alignment", {}))
+    if not bool(alignment.get("enabled", False)):
+        raise ValueError("teacher.scale_alignment.enabled must be true to run alignment")
     dataset = make_crossclip_rgb_dataset(config["dataset"], split)
     raw_root = (
         Path(raw_root_override)
