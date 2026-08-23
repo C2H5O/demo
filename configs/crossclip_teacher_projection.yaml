@@ -45,6 +45,11 @@ teacher:
   aligned_cache_root: ./data/teacher_cache_crossclip_base_aligned_448x560
   use_aligned_cache: true
   cache_dtype: float32
+  inference_batch_size: 4
+  amp: true
+  amp_dtype: bfloat16
+  cache_compressed: true
+  cache_write_workers: 2
   frozen: true
   freeze_backbone: true
   freeze_heads: true
@@ -58,6 +63,12 @@ teacher:
     ignore_highlight: true
     eps: 1.0e-6
     report: ./outputs/crossclip_teacher_projection/teacher_scale_audit_{split}.json
+
+teacher_dataloader:
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
 
 student:
   architecture: dune_fast3r_dpt

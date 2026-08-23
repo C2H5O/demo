@@ -26,6 +26,17 @@ def test_crossclip_config_encodes_fixed_method_contract() -> None:
     assert teacher["cache_protocol"] == "crossclip_local_v1"
     assert teacher["cache_dtype"] == "float32"
     assert teacher["raw_cache_root"] != teacher["aligned_cache_root"]
+    assert teacher["inference_batch_size"] == 4
+    assert teacher["amp"] is True
+    assert teacher["amp_dtype"] == "bfloat16"
+    assert teacher["cache_compressed"] is True
+    assert teacher["cache_write_workers"] == 2
+    assert config["teacher_dataloader"] == {
+        "num_workers": 8,
+        "pin_memory": True,
+        "persistent_workers": True,
+        "prefetch_factor": 4,
+    }
 
     student = DuneFast3RHeadConfig(**config["student"])
     student.validate()

@@ -35,6 +35,23 @@ Existing caches that predate the strict camera/validity integrity metadata are
 rejected. Regenerate those explicitly with `--overwrite`; do not mix them with
 the aligned root.
 
+Raw-cache inference is genuinely batched: `teacher.inference_batch_size`
+controls the leading dimension of `[B,16,3,H,W]`, while `teacher_dataloader`
+controls CPU workers, pinned memory, persistence, and prefetching. Teacher AMP
+defaults to BF16, but geometry decoding and saved arrays remain FP32. NPZ
+compression is overlapped with later GPU batches using
+`teacher.cache_write_workers`; queued writes are bounded to avoid uncontrolled
+host-memory growth. For an initial throughput and memory check:
+
+```bash
+python generate_crossclip_teacher_cache.py \
+  --config configs/crossclip_teacher_projection.yaml \
+  --split train --limit 16
+```
+
+Monitor compute utilization with `watch -n 1 nvidia-smi`. The training
+`dataloader.batch_size` does not control this offline teacher-cache command.
+
 Audit scale drift without writing aligned caches:
 
 ```bash

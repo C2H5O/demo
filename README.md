@@ -46,6 +46,15 @@ python generate_crossclip_teacher_cache.py --config configs/crossclip_teacher_pr
 python generate_crossclip_teacher_cache.py --config configs/crossclip_teacher_projection.yaml --split test
 ```
 
+Teacher cache generation uses its own batched input pipeline. The default
+`teacher.inference_batch_size: 4` sends `[B,16,3,448,560]` tensors to
+VGGT-Omega. BF16 is used only for the frozen model forward; camera decoding and
+all saved cache arrays remain FP32. `teacher_dataloader` controls CPU loading
+independently of the training `dataloader`. Compressed NPZ writes run in a
+bounded background pool so compression can overlap the next GPU batch. On an
+80 GB GPU, test batch sizes 4 and 8 with `--limit 16` before a full run; reduce
+the value if CUDA reports out of memory.
+
 Audit and write the separate offline-aligned cache roots:
 
 ```bash
