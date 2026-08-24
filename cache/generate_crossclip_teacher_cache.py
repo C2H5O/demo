@@ -79,12 +79,62 @@ def _drain_completed_writes(
     return list(pending)
 
 
+def _resolve_start_index(
+    dataset: Any,
+    start_index: Optional[int],
+    start_dataset_id: Optional[int],
+    start_keyframe_id: Optional[str],
+    start_clip_start: Optional[int],
+) -> int:
+    has_location = start_dataset_id is not None or start_keyframe_id is not None
+    if start_index is not None and has_location:
+        raise ValueError(
+            "Use either --start-index or dataset/keyframe location, not both"
+        )
+    if start_index is not None:
+        resolved = int(start_index)
+        if not 0 <= resolved < len(dataset):
+            raise ValueError(
+                "start_index {} is outside [0,{})".format(resolved, len(dataset))
+            )
+        return resolved
+    if not has_location:
+        if start_clip_start is not None:
+            raise ValueError(
+                "--start-clip-start requires --start-dataset-id and "
+                "--start-keyframe-id"
+            )
+        return 0
+    if start_dataset_id is None or start_keyframe_id is None:
+        raise ValueError(
+            "--start-dataset-id and --start-keyframe-id must be used together"
+        )
+    requested_clip_start = 0 if start_clip_start is None else int(start_clip_start)
+    for index in range(len(dataset)):
+        metadata = clip_metadata(dataset, index)
+        if (
+            int(metadata["dataset_id"]) == int(start_dataset_id)
+            and str(metadata["keyframe_id"]) == str(start_keyframe_id)
+            and int(metadata["clip_start"]) == requested_clip_start
+        ):
+            return index
+    raise ValueError(
+        "No clip matches dataset_id={} keyframe_id={!r} clip_start={}".format(
+            start_dataset_id, start_keyframe_id, requested_clip_start
+        )
+    )
+
+
 def generate_crossclip_teacher_cache(
     config_path: Path,
     split: str,
     limit: Optional[int] = None,
     overwrite: bool = False,
     cache_root_override: Optional[Path] = None,
+    start_index: Optional[int] = None,
+    start_dataset_id: Optional[int] = None,
+    start_keyframe_id: Optional[str] = None,
+    start_clip_start: Optional[int] = None,
 ) -> None:
     config = load_config(config_path)
     teacher_config = dict(config["teacher"])
@@ -145,10 +195,36 @@ def generate_crossclip_teacher_cache(
         )
     )
 
-    total = len(dataset) if limit is None else min(len(dataset), int(limit))
+    first_index = _resolve_start_index(
+        dataset,
+        start_index,
+        start_dataset_id,
+        start_keyframe_id,
+        start_clip_start,
+    )
+    if limit is not None and int(limit) <= 0:
+        raise ValueError("limit must be positive")
+    stop_index = (
+        len(dataset)
+        if limit is None
+        else min(len(dataset), first_index + int(limit))
+    )
+    total = stop_index - first_index
+    first_metadata = clip_metadata(dataset, first_index)
+    print(
+        "Selected cache range: global_index=[{},{}) clips={} starts_at={}/{} "
+        "clip_start={}".format(
+            first_index,
+            stop_index,
+            total,
+            first_metadata["dataset_id"],
+            first_metadata["keyframe_id"],
+            first_metadata["clip_start"],
+        )
+    )
     skipped = 0
     pending_items = []
-    for index in range(total):
+    for index in range(first_index, stop_index):
         metadata = clip_metadata(dataset, index)
         path = crossclip_teacher_cache_path(raw_root, metadata)
         if path.is_file() and not overwrite:

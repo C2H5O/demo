@@ -52,6 +52,20 @@ python generate_crossclip_teacher_cache.py \
 Monitor compute utilization with `watch -n 1 nvidia-smi`. The training
 `dataloader.batch_size` does not control this offline teacher-cache command.
 
+For an exact resume point, use either `--start-index N` or the location tuple
+`--start-dataset-id`, `--start-keyframe-id`, and `--start-clip-start`. Start
+selection occurs before existing-cache validation, so earlier compressed NPZ
+files are not opened. For example:
+
+```bash
+python generate_crossclip_teacher_cache.py \
+  --config configs/crossclip_teacher_projection.yaml --split train \
+  --start-dataset-id 5 --start-keyframe-id keyframe_3 --start-clip-start 217
+```
+
+The location must identify an exact clip. `--limit`, when present, is the
+number of clips processed from that selected start.
+
 Audit scale drift without writing aligned caches:
 
 ```bash

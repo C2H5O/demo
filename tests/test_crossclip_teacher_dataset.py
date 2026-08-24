@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from cache.align_crossclip_teacher_cache import estimate_teacher_overlap_scale
+from cache.generate_crossclip_teacher_cache import _resolve_start_index
 from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_FORMAT_VERSION,
     LOCAL_CAMERA_COORDINATE_SYSTEM,
@@ -119,6 +120,16 @@ def test_stride_one_clip_neighbors_and_exact_overlap_mappings() -> None:
     assert neighbors[0] == (None, 1)
     assert neighbors[16] == (15, None)
     assert neighbors[17] == (None, None)
+
+
+def test_cache_resume_start_resolves_before_existing_cache_scan() -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 32)])
+    assert _resolve_start_index(rgb, 7, None, None, None) == 7
+    assert _resolve_start_index(rgb, None, 1, "keyframe_1", 7) == 7
+    with pytest.raises(ValueError, match="not both"):
+        _resolve_start_index(rgb, 7, 1, "keyframe_1", 7)
+    with pytest.raises(ValueError, match="No clip matches"):
+        _resolve_start_index(rgb, None, 1, "keyframe_1", 99)
 
 
 def test_crossclip_dataset_loads_only_15_shared_frames(tmp_path) -> None:

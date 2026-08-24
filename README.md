@@ -55,6 +55,18 @@ bounded background pool so compression can overlap the next GPU batch. On an
 80 GB GPU, test batch sizes 4 and 8 with `--limit 16` before a full run; reduce
 the value if CUDA reports out of memory.
 
+To resume without validating every earlier cache, select the first unfinished
+clip by global index or by its SCARED location:
+
+```bash
+python generate_crossclip_teacher_cache.py \
+  --config configs/crossclip_teacher_projection.yaml --split train \
+  --start-dataset-id 5 --start-keyframe-id keyframe_3 --start-clip-start 0
+```
+
+`--limit` counts clips from the selected start. Existing caches at or after the
+start are still validated and skipped; caches before it are not opened.
+
 Audit and write the separate offline-aligned cache roots:
 
 ```bash
