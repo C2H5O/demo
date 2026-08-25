@@ -307,7 +307,8 @@ def train_crossclip_projection(
             consecutive_zero_projection_batches = (
                 0 if has_projection else consecutive_zero_projection_batches + 1
             )
-            if consecutive_zero_projection_batches >= max_zero_projection_batches:
+            zero_projection_limit = 1 if dry_run else max_zero_projection_batches
+            if consecutive_zero_projection_batches >= zero_projection_limit:
                 raise RuntimeError(
                     "No valid student-to-teacher projection for {} consecutive "
                     "batches; positive_depth_ratio={} depth_range=[{},{}]. "
