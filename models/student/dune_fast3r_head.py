@@ -141,6 +141,10 @@ class DuneFast3RHeadStudent(nn.Module):
             "imagenet_std",
             torch.tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1),
         )
+        # Encoder and head are constructed on the requested device above, but
+        # normalization buffers are registered afterward. Move the complete
+        # module once so parameters and every buffer share the same device.
+        self.to(target_device)
         self._validate_encoder_contract()
         self._freeze_encoder()
 

@@ -87,6 +87,19 @@ def test_crossclip_student_rejects_non_16_frame_input() -> None:
         model(torch.zeros(1, 15, 3, 28, 42))
 
 
+def test_crossclip_student_moves_normalization_buffers_to_requested_device() -> None:
+    model = DuneFast3RHeadStudent(
+        _config(),
+        encoder_factory=_FakeDune,
+        head_factory=lambda dim, patch: _FakeDPTHead(),
+        device=torch.device("meta"),
+    )
+    assert model.imagenet_mean.device.type == "meta"
+    assert model.imagenet_std.device.type == "meta"
+    assert next(model.encoder.parameters()).device.type == "meta"
+    assert next(model.head.parameters()).device.type == "meta"
+
+
 def test_crossclip_student_rejects_fast3r_decoder() -> None:
     with pytest.raises(ValueError, match="decoder is forbidden"):
         DuneFast3RHeadStudent(
