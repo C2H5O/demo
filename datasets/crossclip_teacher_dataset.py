@@ -415,7 +415,6 @@ class ScaredCrossClipProjectionDataset(Dataset):
 _SIDE_TENSOR_KEYS = (
     "exists",
     "depth",
-    "xyz_local",
     "confidence",
     "valid_mask",
     "intrinsics",

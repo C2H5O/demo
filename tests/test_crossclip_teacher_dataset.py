@@ -14,6 +14,7 @@ from datasets.crossclip_teacher_dataset import (
     WORLD_TO_CAMERA_POSE_CONVENTION,
     ScaredCrossClipProjectionDataset,
     build_neighbor_clip_indices,
+    crossclip_projection_collate,
     crossclip_teacher_cache_path,
 )
 from datasets.scared_clip_dataset import clip_metadata
@@ -148,6 +149,20 @@ def test_crossclip_dataset_loads_only_15_shared_frames(tmp_path) -> None:
     assert sample["teacher_right"]["teacher_local_indices"].tolist() == list(range(15))
     assert sample["teacher_left"]["absolute_frame_ids"].tolist() == list(range(8, 23))
     assert sample["teacher_right"]["absolute_frame_ids"].tolist() == list(range(9, 24))
+
+
+def test_raw_teacher_samples_collate_without_unused_point_maps(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 32)])
+    _write_cache(tmp_path, rgb, 7, stage="raw")
+    _write_cache(tmp_path, rgb, 9, stage="raw")
+    dataset = ScaredCrossClipProjectionDataset(
+        rgb, tmp_path, BASE_CHECKPOINT, expected_stage="raw"
+    )
+    batch = crossclip_projection_collate([dataset[8]])
+    assert batch["teacher_left"]["depth"].shape == (1, 15, 4, 6)
+    assert batch["teacher_right"]["depth"].shape == (1, 15, 4, 6)
+    assert "xyz_local" not in batch["teacher_left"]
+    assert "xyz_local" not in batch["teacher_right"]
 
 
 def test_single_16_frame_sequence_has_no_projection_teacher(tmp_path) -> None:
