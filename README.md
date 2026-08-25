@@ -67,6 +67,34 @@ python generate_crossclip_teacher_cache.py \
 `--limit` counts clips from the selected start. Existing caches at or after the
 start are still validated and skipped; caches before it are not opened.
 
+To convert an existing **complete** compressed raw cache to complete
+uncompressed NPZ without rerunning the teacher, first stop every process that
+can read or write that cache root. Inspect a small selection, convert one file,
+then run the resumable full conversion:
+
+```bash
+python convert_crossclip_teacher_cache.py \
+  --root data/teacher_cache_crossclip_base_raw_448x560 --dry-run --limit 5
+python convert_crossclip_teacher_cache.py \
+  --root data/teacher_cache_crossclip_base_raw_448x560 \
+  --confirm-no-readers --limit 1
+python convert_crossclip_teacher_cache.py \
+  --root data/teacher_cache_crossclip_base_raw_448x560 \
+  --confirm-no-readers
+```
+
+The converter is sequential and preserves every key, shape, dtype, and value.
+For each source it writes a UUID-named temporary in the same directory, fsyncs
+it, checks ZIP CRC and exact NumPy equality, confirms that the source did not
+change, and only then uses an atomic `os.replace`. It refuses symlinks,
+incomplete/non-cross-clip NPZ files, insufficient temporary disk space,
+concurrent converters, and writes without `--confirm-no-readers`. A completed
+uncompressed file is detected from its ZIP metadata and skipped, so rerunning
+the same command resumes safely. A hard-killed job may leave the root lock;
+check the hostname/PID recorded in the lock and remove it only after confirming
+that process is gone. Do not run training, evaluation, visualization, cache
+generation, or alignment against the same root during conversion.
+
 Audit and write the separate offline-aligned cache roots:
 
 ```bash
