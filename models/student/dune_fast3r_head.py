@@ -36,6 +36,8 @@ class DuneFast3RHeadConfig:
     normalize_mode: str = "minus_one_one"
     head_feature_dim: int = 256
     head_last_dim: int = 128
+    head_initial_z_bias: float = 1.0
+    head_initial_weight_std: float = 1.0e-4
     depth_mode: Tuple[Any, Any, Any] = ("exp", -float("inf"), float("inf"))
 
     def validate(self) -> None:
@@ -60,11 +62,37 @@ class DuneFast3RHeadConfig:
             raise ValueError("Fast3R decoder is forbidden in this experiment")
         if self.normalize_mode != "minus_one_one":
             raise ValueError("Dataset RGB must use minus_one_one normalization")
+        if self.head_initial_z_bias <= 0.0:
+            raise ValueError("head_initial_z_bias must be positive")
+        if self.head_initial_weight_std < 0.0:
+            raise ValueError("head_initial_weight_std cannot be negative")
 
 
 def _project_path(value: str) -> Path:
     path = Path(value).expanduser()
     return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
+
+
+def _initialize_camera_facing_output(
+    head: nn.Module, z_bias: float, weight_std: float
+) -> None:
+    dpt = getattr(head, "dpt", None)
+    layers = getattr(dpt, "head", None)
+    output = layers[-1] if isinstance(layers, nn.Sequential) and len(layers) else None
+    if not isinstance(output, nn.Conv2d) or output.out_channels != 3:
+        raise RuntimeError("Fast3R DPT point head lacks a 3-channel output Conv2d")
+    with torch.no_grad():
+        if weight_std == 0.0:
+            nn.init.zeros_(output.weight)
+        else:
+            nn.init.normal_(output.weight, mean=0.0, std=weight_std)
+        if output.bias is None:
+            raise RuntimeError("Fast3R DPT point output requires a bias")
+        nn.init.zeros_(output.bias)
+        # Fast3R's exp postprocess scales the vector norm but preserves its
+        # direction. A positive raw Z bias therefore gives every initial point
+        # a camera-facing depth instead of allowing an all-negative-Z dead zone.
+        output.bias[2] = float(z_bias)
 
 
 def _build_fast3r_dpt_head(config: DuneFast3RHeadConfig) -> nn.Module:
@@ -73,7 +101,7 @@ def _build_fast3r_dpt_head(config: DuneFast3RHeadConfig) -> nn.Module:
     from fast3r.dust3r.heads.dpt_head import PixelwiseTaskWithDPT
     from fast3r.dust3r.heads.postprocess import postprocess
 
-    return PixelwiseTaskWithDPT(
+    head = PixelwiseTaskWithDPT(
         num_channels=3,
         feature_dim=config.head_feature_dim,
         last_dim=config.head_last_dim,
@@ -85,6 +113,10 @@ def _build_fast3r_dpt_head(config: DuneFast3RHeadConfig) -> nn.Module:
         head_type="regression",
         patch_size=config.patch_size,
     )
+    _initialize_camera_facing_output(
+        head, config.head_initial_z_bias, config.head_initial_weight_std
+    )
+    return head
 
 
 def _transformer_block_count(encoder: nn.Module) -> int:

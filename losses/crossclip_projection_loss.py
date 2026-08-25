@@ -260,6 +260,16 @@ class CrossClipProjectionLoss(nn.Module):
             / left_exists.sum().clamp_min(1.0),
             "stats/proj_right_weight_sum": (right_weight * right_exists).sum()
             / right_exists.sum().clamp_min(1.0),
+            "stats/student_positive_depth_ratio": (
+                torch.isfinite(points[..., 2])
+                & (points[..., 2] > self.config.projection_eps)
+            ).float().mean(),
+            "stats/student_depth_min": torch.nan_to_num(
+                points[..., 2], nan=0.0, posinf=0.0, neginf=0.0
+            ).min(),
+            "stats/student_depth_max": torch.nan_to_num(
+                points[..., 2], nan=0.0, posinf=0.0, neginf=0.0
+            ).max(),
         }
         return total, {
             name: float(value.detach().cpu()) for name, value in tensors.items()

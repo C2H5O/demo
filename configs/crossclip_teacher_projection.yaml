@@ -85,6 +85,8 @@ student:
   normalize_mode: minus_one_one
   head_feature_dim: 256
   head_last_dim: 128
+  head_initial_z_bias: 1.0
+  head_initial_weight_std: 0.0001
 
 loss:
   mode: crossclip_projection_highlight_smooth
@@ -113,6 +115,7 @@ training:
   gradient_clip_norm: 1.0
   amp: true
   amp_dtype: auto
+  max_consecutive_zero_projection_batches: 5
   log_every: 10
   save_every: 1
   output_dir: ./outputs/crossclip_teacher_projection

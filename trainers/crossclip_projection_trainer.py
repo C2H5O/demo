@@ -276,6 +276,12 @@ def train_crossclip_projection(
     )
     optimizer.zero_grad(set_to_none=True)
     last_logs: Dict[str, float] = {}
+    consecutive_zero_projection_batches = 0
+    max_zero_projection_batches = int(
+        training_config.get("max_consecutive_zero_projection_batches", 5)
+    )
+    if max_zero_projection_batches <= 0:
+        raise ValueError("max_consecutive_zero_projection_batches must be positive")
     for epoch in range(start_epoch, epochs):
         model.train()
         for batch_index, cpu_batch in enumerate(loader):
@@ -294,6 +300,24 @@ def train_crossclip_projection(
             ):
                 loss, last_logs = loss_function(prediction, batch)
             last_logs["stats/amp_fp32_retry"] = float(retried)
+            has_projection = (
+                last_logs["stats/proj_left_valid_ratio"] > 0.0
+                or last_logs["stats/proj_right_valid_ratio"] > 0.0
+            )
+            consecutive_zero_projection_batches = (
+                0 if has_projection else consecutive_zero_projection_batches + 1
+            )
+            if consecutive_zero_projection_batches >= max_zero_projection_batches:
+                raise RuntimeError(
+                    "No valid student-to-teacher projection for {} consecutive "
+                    "batches; positive_depth_ratio={} depth_range=[{},{}]. "
+                    "Training was stopped to prevent a silent zero-loss run.".format(
+                        consecutive_zero_projection_batches,
+                        last_logs["stats/student_positive_depth_ratio"],
+                        last_logs["stats/student_depth_min"],
+                        last_logs["stats/student_depth_max"],
+                    )
+                )
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite cross-clip loss: {}".format(last_logs))
             window_start = (batch_index // accumulation) * accumulation

@@ -4,7 +4,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from models.student.dune_fast3r_head import DuneFast3RHeadStudent
+from models.student.dune_fast3r_head import (
+    DuneFast3RHeadStudent,
+    _initialize_camera_facing_output,
+)
 
 
 class _FakeDune(nn.Module):
@@ -98,6 +101,20 @@ def test_crossclip_student_moves_normalization_buffers_to_requested_device() -> 
     assert model.imagenet_std.device.type == "meta"
     assert next(model.encoder.parameters()).device.type == "meta"
     assert next(model.head.parameters()).device.type == "meta"
+
+
+def test_fast3r_output_initialization_starts_with_positive_camera_depth() -> None:
+    head = nn.Module()
+    head.dpt = nn.Module()
+    head.dpt.head = nn.Sequential(nn.Conv2d(4, 3, kernel_size=1))
+    _initialize_camera_facing_output(head, z_bias=1.0, weight_std=0.0)
+    raw = head.dpt.head(torch.zeros(1, 4, 2, 3))
+    assert torch.count_nonzero(raw[:, 0:2]) == 0
+    assert torch.all(raw[:, 2] == 1.0)
+    # Fast3R exp-mode postprocessing preserves vector direction.
+    radius = raw.square().sum(dim=1, keepdim=True).sqrt()
+    points = raw / radius.clamp_min(1.0e-8) * torch.expm1(radius)
+    assert torch.all(points[:, 2] > 0.0)
 
 
 def test_crossclip_student_rejects_fast3r_decoder() -> None:

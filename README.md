@@ -84,6 +84,12 @@ python train_crossclip_projection.py --config configs/crossclip_teacher_projecti
 python train_crossclip_projection.py --config configs/crossclip_teacher_projection.yaml --resume outputs/crossclip_teacher_projection/last.pt
 ```
 
+The randomly initialized DPT output layer starts with a small weight scale and
+a positive raw-Z bias. This is required because Fast3R's exponential point-map
+postprocess scales vector magnitude but does not force its Z direction to face
+the camera. Training aborts after five consecutive batches without a valid
+student-to-teacher projection instead of silently advancing with zero loss.
+
 Evaluate and visualize the trained student:
 
 ```bash
