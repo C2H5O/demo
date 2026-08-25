@@ -51,8 +51,10 @@ def main() -> None:
         raise RuntimeError("Cross-clip data must use 16 frames at stride one")
     if list(student["encoder_layers"]) != [2, 5, 8, 11]:
         raise RuntimeError("DUNE encoder layers must be [2,5,8,11]")
-    if not student["freeze_encoder"] or student["use_fast3r_decoder"]:
-        raise RuntimeError("DUNE must be frozen and the Fast3R decoder disabled")
+    if student["freeze_encoder"] or student["use_fast3r_decoder"]:
+        raise RuntimeError(
+            "Current config must jointly train DUNE and keep the Fast3R decoder disabled"
+        )
     if teacher["variant"] != "base" or not teacher["frozen"]:
         raise RuntimeError("Teacher must be the frozen base model")
     print("environment and cross-clip config OK")

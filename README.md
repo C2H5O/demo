@@ -1,12 +1,12 @@
 # Cross-clip teacher projection
 
 This repository contains one experiment only: frozen 16-frame VGGT-Omega
-teacher caches supervise a frozen DUNE ViT-S/14 encoder plus a trainable
-Fast3R DPT point head.
+teacher caches jointly supervise a trainable DUNE ViT-S/14 encoder and Fast3R
+DPT point head.
 
 ```text
 16 RGB frames
-  -> frozen DUNE blocks [2, 5, 8, 11]
+  -> trainable DUNE blocks [2, 5, 8, 11]
   -> Fast3R DPT point head
   -> camera-local XYZ
   -> projection + highlight + smoothness losses
@@ -89,6 +89,13 @@ a positive raw-Z bias. This is required because Fast3R's exponential point-map
 postprocess scales vector magnitude but does not force its Z direction to face
 the camera. Training aborts after five consecutive batches without a valid
 student-to-teacher projection instead of silently advancing with zero loss.
+
+Joint training uses separate AdamW parameter groups: the DPT head follows
+`training.learning_rate`, while DUNE follows the smaller
+`training.encoder_learning_rate`. Setting `student.freeze_encoder: true`
+retains the supported head-only ablation and removes DUNE from the optimizer.
+Because all 16 frame encodings retain activations in joint mode, use a physical
+batch size of 1 and gradient accumulation for a larger effective batch.
 
 Evaluate and visualize the trained student:
 

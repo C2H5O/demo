@@ -1,9 +1,10 @@
 # Frozen-teacher cross-clip projection experiment
 
-The experiment uses 16 independently encoded frames. DUNE ViT-S/14 is frozen
-and returns 0-based Transformer blocks `[2,5,8,11]`; only Fast3R's DPT point
-head is constructed and trained. No Fast3R/MASt3R/LLaMA multi-view decoder or
-random image identifier is used.
+The experiment uses 16 independently encoded frames. DUNE ViT-S/14 returns
+0-based Transformer blocks `[2,5,8,11]` and is optimized jointly with Fast3R's
+DPT point head. No Fast3R/MASt3R/LLaMA multi-view decoder or random image
+identifier is used. A supported `freeze_encoder: true` ablation trains the DPT
+head alone.
 
 The total objective is exactly:
 

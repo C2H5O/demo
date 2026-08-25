@@ -2,7 +2,7 @@ experiment:
   name: crossclip_teacher_projection
   hypothesis: >-
     Frozen 16-frame VGGT-Omega context predictions can supervise an
-    independently encoded DUNE ViT-S/14 plus Fast3R DPT point head through
+    jointly optimized DUNE ViT-S/14 plus Fast3R DPT point head through
     adjacent-clip teacher-coordinate projection.
 
 seed: 42
@@ -80,7 +80,7 @@ student:
   encoder_blocks: 12
   patch_size: 14
   dune_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
-  freeze_encoder: true
+  freeze_encoder: false
   use_fast3r_decoder: false
   normalize_mode: minus_one_one
   head_feature_dim: 256
@@ -108,10 +108,11 @@ dataloader:
 training:
   epochs: 20
   learning_rate: 1.0e-4
+  encoder_learning_rate: 1.0e-5
   min_learning_rate: 1.0e-6
   weight_decay: 0.05
   warmup_fraction: 0.05
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 8
   gradient_clip_norm: 1.0
   amp: true
   amp_dtype: auto

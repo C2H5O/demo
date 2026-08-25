@@ -41,11 +41,14 @@ def test_crossclip_config_encodes_fixed_method_contract() -> None:
     student = DuneFast3RHeadConfig(**config["student"])
     student.validate()
     assert tuple(student.encoder_layers) == (2, 5, 8, 11)
-    assert student.freeze_encoder is True
+    assert student.freeze_encoder is False
     assert student.use_fast3r_decoder is False
     assert student.head_initial_z_bias == 1.0
     assert student.head_initial_weight_std == 1.0e-4
     assert config["training"]["max_consecutive_zero_projection_batches"] == 5
+    assert config["training"]["learning_rate"] == 1.0e-4
+    assert config["training"]["encoder_learning_rate"] == 1.0e-5
+    assert config["training"]["gradient_accumulation_steps"] == 8
 
     loss = CrossClipProjectionLossConfig(**config["loss"])
     loss.validate()

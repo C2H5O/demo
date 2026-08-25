@@ -60,16 +60,45 @@ def _build_dataset(
 def build_crossclip_optimizer(
     model: DuneFast3RHeadStudent, training_config: Dict[str, Any]
 ) -> torch.optim.AdamW:
-    model.assert_freeze_contract()
-    encoder_ids = {id(parameter) for parameter in model.encoder.parameters()}
-    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    if not parameters:
+    model.assert_trainability_contract()
+    head_parameters = [
+        parameter for parameter in model.head.parameters() if parameter.requires_grad
+    ]
+    encoder_parameters = [
+        parameter for parameter in model.encoder.parameters() if parameter.requires_grad
+    ]
+    if not head_parameters:
         raise RuntimeError("Optimizer has no Fast3R DPT head parameters")
-    if any(id(parameter) in encoder_ids for parameter in parameters):
-        raise RuntimeError("Optimizer unexpectedly contains frozen DUNE parameters")
+    head_learning_rate = float(training_config["learning_rate"])
+    if head_learning_rate <= 0.0:
+        raise ValueError("training.learning_rate must be positive")
+    parameter_groups = [
+        {
+            "params": head_parameters,
+            "lr": head_learning_rate,
+            "name": "head",
+        }
+    ]
+    if model.config.freeze_encoder:
+        if encoder_parameters:
+            raise RuntimeError("Frozen DUNE parameters entered the optimizer")
+    else:
+        encoder_learning_rate = float(
+            training_config.get("encoder_learning_rate", head_learning_rate * 0.1)
+        )
+        if encoder_learning_rate <= 0.0:
+            raise ValueError("training.encoder_learning_rate must be positive")
+        if not encoder_parameters:
+            raise RuntimeError("Joint training has no DUNE encoder parameters")
+        parameter_groups.append(
+            {
+                "params": encoder_parameters,
+                "lr": encoder_learning_rate,
+                "name": "encoder",
+            }
+        )
     return torch.optim.AdamW(
-        parameters,
-        lr=float(training_config["learning_rate"]),
+        parameter_groups,
         weight_decay=float(training_config.get("weight_decay", 0.05)),
     )
 
@@ -250,6 +279,18 @@ def train_crossclip_projection(
             str(_project_path(resume_value)), map_location="cpu", weights_only=False
         )
         require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
+        checkpoint_frozen = bool(
+            checkpoint.get("config", {})
+            .get("student", {})
+            .get("freeze_encoder", True)
+        )
+        if checkpoint_frozen != bool(model.config.freeze_encoder):
+            raise ValueError(
+                "Checkpoint freeze_encoder={} does not match current {}. "
+                "Start a new run when changing encoder trainability.".format(
+                    checkpoint_frozen, model.config.freeze_encoder
+                )
+            )
         model.load_state_dict(checkpoint["model"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -270,8 +311,14 @@ def train_crossclip_projection(
     stats = model.parameter_statistics()
     print(
         "Cross-clip setup: clips={} batch={} frames=16 layers=[2,5,8,11] "
-        "trainable={:,} dune_frozen={:,}".format(
-            len(dataset), config["dataloader"]["batch_size"], stats["trainable"], stats["dune_frozen"]
+        "trainable={:,} dune_trainable={:,} dune_frozen={:,} "
+        "head_trainable={:,}".format(
+            len(dataset),
+            config["dataloader"]["batch_size"],
+            stats["trainable"],
+            stats["dune_trainable"],
+            stats["dune_frozen"],
+            stats["head_trainable"],
         )
     )
     optimizer.zero_grad(set_to_none=True)
@@ -350,6 +397,11 @@ def train_crossclip_projection(
                 "epoch": epoch,
                 "global_step": global_step,
                 "learning_rate": optimizer.param_groups[0]["lr"],
+                **{
+                    "encoder_learning_rate": group["lr"]
+                    for group in optimizer.param_groups
+                    if group.get("name") == "encoder"
+                },
                 **last_logs,
             }
             if dry_run or global_step % int(training_config.get("log_every", 10)) == 0:

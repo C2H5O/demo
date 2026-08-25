@@ -1,7 +1,8 @@
-"""Frozen DUNE ViT-S/14 intermediate features with an encoder-only Fast3R DPT head."""
+"""Trainable-or-frozen DUNE features with an encoder-only Fast3R DPT head."""
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
@@ -31,7 +32,7 @@ class DuneFast3RHeadConfig:
     encoder_blocks: int = 12
     patch_size: int = 14
     dune_checkpoint: str = "./checkpoints/dune/dune_vitsmall14_448.pth"
-    freeze_encoder: bool = True
+    freeze_encoder: bool = False
     use_fast3r_decoder: bool = False
     normalize_mode: str = "minus_one_one"
     head_feature_dim: int = 256
@@ -56,8 +57,6 @@ class DuneFast3RHeadConfig:
             raise ValueError("DUNE ViT-S requires patch_size=14")
         if self.image_height % self.patch_size or self.image_width % self.patch_size:
             raise ValueError("Input resolution must be divisible by patch_size=14")
-        if not self.freeze_encoder:
-            raise ValueError("The DUNE encoder must remain frozen")
         if self.use_fast3r_decoder:
             raise ValueError("Fast3R decoder is forbidden in this experiment")
         if self.normalize_mode != "minus_one_one":
@@ -178,7 +177,7 @@ class DuneFast3RHeadStudent(nn.Module):
         # module once so parameters and every buffer share the same device.
         self.to(target_device)
         self._validate_encoder_contract()
-        self._freeze_encoder()
+        self._configure_encoder_trainability()
 
     def _validate_encoder_contract(self) -> None:
         patch = getattr(self.encoder, "patch_size", None)
@@ -204,22 +203,26 @@ class DuneFast3RHeadStudent(nn.Module):
         if not hasattr(self.encoder, "get_intermediate_layers"):
             raise RuntimeError("DUNE encoder lacks get_intermediate_layers")
 
-    def _freeze_encoder(self) -> None:
-        self.encoder.eval()
+    def _configure_encoder_trainability(self) -> None:
+        trainable = not self.config.freeze_encoder
         for parameter in self.encoder.parameters():
-            parameter.requires_grad_(False)
+            parameter.requires_grad_(trainable)
+        self.encoder.train(trainable)
         if not any(parameter.requires_grad for parameter in self.head.parameters()):
             raise RuntimeError("Fast3R DPT head has no trainable parameters")
 
-    def assert_freeze_contract(self) -> None:
-        if any(parameter.requires_grad for parameter in self.encoder.parameters()):
+    def assert_trainability_contract(self) -> None:
+        encoder_flags = [parameter.requires_grad for parameter in self.encoder.parameters()]
+        if self.config.freeze_encoder and any(encoder_flags):
             raise RuntimeError("DUNE encoder unexpectedly has trainable parameters")
+        if not self.config.freeze_encoder and not all(encoder_flags):
+            raise RuntimeError("Joint training requires every DUNE parameter to be trainable")
         if not any(parameter.requires_grad for parameter in self.head.parameters()):
             raise RuntimeError("Fast3R DPT head unexpectedly has no trainable parameters")
 
     def train(self, mode: bool = True) -> "DuneFast3RHeadStudent":
         super().train(mode)
-        self.encoder.eval()
+        self.encoder.train(mode and not self.config.freeze_encoder)
         return self
 
     def parameter_statistics(self) -> Dict[str, int]:
@@ -228,11 +231,26 @@ class DuneFast3RHeadStudent(nn.Module):
             parameter.numel() for parameter in self.parameters() if parameter.requires_grad
         )
         encoder = sum(parameter.numel() for parameter in self.encoder.parameters())
+        encoder_trainable = sum(
+            parameter.numel()
+            for parameter in self.encoder.parameters()
+            if parameter.requires_grad
+        )
+        head = sum(parameter.numel() for parameter in self.head.parameters())
+        head_trainable = sum(
+            parameter.numel()
+            for parameter in self.head.parameters()
+            if parameter.requires_grad
+        )
         return {
             "total": total,
             "trainable": trainable,
             "frozen": total - trainable,
-            "dune_frozen": encoder,
+            "dune_total": encoder,
+            "dune_trainable": encoder_trainable,
+            "dune_frozen": encoder - encoder_trainable,
+            "head_total": head,
+            "head_trainable": head_trainable,
         }
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -250,7 +268,10 @@ class DuneFast3RHeadStudent(nn.Module):
         flat = images.reshape(batch * frames, 3, height, width)
         # Dataset uses MASt3R-style [-1,1]; DUNE expects ImageNet-normalized RGB.
         dune_input = (flat.mul(0.5).add(0.5) - self.imagenet_mean) / self.imagenet_std
-        with torch.no_grad():
+        encoder_context = (
+            torch.no_grad() if self.config.freeze_encoder else nullcontext()
+        )
+        with encoder_context:
             features = self.encoder.get_intermediate_layers(
                 dune_input,
                 n=list(self.config.encoder_layers),
