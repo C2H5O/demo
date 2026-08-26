@@ -172,8 +172,10 @@ def evaluate_vda(
                             for item in depth.cpu().numpy()
                         ]
                     )
-                    frame_indices = [int(value) for value in sample["frame_indices"]]
-                    spool.add(frame_indices, disparities)
+                    # The cache's frame_indices are absolute source IDs.  The
+                    # spool is indexed by sequence-local position so a
+                    # canonical sequence may preserve non-zero source IDs.
+                    spool.add(dataset.clips[index].frame_indices, disparities)
                     processed += 1
             spool.flush()
             sequence_results.append(

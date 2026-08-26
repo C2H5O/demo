@@ -15,7 +15,9 @@ from datasets.scared_clip_dataset import clip_metadata, make_scared_rgb_dataset
 from datasets.scared_dataset import ClipRecord, ScaredTemporalRGBDataset, seed_worker
 
 
-CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v1"
+# v2 deliberately refuses v1 caches: v1 stored a teacher forward at the
+# student grid and has neither the teacher input geometry nor dataset identity.
+CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v2"
 CROSSCLIP_CACHE_PROTOCOL = "crossclip_local_v1"
 LOCAL_CAMERA_COORDINATE_SYSTEM = "local_camera"
 WORLD_TO_CAMERA_POSE_CONVENTION = "world_to_camera: X_camera = R @ X_world + t"
@@ -51,7 +53,7 @@ def crossclip_teacher_cache_path(
 ) -> Path:
     return (
         Path(cache_root)
-        / "dataset_{:02d}".format(int(metadata["dataset_id"]))
+        / _safe_name(str(metadata.get("dataset_name", "SCARED")))
         / _safe_name(str(metadata["keyframe_id"]))
         / _safe_name(str(metadata["sequence_id"]))
         / "start_{:06d}_len_016_stride_01.npz".format(
@@ -64,32 +66,38 @@ def build_neighbor_clip_indices(
     clips: Sequence[ClipRecord],
 ) -> List[Tuple[Optional[int], Optional[int]]]:
     """Return dataset indices for C_(t-1), C_(t+1) within the same sequence."""
-    lookup: Dict[Tuple[str, int], int] = {}
+    lookup: Dict[Tuple[str, str, int], int] = {}
     for index, record in enumerate(clips):
-        key = (str(record.sequence["sequence_id"]), int(record.clip_start))
+        key = (str(record.sequence.get("dataset_name", "SCARED")), str(record.sequence["sequence_id"]), int(record.clip_start))
         if key in lookup:
             raise RuntimeError("Duplicate clip identity {}".format(key))
         lookup[key] = index
     result = []
     for record in clips:
+        dataset_name = str(record.sequence.get("dataset_name", "SCARED"))
         sequence_id = str(record.sequence["sequence_id"])
         start = int(record.clip_start)
         result.append(
             (
-                lookup.get((sequence_id, start - 1)),
-                lookup.get((sequence_id, start + 1)),
+                lookup.get((dataset_name, sequence_id, start - 1)),
+                lookup.get((dataset_name, sequence_id, start + 1)),
             )
         )
     return result
 
 
 REQUIRED_CROSSCLIP_CACHE_KEYS = (
+    "dataset_name",
     "sequence_id",
     "clip_start",
     "absolute_frame_ids",
     "frame_names",
     "input_height",
     "input_width",
+    "teacher_input_height",
+    "teacher_input_width",
+    "supervision_height",
+    "supervision_width",
     "depth",
     "xyz_local",
     "xyz_global",
@@ -134,6 +142,10 @@ def validate_crossclip_teacher_cache(
         raise RuntimeError("Cross-clip cache stage {!r} != {!r}".format(stage, expected_stage))
     height = int(cache["input_height"].item())
     width = int(cache["input_width"].item())
+    if (int(cache["supervision_height"].item()), int(cache["supervision_width"].item())) != (height, width):
+        raise RuntimeError("Cross-clip cache input and supervision resolution disagree")
+    if (int(cache["teacher_input_height"].item()), int(cache["teacher_input_width"].item())) != (1024, 1280):
+        raise RuntimeError("Cross-clip cache teacher input resolution must be 1024x1280")
     shape = (height, width)
     if expected_shape is not None and shape != tuple(expected_shape):
         raise RuntimeError("Cross-clip cache resolution {} != {}".format(shape, expected_shape))
@@ -248,6 +260,7 @@ def validate_crossclip_teacher_cache(
             )
     if metadata is not None:
         checks = {
+            "dataset_name": str(metadata.get("dataset_name", "SCARED")),
             "sequence_id": str(metadata["sequence_id"]),
             "clip_start": int(metadata["clip_start"]),
         }

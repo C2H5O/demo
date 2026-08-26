@@ -148,9 +148,9 @@ def align_crossclip_teacher_cache(
         int(config["dataset"]["image_width"]),
     )
     base_checkpoint = str(teacher_config["pretrained_checkpoint"])
-    groups: Dict[str, List[int]] = defaultdict(list)
+    groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     for index, record in enumerate(dataset.clips):
-        groups[str(record.sequence["sequence_id"])].append(index)
+        groups[(str(record.sequence.get("dataset_name", "SCARED")), str(record.sequence["sequence_id"]))].append(index)
 
     report: Dict[str, Any] = {
         "split": split,
@@ -159,7 +159,7 @@ def align_crossclip_teacher_cache(
         "audit_only": bool(audit_only),
         "sequences": [],
     }
-    for sequence_id, indices in groups.items():
+    for (dataset_name, sequence_id), indices in groups.items():
         indices.sort(key=lambda value: int(dataset.clips[value].clip_start))
         previous_aligned: Optional[Dict[str, np.ndarray]] = None
         previous_start: Optional[int] = None
@@ -219,7 +219,7 @@ def align_crossclip_teacher_cache(
             previous_aligned = aligned
             previous_start = start
         report["sequences"].append(
-            {"sequence_id": sequence_id, "clips": sequence_records}
+            {"dataset_name": dataset_name, "sequence_id": sequence_id, "clips": sequence_records}
         )
     report_path = report_override
     if report_path is None:

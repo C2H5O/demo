@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Subset
 
 from datasets.crossclip_teacher_dataset import (
@@ -29,10 +30,63 @@ from datasets.crossclip_teacher_dataset import (
 )
 from datasets.scared_clip_dataset import clip_metadata
 from datasets.scared_dataset import build_scared_dataloader
-from datasets.transforms import unnormalize_image
+from datasets.multidataset import TeacherClipInputDataset
 from models.teacher.output_adapter import adapt_teacher_outputs
 from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
 from utils.config import load_config
+
+
+TEACHER_SHAPE = (1024, 1280)
+SUPERVISION_SHAPE = (448, 560)
+
+
+def canonicalize_teacher_outputs(adapted: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Project native teacher maps onto the immutable student/cache grid.
+
+    Continuous maps use a valid-aware bilinear sampling grid so invalid zeros do
+    not bleed into valid geometry.  Binary masks use nearest-neighbour sampling.
+    Depth is set from the resampled local XYZ Z component to preserve the cache
+    validator's camera-coordinate invariant exactly.
+    """
+    valid = adapted["valid_mask"].bool()
+    if tuple(valid.shape[-2:]) != TEACHER_SHAPE:
+        raise ValueError("teacher outputs must be native 1024x1280")
+    batch, frames = valid.shape[:2]
+    flat_valid = valid.reshape(batch * frames, 1, *TEACHER_SHAPE).float()
+
+    def continuous(value: torch.Tensor) -> torch.Tensor:
+        channels_last = value.ndim == 5
+        if channels_last:
+            value = value.permute(0, 1, 4, 2, 3)
+        if not channels_last:
+            value = value.unsqueeze(2)
+        flat = value.reshape(batch * frames, value.shape[2], *TEACHER_SHAPE).float()
+        weight = F.interpolate(flat_valid, size=SUPERVISION_SHAPE, mode="bilinear", align_corners=False)
+        sampled = F.interpolate(flat * flat_valid, size=SUPERVISION_SHAPE, mode="bilinear", align_corners=False) / weight.clamp_min(1.0e-6)
+        sampled = torch.where(weight > 1.0e-6, sampled, torch.zeros_like(sampled))
+        sampled = sampled.reshape(batch, frames, sampled.shape[1], *SUPERVISION_SHAPE)
+        return sampled.permute(0, 1, 3, 4, 2).contiguous() if channels_last else sampled[:, :, 0]
+
+    output_valid = F.interpolate(flat_valid, size=SUPERVISION_SHAPE, mode="nearest").reshape(batch, frames, *SUPERVISION_SHAPE) > 0.5
+    local = continuous(adapted["xyz_local"])
+    output = {
+        "xyz_local": local,
+        "xyz_global": continuous(adapted["xyz_global"]),
+        "confidence": continuous(adapted["conf_local"]),
+        "valid_mask": output_valid,
+        "intrinsics": adapted["intrinsics"].float().clone(),
+        "extrinsics": adapted["extrinsics"].float(),
+    }
+    output["depth"] = torch.where(output_valid, local[..., 2], torch.zeros_like(local[..., 2]))
+    output["xyz_local"] = torch.where(output_valid[..., None], local, torch.zeros_like(local))
+    output["xyz_global"] = torch.where(output_valid[..., None], output["xyz_global"], torch.zeros_like(output["xyz_global"]))
+    output["confidence"] = torch.where(output_valid, output["confidence"], torch.zeros_like(output["confidence"]))
+    sx, sy = SUPERVISION_SHAPE[1] / TEACHER_SHAPE[1], SUPERVISION_SHAPE[0] / TEACHER_SHAPE[0]
+    output["intrinsics"][..., 0, 0] *= sx
+    output["intrinsics"][..., 1, 1] *= sy
+    output["intrinsics"][..., 0, 2] *= sx
+    output["intrinsics"][..., 1, 2] *= sy
+    return output
 
 
 def _atomic_npz(
@@ -159,6 +213,8 @@ def generate_crossclip_teacher_cache(
         int(dataset_config["image_height"]),
         int(dataset_config["image_width"]),
     )
+    if expected_shape != SUPERVISION_SHAPE:
+        raise ValueError("cross-clip supervision must remain 448x560")
     base_checkpoint = str(teacher_config["pretrained_checkpoint"])
     min_depth = float(teacher_config.get("min_depth", 0.1))
     max_depth = float(teacher_config.get("max_depth", 150.0))
@@ -248,8 +304,9 @@ def generate_crossclip_teacher_cache(
         )
         return
 
+    teacher_dataset = TeacherClipInputDataset(dataset)
     loader = build_scared_dataloader(
-        Subset(dataset, [item[0] for item in pending_items]),
+        Subset(teacher_dataset, [item[0] for item in pending_items]),
         batch_size=inference_batch_size,
         shuffle=False,
         num_workers=int(loader_config.get("num_workers", 4)),
@@ -271,12 +328,10 @@ def generate_crossclip_teacher_cache(
             batch_items = pending_items[cursor : cursor + batch_size]
             cursor += batch_size
 
-            # This is the exact deterministic student resize/crop result,
-            # converted from configured [-1,1] to VGGT-Omega's [0,1] RGB input.
-            images = unnormalize_image(
-                batch["images"], dataset.normalize_mode
-            ).to(device, non_blocking=True)
-            if tuple(images.shape) != (batch_size, 16, 3) + expected_shape:
+            # Teacher RGB is independently decoded at the canonical native grid;
+            # never upsample student RGB to manufacture a teacher input.
+            images = batch["images"].to(device, non_blocking=True)
+            if tuple(images.shape) != (batch_size, 16, 3) + TEACHER_SHAPE:
                 raise RuntimeError(
                     "Cross-clip RGB shape contract failed: {}".format(
                         tuple(images.shape)
@@ -293,16 +348,16 @@ def generate_crossclip_teacher_cache(
                     name: raw[name].float()
                     for name in ("pose_enc", "depth", "depth_conf")
                 },
-                image_shape=expected_shape,
+                image_shape=TEACHER_SHAPE,
                 min_depth=min_depth,
                 max_depth=max_depth,
             )
             expected_outputs = {
-                "depth": (batch_size, 16) + expected_shape,
-                "xyz_local": (batch_size, 16) + expected_shape + (3,),
-                "xyz_global": (batch_size, 16) + expected_shape + (3,),
-                "conf_local": (batch_size, 16) + expected_shape,
-                "valid_mask": (batch_size, 16) + expected_shape,
+                "depth": (batch_size, 16) + TEACHER_SHAPE,
+                "xyz_local": (batch_size, 16) + TEACHER_SHAPE + (3,),
+                "xyz_global": (batch_size, 16) + TEACHER_SHAPE + (3,),
+                "conf_local": (batch_size, 16) + TEACHER_SHAPE,
+                "valid_mask": (batch_size, 16) + TEACHER_SHAPE,
                 "intrinsics": (batch_size, 16, 3, 3),
                 "extrinsics": (batch_size, 16, 3, 4),
             }
@@ -317,6 +372,7 @@ def generate_crossclip_teacher_cache(
                         wrong, expected_outputs
                     )
                 )
+            adapted = canonicalize_teacher_outputs(adapted)
 
             for batch_index, (_, metadata, path) in enumerate(batch_items):
                 valid_array = (
@@ -397,6 +453,10 @@ def generate_crossclip_teacher_cache(
                     **metadata,
                     "input_height": expected_shape[0],
                     "input_width": expected_shape[1],
+                    "teacher_input_height": TEACHER_SHAPE[0],
+                    "teacher_input_width": TEACHER_SHAPE[1],
+                    "supervision_height": SUPERVISION_SHAPE[0],
+                    "supervision_width": SUPERVISION_SHAPE[1],
                     "resize_mode": dataset.resize_mode,
                     "normalize_mode": dataset.normalize_mode,
                     "pose_convention": WORLD_TO_CAMERA_POSE_CONVENTION,
@@ -411,6 +471,7 @@ def generate_crossclip_teacher_cache(
                     "valid_confidence_mean": float(valid_confidence.mean()),
                 }
                 arrays = {
+                    "dataset_name": np.asarray(metadata["dataset_name"], dtype=np.str_),
                     "sequence_id": np.asarray(
                         metadata["sequence_id"], dtype=np.str_
                     ),
@@ -429,6 +490,10 @@ def generate_crossclip_teacher_cache(
                     "input_width": np.asarray(
                         expected_shape[1], dtype=np.int64
                     ),
+                    "teacher_input_height": np.asarray(TEACHER_SHAPE[0], dtype=np.int64),
+                    "teacher_input_width": np.asarray(TEACHER_SHAPE[1], dtype=np.int64),
+                    "supervision_height": np.asarray(SUPERVISION_SHAPE[0], dtype=np.int64),
+                    "supervision_width": np.asarray(SUPERVISION_SHAPE[1], dtype=np.int64),
                     "depth": depth_array,
                     "xyz_local": local_array,
                     "xyz_global": global_array,

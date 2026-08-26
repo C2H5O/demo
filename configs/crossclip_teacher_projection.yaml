@@ -11,6 +11,7 @@ device: cuda
 dataset:
   name: scared
   root: ./data/SCARED
+  canonical_root: ./data/processed
   train_manifest_path: null
   test_manifest_path: null
   frame_source: auto
@@ -41,8 +42,8 @@ teacher:
   variant: base
   cache_protocol: crossclip_local_v1
   pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
-  raw_cache_root: ./data/teacher_cache_crossclip_base_raw_448x560
-  aligned_cache_root: ./data/teacher_cache_crossclip_base_aligned_448x560
+  raw_cache_root: ./data/teacher_cache_crossclip_base_raw_1024x1280_to_448x560
+  aligned_cache_root: ./data/teacher_cache_crossclip_base_aligned_1024x1280_to_448x560
   use_aligned_cache: true
   cache_dtype: float32
   inference_batch_size: 4

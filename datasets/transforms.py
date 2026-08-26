@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Union
 
 import numpy as np
@@ -70,3 +71,30 @@ def load_rgb_tensor(path: Union[str, Path], image_height: int, image_width: int,
         raise RuntimeError("Failed to decode SCARED RGB image {}: {}".format(path, error)) from error
     array = np.asarray(processed, dtype=np.float32) / 255.0
     return normalize_image(torch.from_numpy(array).permute(2, 0, 1).contiguous(), normalize_mode)
+
+
+def _decode_rgb(path: Union[str, Path], expected_size: tuple[int, int], label: str) -> torch.Tensor:
+    """Decode exact-size RGB without permitting an implicit FOV-changing resize."""
+    try:
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            if rgb.size != expected_size:
+                raise RuntimeError(
+                    "{} image {} has size {} but requires {}".format(
+                        label, path, rgb.size, expected_size
+                    )
+                )
+            array = np.asarray(rgb, dtype=np.float32) / 255.0
+    except (OSError, ValueError) as error:
+        raise RuntimeError("Failed to decode {} RGB image {}: {}".format(label, path, error)) from error
+    return torch.from_numpy(array).permute(2, 0, 1).contiguous()
+
+
+def load_precomputed_student_rgb_tensor(path: Union[str, Path], normalize_mode: str = "minus_one_one") -> torch.Tensor:
+    """Canonical student input: decode 560x448 PNG, with no spatial resize."""
+    return normalize_image(_decode_rgb(path, (560, 448), "precomputed student"), normalize_mode)
+
+
+def load_teacher_rgb_tensor(path: Union[str, Path]) -> torch.Tensor:
+    """Canonical teacher input: decode the required 1280x1024 RGB directly."""
+    return _decode_rgb(path, (1280, 1024), "teacher")

@@ -82,12 +82,17 @@ def _write_cache(root, dataset, index, stage="aligned"):
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
+        dataset_name=np.asarray(metadata["dataset_name"]),
         sequence_id=np.asarray(metadata["sequence_id"]),
         clip_start=np.asarray(metadata["clip_start"]),
         absolute_frame_ids=np.asarray(metadata["frame_indices"]),
         frame_names=np.asarray(metadata["frame_names"]),
         input_height=np.asarray(height),
         input_width=np.asarray(width),
+        teacher_input_height=np.asarray(1024),
+        teacher_input_width=np.asarray(1280),
+        supervision_height=np.asarray(height),
+        supervision_width=np.asarray(width),
         depth=depth,
         xyz_local=points,
         xyz_global=points.copy(),
