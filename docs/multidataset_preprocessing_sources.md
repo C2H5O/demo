@@ -31,11 +31,15 @@ reprojection before that common final step.
   repository README.
 - Stereo/mono: mono endoscope video.
 - Stereo layout: not applicable.
+- Local release layout: every sequence directory (for example `cecum_t1_a`)
+  contains the frame modalities together, including `*_color.png`,
+  `*_depth.tiff`, `*_normals.tiff`, `*_flow.tiff`, and `*_occlusion.png`, plus
+  sequence-level `pose.txt` and `coverage_mesh.obj`.  The script selects only
+  `color.png`/`*_color.png`; all GT modalities and mesh/pose files are ignored.
 - Rectification: the official repository supplies registration/rendering, not a
-  generic pinhole conversion in Python. The script requires
-  `--official-canonical-rgb` and only accepts directories named `rgb`,
-  `registered_rgb`, `reprojected_rgb`, or `perspective_rgb`; it will not process
-  raw omnidirectional frames as pinhole images.
+  generic pinhole conversion in Python. The script still requires
+  `--official-canonical-rgb`; recognition of the local colour-file layout does
+  not attest that it is a perspective reprojection.
 - Canonical FOV construction: official registered/reprojected perspective RGB,
   attested by the operator, then proportional 4:5 contain+pad.
 - Teacher/student transform: same canonical frame → 1280×1024 / 560×448.
@@ -58,6 +62,11 @@ reprojection before that common final step.
 - Original resolution/FPS/camera model/calibration format: **UNVERIFIED** for
   this release.
 - Stereo/mono: stereo (verified by the dataset name/use in Endo3R literature).
+- Local release layout: sequences are `P1`, `P2_0` ... `P2_8`.  `P1` uses
+  `video.mp4`; P2 directories contain one video (observed
+  `IFBS_ENDOSCOPE-part0000.mp4`), `StereoCalibration.ini`, `groundtruth.txt`,
+  and `masks/`.  Only the video is discovered; masks and ground truth are not
+  read.
 - Stereo layout: **UNVERIFIED**. The script accepts only an attested
   `rectified_left`/`left_rectified` directory, or a caller-selected
   `side-by-side`/`top-bottom` packed layout after official rectification. It
@@ -100,6 +109,10 @@ reprojection before that common final step.
   training preprocessing is not released.
 - Fallback source: none used.
 - Original resolution: verified SXGA 1280×1024 per eye in the challenge paper.
+- Local release layout: `train` contains releases 1--4 and `test` contains four
+  sequence directories; both splits are discovered for training.  Release 1
+  has an extra `miccai_challenge_2018_release_1/` directory before `seq_x`.
+  Each sequence's `left_frames` is selected and `labels.json` is ignored.
 - Stereo/mono: verified stereo pairs; left and right are separate directories
   (`left_frames`, `right_frames`) in common challenge releases.
 - Camera model: calibrated da Vinci Xi stereo; detailed model/distortion field

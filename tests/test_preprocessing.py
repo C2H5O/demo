@@ -7,7 +7,9 @@ from PIL import Image
 
 from datasets.preprocessing.common import ProcessedFrame, SequenceWriter, contiguous_runs
 from datasets.preprocessing.geometry import contain_depth_valid_aware
-from scripts.preprocess_stereomis import split_stereo_frame
+from scripts.preprocess_c3vd import candidate_rgb_dirs
+from scripts.preprocess_endovis18 import left_frame_directories, sequence_id_for_left_frames
+from scripts.preprocess_stereomis import sequence_videos, split_stereo_frame
 from scripts.validate_preprocessed_datasets import clip_count, validate_sequence
 
 
@@ -59,6 +61,43 @@ def test_explicit_stereo_splits_are_not_guessed() -> None:
     assert vertical_left.size == vertical_right.size == (2, 4)
     with pytest.raises(ValueError):
         split_stereo_frame(image, "unknown")
+
+
+def test_c3vd_discovers_only_colour_frames_in_a_sequence_directory(tmp_path: Path) -> None:
+    sequence = tmp_path / "cecum_t1_a"
+    sequence.mkdir()
+    for name in ("000001_color.png", "000002_color.png", "000001_occlusion.png"):
+        Image.new("RGB", (3, 2)).save(sequence / name)
+    discovered = candidate_rgb_dirs(tmp_path)
+    assert discovered == [(sequence, [sequence / "000001_color.png", sequence / "000002_color.png"])]
+
+
+def test_endovis_release_one_and_test_keep_distinct_sequence_identity(tmp_path: Path) -> None:
+    release_one = tmp_path / "train" / "miccai_challenge_2018_release_1" / "miccai_challenge_2018_release_1" / "seq_1" / "left_frames"
+    test = tmp_path / "test" / "seq_1" / "left_frames"
+    for directory in (release_one, test):
+        directory.mkdir(parents=True)
+        Image.new("RGB", (3, 2)).save(directory / "frame000.png")
+    discovered = left_frame_directories(tmp_path)
+    identifiers = {sequence_id_for_left_frames(directory, tmp_path) for directory in discovered}
+    assert identifiers == {
+        "train_miccai_challenge_2018_release_1_miccai_challenge_2018_release_1_seq_1",
+        "test_seq_1",
+    }
+
+
+def test_stereomis_p1_video_and_p2_video_are_discovered_per_sequence(tmp_path: Path) -> None:
+    p1 = tmp_path / "P1"
+    p2 = tmp_path / "P2_0"
+    p1.mkdir()
+    p2.mkdir()
+    (p1 / "video.mp4").touch()
+    (p2 / "IFBS_ENDOSCOPE-part0000.mp4").touch()
+    (p2 / "groundtruth.txt").touch()
+    assert sequence_videos(tmp_path) == [
+        (p1, p1 / "video.mp4"),
+        (p2, p2 / "IFBS_ENDOSCOPE-part0000.mp4"),
+    ]
 
 
 def test_hamlyn_depth_matches_student_grid_and_preserves_invalids(tmp_path: Path) -> None:

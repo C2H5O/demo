@@ -34,6 +34,38 @@ def split_stereo_frame(image: Image.Image, layout: str) -> tuple[Image.Image, Im
     raise ValueError(f"unsupported explicit stereo layout: {layout}")
 
 
+def sequence_videos(root: Path) -> list[tuple[Path, Path]]:
+    """Discover the documented one-video-per-P1/P2_* StereoMIS layout.
+
+    ``P1/video.mp4`` is intentionally handled alongside the P2 directories,
+    whose video is commonly named ``IFBS_ENDOSCOPE-part0000.mp4``.  Masks and
+    ``groundtruth.txt`` are ignored: this RGB-only training preprocessor does
+    not consume them.
+    """
+    result: list[tuple[Path, Path]] = []
+    sequence_dirs = [
+        directory
+        for directory in [root, *sorted(root.rglob("*"))]
+        if directory.is_dir() and (directory.name == "P1" or directory.name.startswith("P2_"))
+    ]
+    for directory in sequence_dirs:
+        videos = sorted(
+            (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv"}),
+            key=lambda path: path.name.lower(),
+        )
+        if not videos:
+            continue
+        if directory.name == "P1":
+            p1_video = directory / "video.mp4"
+            if p1_video.is_file():
+                result.append((directory, p1_video))
+                continue
+        if len(videos) != 1:
+            raise RuntimeError(f"expected exactly one StereoMIS video in {directory}, found {[path.name for path in videos]}")
+        result.append((directory, videos[0]))
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, required=True)
@@ -45,7 +77,7 @@ def main() -> int:
     parser.add_argument("--allow-packed-video-after-official-rectification", action="store_true", help="acknowledges that decoding/split input has already been rectified by an official workflow")
     args = parser.parse_args()
     candidates = [p for p in args.input_root.rglob("*") if p.is_dir() and p.name.lower() in {"rectified_left", "left_rectified", "left"} and image_files(p)]
-    videos = [p for p in args.input_root.rglob("*") if p.is_file() and p.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv"}]
+    videos = sequence_videos(args.input_root)
     results = []
     if candidates:
         if not args.already_rectified_left:
@@ -64,8 +96,8 @@ def main() -> int:
     if videos:
         if not (args.stereo_layout and args.allow_packed_video_after_official_rectification):
             parser.error("packed StereoMIS video needs explicit --stereo-layout and --allow-packed-video-after-official-rectification; this script never guesses or self-invents calibration")
-        for video in videos:
-            sequence_id = video.relative_to(args.input_root).with_suffix("").as_posix().replace("/", "_")
+        for sequence_dir, video in videos:
+            sequence_id = sequence_dir.relative_to(args.input_root).as_posix().replace("/", "_")
             destination = args.output_root / "StereoMIS" / sequence_id
             if not args.dry_run:
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +105,7 @@ def main() -> int:
                 for index, timestamp, frame in stream_video_frames(video):
                     left, _right = split_stereo_frame(frame, args.stereo_layout)
                     writer.write_rgb(ProcessedFrame(video, index, timestamp), index, left)
-                writer.complete({"eye": "left", "stereo_layout": args.stereo_layout, "rectification": "caller attested packed video already has official rectification", "source_video": str(video), "training_gt_written": False})
+                writer.complete({"eye": "left", "stereo_layout": args.stereo_layout, "rectification": "caller attested packed video already has official rectification", "source_video": str(video), "calibration_file": str(sequence_dir / "StereoCalibration.ini") if (sequence_dir / "StereoCalibration.ini").is_file() else None, "ignored_files": ["masks/", "groundtruth.txt"], "training_gt_written": False})
                 results.append({"sequence": sequence_id, "frames": len(writer.frames), "output": str(destination), "dry_run": args.dry_run})
     if not results:
         raise SystemExit("no supported StereoMIS candidate found; expected rectified_left/ (attested) or a packed video with explicit layout")
