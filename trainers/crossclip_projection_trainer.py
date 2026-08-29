@@ -1,4 +1,4 @@
-"""Trainer for frozen-DUNE cross-clip teacher projection."""
+"""Trainer for VGGT-Omega cache -> DA3-Small cross-clip projection."""
 
 from __future__ import annotations
 
@@ -15,10 +15,11 @@ from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_PROTOCOL,
     ScaredCrossClipProjectionDataset,
     build_crossclip_projection_dataloader,
+    crossclip_teacher_cache_path,
     make_crossclip_rgb_dataset,
 )
 from losses.crossclip_projection_loss import CrossClipProjectionLoss
-from models.student.dune_fast3r_head import DuneFast3RHeadStudent
+from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import atomic_torch_save, require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 from utils.seed import seed_everything
@@ -49,26 +50,68 @@ def _build_dataset(
     )
     missing = dataset.missing_neighbor_cache_paths(limit=5)
     if missing:
+        examples = []
+        for index, (left, right) in enumerate(dataset.neighbors):
+            current = dataset._metadata(index)
+            for neighbor_index in (left, right):
+                if neighbor_index is None:
+                    continue
+                neighbor = dataset._metadata(neighbor_index)
+                path = crossclip_teacher_cache_path(dataset.cache_root, neighbor)
+                if not path.is_file():
+                    examples.append(
+                        "dataset={} sequence={} clip_start={} expected_neighbor_start={} expected_cache_path={}".format(
+                            current.get("dataset_name", current.get("dataset_id")),
+                            current["sequence_id"], current["clip_start"],
+                            neighbor["clip_start"], path,
+                        )
+                    )
+                    if len(examples) >= 5:
+                        break
+            if len(examples) >= 5:
+                break
         raise FileNotFoundError(
-            "Cross-clip neighbor caches are incomplete: {}".format(
-                ", ".join(str(path) for path in missing)
-            )
+            "Cross-clip neighbor caches are incomplete: {}".format("; ".join(examples))
         )
     return dataset
 
 
+def _print_stride8_examples(dataset: ScaredCrossClipProjectionDataset, limit: int = 3) -> None:
+    """Print absolute-frame evidence that neighbors are s-8/s+8, never s+/-1."""
+    for index in range(min(limit, len(dataset))):
+        current = dataset._metadata(index)
+        current_ids = list(current["frame_indices"])
+        left, right = dataset.neighbors[index]
+        pieces = []
+        for label, neighbor_index in (("previous", left), ("next", right)):
+            if neighbor_index is None:
+                pieces.append("{}=None overlap_count=0".format(label))
+                continue
+            neighbor = dataset._metadata(neighbor_index)
+            overlap = sorted(set(current_ids).intersection(neighbor["frame_indices"]))
+            if len(overlap) != 8:
+                raise RuntimeError("Stride8 audit found {} overlap frames".format(len(overlap)))
+            pieces.append(
+                "{}_start={} overlap_count=8 overlap_ids={}".format(
+                    label, neighbor["clip_start"], overlap
+                )
+            )
+        print(
+            "stride8 audit: sequence={} current_start={} absolute_ids={} {}".format(
+                current["sequence_id"], current["clip_start"], current_ids, " | ".join(pieces)
+            )
+        )
+
+
 def build_crossclip_optimizer(
-    model: DuneFast3RHeadStudent, training_config: Dict[str, Any]
+    model: DA3SmallStudent, training_config: Dict[str, Any]
 ) -> torch.optim.AdamW:
     model.assert_trainability_contract()
-    head_parameters = [
-        parameter for parameter in model.head.parameters() if parameter.requires_grad
-    ]
-    encoder_parameters = [
-        parameter for parameter in model.encoder.parameters() if parameter.requires_grad
-    ]
-    if not head_parameters:
-        raise RuntimeError("Optimizer has no Fast3R DPT head parameters")
+    groups = model.parameter_groups()
+    head_parameters = groups["depth_head"] + groups["camera_encoder"] + groups["camera_decoder"]
+    encoder_parameters = groups["backbone"]
+    if not groups["depth_head"] or not groups["camera_decoder"]:
+        raise RuntimeError("Optimizer requires pretrained DA3 depth and camera-decoder parameters")
     head_learning_rate = float(training_config["learning_rate"])
     if head_learning_rate <= 0.0:
         raise ValueError("training.learning_rate must be positive")
@@ -79,9 +122,9 @@ def build_crossclip_optimizer(
             "name": "head",
         }
     ]
-    if model.config.freeze_encoder:
+    if model.config.freeze_backbone:
         if encoder_parameters:
-            raise RuntimeError("Frozen DUNE parameters entered the optimizer")
+            raise RuntimeError("Frozen DA3 backbone parameters entered the optimizer")
     else:
         encoder_learning_rate = float(
             training_config.get("encoder_learning_rate", head_learning_rate * 0.1)
@@ -89,7 +132,7 @@ def build_crossclip_optimizer(
         if encoder_learning_rate <= 0.0:
             raise ValueError("training.encoder_learning_rate must be positive")
         if not encoder_parameters:
-            raise RuntimeError("Joint training has no DUNE encoder parameters")
+            raise RuntimeError("Joint training has no DA3 backbone parameters")
         parameter_groups.append(
             {
                 "params": encoder_parameters,
@@ -231,21 +274,22 @@ def train_crossclip_projection(
     dataset_config = config.get("dataset", {})
     if not bool(dataset_config.get("random_clip_sampling", True)):
         raise ValueError("Training must randomly sample legal clip-start IDs")
-    if int(dataset_config.get("teacher_neighbor_offset", 1)) != 1:
-        raise ValueError("teacher_neighbor_offset must be one clip start")
+    if int(dataset_config.get("window_stride", -1)) != 8:
+        raise ValueError("dataset.window_stride must be 8; teacher neighbors are derived from it")
     seed_everything(int(config.get("seed", 42)))
     requested_device = str(config.get("device", "cuda"))
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     device = torch.device(requested_device)
     dataset = _build_dataset(config, "train")
+    _print_stride8_examples(dataset)
     loader = build_crossclip_projection_dataloader(
         dataset,
         config["dataloader"],
         int(config.get("seed", 42)),
         shuffle=True,
     )
-    model = DuneFast3RHeadStudent(config["student"], device=device)
+    model = DA3SmallStudent(config["student"], device=device)
     model.train()
     loss_function = CrossClipProjectionLoss(config["loss"]).to(device)
     training_config = config["training"]
@@ -279,16 +323,15 @@ def train_crossclip_projection(
             str(_project_path(resume_value)), map_location="cpu", weights_only=False
         )
         require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
-        checkpoint_frozen = bool(
-            checkpoint.get("config", {})
-            .get("student", {})
-            .get("freeze_encoder", True)
-        )
-        if checkpoint_frozen != bool(model.config.freeze_encoder):
+        checkpoint_student = checkpoint.get("config", {}).get("student", {})
+        if checkpoint_student.get("architecture") != "da3_small":
+            raise ValueError("Resume checkpoint is not a DA3-Small experiment")
+        checkpoint_frozen = bool(checkpoint_student.get("freeze_backbone", False))
+        if checkpoint_frozen != bool(model.config.freeze_backbone):
             raise ValueError(
-                "Checkpoint freeze_encoder={} does not match current {}. "
-                "Start a new run when changing encoder trainability.".format(
-                    checkpoint_frozen, model.config.freeze_encoder
+                "Checkpoint freeze_backbone={} does not match current {}. "
+                "Start a new run when changing backbone trainability.".format(
+                    checkpoint_frozen, model.config.freeze_backbone
                 )
             )
         model.load_state_dict(checkpoint["model"], strict=True)
@@ -310,15 +353,18 @@ def train_crossclip_projection(
 
     stats = model.parameter_statistics()
     print(
-        "Cross-clip setup: clips={} batch={} frames=16 layers=[2,5,8,11] "
-        "trainable={:,} dune_trainable={:,} dune_frozen={:,} "
-        "head_trainable={:,}".format(
+        "VGGT-DA3 setup: clips={} batch={} frames=16 input=448x560 patch_grid=32x40 "
+        "window_stride=8 trainable={:,} backbone_trainable={:,} "
+        "depth_trainable={:,} camera_encoder_trainable={:,} "
+        "camera_decoder_trainable={:,} ray_trainable={:,}".format(
             len(dataset),
             config["dataloader"]["batch_size"],
             stats["trainable"],
-            stats["dune_trainable"],
-            stats["dune_frozen"],
-            stats["head_trainable"],
+            stats["backbone_trainable"],
+            stats["depth_head_trainable"],
+            stats["camera_encoder_trainable"],
+            stats["camera_decoder_trainable"],
+            stats["ray_trainable"],
         )
     )
     optimizer.zero_grad(set_to_none=True)
@@ -369,13 +415,37 @@ def train_crossclip_projection(
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite cross-clip loss: {}".format(last_logs))
             window_start = (batch_index // accumulation) * accumulation
-            window_size = min(accumulation, len(loader) - window_start)
+            window_size = 1 if dry_run else min(accumulation, len(loader) - window_start)
             scaler.scale(loss / window_size).backward()
-            should_step = ((batch_index + 1) % accumulation == 0) or (
+            should_step = dry_run or ((batch_index + 1) % accumulation == 0) or (
                 batch_index + 1 == len(loader)
             )
             if not should_step:
                 continue
+            if dry_run:
+                group_gradients = {
+                    name: any(parameter.grad is not None for parameter in group)
+                    for name, group in model.parameter_groups().items()
+                    if group
+                }
+                required_gradients = ("backbone", "depth_head", "camera_decoder")
+                missing_gradients = [
+                    name for name in required_gradients if not group_gradients.get(name, False)
+                ]
+                if missing_gradients:
+                    raise RuntimeError(
+                        "Dry-run loss did not reach DA3 components {}".format(missing_gradients)
+                    )
+                shapes = {key: list(value.shape) for key, value in prediction.items()}
+                print(
+                    "VGGT-DA3 dry run passed: shapes={} gradients={} ray_forward_count={}".format(
+                        shapes, group_gradients, model._ray_forward_count
+                    )
+                )
+                return {
+                    "status": "passed", "output_shapes": shapes,
+                    "gradient_components": group_gradients, **last_logs,
+                }
             scaler.unscale_(optimizer)
             bad_gradients = [
                 name
@@ -406,10 +476,6 @@ def train_crossclip_projection(
             }
             if dry_run or global_step % int(training_config.get("log_every", 10)) == 0:
                 print(" ".join("{}={}".format(key, value) for key, value in record.items()))
-            if dry_run:
-                shapes = {key: list(value.shape) for key, value in prediction.items()}
-                print("Cross-clip dry run passed: {}".format(shapes))
-                return {"status": "passed", "output_shapes": shapes, **last_logs}
             _append_jsonl(output_dir / "metrics.jsonl", record)
             if max_steps is not None and global_step >= max_steps:
                 return {"status": "stopped", "global_step": global_step, **last_logs}

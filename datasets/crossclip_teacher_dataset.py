@@ -1,4 +1,4 @@
-"""Stride-one 16-frame samples with neighboring frozen teacher clip caches."""
+"""Stride-eight 16-frame samples with lazy neighboring teacher cache reads."""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ from datasets.scared_clip_dataset import clip_metadata, make_scared_rgb_dataset
 from datasets.scared_dataset import ClipRecord, ScaredTemporalRGBDataset, seed_worker
 
 
-# v2 deliberately refuses v1 caches: v1 stored a teacher forward at the
-# student grid and has neither the teacher input geometry nor dataset identity.
-CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v2"
+CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v1"
+SUPPORTED_CROSSCLIP_CACHE_FORMAT_VERSIONS = {
+    "vggtomega-crossclip-local-v1",
+    "vggtomega-crossclip-local-v2",
+}
 CROSSCLIP_CACHE_PROTOCOL = "crossclip_local_v1"
 LOCAL_CAMERA_COORDINATE_SYSTEM = "local_camera"
 WORLD_TO_CAMERA_POSE_CONVENTION = "world_to_camera: X_camera = R @ X_world + t"
@@ -30,7 +32,7 @@ def _safe_name(value: str) -> str:
 def make_crossclip_rgb_dataset(
     dataset_config: Dict[str, Any], split: str
 ) -> ScaredTemporalRGBDataset:
-    """Build every legal 16-frame clip: C_0 ... C_(n-16), never crossing sequences."""
+    """Build only C_0, C_8, C_16...; frames inside each clip stay consecutive."""
     config = dict(dataset_config)
     for key in ("random_clip_sampling", "teacher_neighbor_offset"):
         config.pop(key, None)
@@ -38,22 +40,30 @@ def make_crossclip_rgb_dataset(
         {
             "clip_length": 16,
             "sample_stride": 1,
-            "window_stride": 1,
+            "window_stride": 8,
             "drop_incomplete_clip": True,
         }
     )
     dataset = make_scared_rgb_dataset(config, split)
-    if dataset.clip_length != 16 or dataset.sample_stride != 1 or dataset.window_stride != 1:
-        raise RuntimeError("Cross-clip dataset failed to enforce 16-frame stride-one clips")
+    if dataset.clip_length != 16 or dataset.sample_stride != 1 or dataset.window_stride != 8:
+        raise RuntimeError("Cross-clip dataset failed to enforce length=16 sample_stride=1 window_stride=8")
+    if any(int(record.clip_start) % 8 for record in dataset.clips):
+        raise RuntimeError("Training dataset contains a clip_start not divisible by 8")
     return dataset
 
 
 def crossclip_teacher_cache_path(
     cache_root: Union[str, Path], metadata: Dict[str, Any]
 ) -> Path:
+    dataset_name = str(metadata.get("dataset_name", "SCARED"))
+    dataset_directory = (
+        "dataset_{:02d}".format(int(metadata["dataset_id"]))
+        if dataset_name == "SCARED"
+        else _safe_name(dataset_name)
+    )
     return (
         Path(cache_root)
-        / _safe_name(str(metadata.get("dataset_name", "SCARED")))
+        / dataset_directory
         / _safe_name(str(metadata["keyframe_id"]))
         / _safe_name(str(metadata["sequence_id"]))
         / "start_{:06d}_len_016_stride_01.npz".format(
@@ -64,8 +74,11 @@ def crossclip_teacher_cache_path(
 
 def build_neighbor_clip_indices(
     clips: Sequence[ClipRecord],
+    window_stride: int = 8,
 ) -> List[Tuple[Optional[int], Optional[int]]]:
-    """Return dataset indices for C_(t-1), C_(t+1) within the same sequence."""
+    """Return dataset indices for C_(t-8), C_(t+8) in the same dataset/sequence."""
+    if window_stride != 8:
+        raise ValueError("Cross-clip neighbor stride must be 8")
     lookup: Dict[Tuple[str, str, int], int] = {}
     for index, record in enumerate(clips):
         key = (str(record.sequence.get("dataset_name", "SCARED")), str(record.sequence["sequence_id"]), int(record.clip_start))
@@ -79,25 +92,20 @@ def build_neighbor_clip_indices(
         start = int(record.clip_start)
         result.append(
             (
-                lookup.get((dataset_name, sequence_id, start - 1)),
-                lookup.get((dataset_name, sequence_id, start + 1)),
+                lookup.get((dataset_name, sequence_id, start - window_stride)),
+                lookup.get((dataset_name, sequence_id, start + window_stride)),
             )
         )
     return result
 
 
 REQUIRED_CROSSCLIP_CACHE_KEYS = (
-    "dataset_name",
     "sequence_id",
     "clip_start",
     "absolute_frame_ids",
     "frame_names",
     "input_height",
     "input_width",
-    "teacher_input_height",
-    "teacher_input_width",
-    "supervision_height",
-    "supervision_width",
     "depth",
     "xyz_local",
     "xyz_global",
@@ -127,8 +135,9 @@ def validate_crossclip_teacher_cache(
     missing = [key for key in REQUIRED_CROSSCLIP_CACHE_KEYS if key not in cache]
     if missing:
         raise RuntimeError("Cross-clip cache is missing keys {}".format(missing))
-    if str(cache["cache_format_version"].item()) != CROSSCLIP_CACHE_FORMAT_VERSION:
-        raise RuntimeError("Incompatible cross-clip teacher cache version")
+    version = str(cache["cache_format_version"].item())
+    if version not in SUPPORTED_CROSSCLIP_CACHE_FORMAT_VERSIONS:
+        raise RuntimeError("Incompatible cross-clip teacher cache version {!r}".format(version))
     if str(cache["teacher_variant"].item()) != "base":
         raise RuntimeError("Cross-clip cache must come from the frozen base teacher")
     if str(cache["pose_convention"].item()) != WORLD_TO_CAMERA_POSE_CONVENTION:
@@ -142,10 +151,14 @@ def validate_crossclip_teacher_cache(
         raise RuntimeError("Cross-clip cache stage {!r} != {!r}".format(stage, expected_stage))
     height = int(cache["input_height"].item())
     width = int(cache["input_width"].item())
-    if (int(cache["supervision_height"].item()), int(cache["supervision_width"].item())) != (height, width):
-        raise RuntimeError("Cross-clip cache input and supervision resolution disagree")
-    if (int(cache["teacher_input_height"].item()), int(cache["teacher_input_width"].item())) != (1024, 1280):
-        raise RuntimeError("Cross-clip cache teacher input resolution must be 1024x1280")
+    if "supervision_height" in cache and "supervision_width" in cache:
+        if (int(cache["supervision_height"].item()), int(cache["supervision_width"].item())) != (height, width):
+            raise RuntimeError("Cross-clip cache input and supervision resolution disagree")
+    # Native teacher geometry is retained and audited when v2 metadata exists.
+    if "teacher_input_height" in cache and "teacher_input_width" in cache:
+        teacher_shape = (int(cache["teacher_input_height"].item()), int(cache["teacher_input_width"].item()))
+        if min(teacher_shape) <= 0 or teacher_shape[0] < height or teacher_shape[1] < width:
+            raise RuntimeError("Invalid native teacher input resolution {}".format(teacher_shape))
     shape = (height, width)
     if expected_shape is not None and shape != tuple(expected_shape):
         raise RuntimeError("Cross-clip cache resolution {} != {}".format(shape, expected_shape))
@@ -260,10 +273,11 @@ def validate_crossclip_teacher_cache(
             )
     if metadata is not None:
         checks = {
-            "dataset_name": str(metadata.get("dataset_name", "SCARED")),
             "sequence_id": str(metadata["sequence_id"]),
             "clip_start": int(metadata["clip_start"]),
         }
+        if "dataset_name" in cache:
+            checks["dataset_name"] = str(metadata.get("dataset_name", "SCARED"))
         for key, expected in checks.items():
             if cache[key].item() != expected:
                 raise RuntimeError("Cross-clip cache metadata mismatch for {}".format(key))
@@ -276,6 +290,7 @@ def validate_crossclip_teacher_cache(
 def _load_overlap_side(
     path: Path,
     teacher_metadata: Dict[str, Any],
+    current_metadata: Dict[str, Any],
     student_absolute_ids: Sequence[int],
     side: str,
     expected_shape: Tuple[int, int],
@@ -283,7 +298,16 @@ def _load_overlap_side(
     expected_stage: str,
 ) -> Dict[str, Any]:
     if not path.is_file():
-        raise FileNotFoundError("Neighbor teacher cache missing: {}".format(path))
+        raise FileNotFoundError(
+            "Neighbor teacher cache missing: dataset={} sequence={} clip_start={} "
+            "expected_neighbor_start={} expected_cache_path={}".format(
+                teacher_metadata.get("dataset_name", teacher_metadata.get("dataset_id")),
+                teacher_metadata["sequence_id"],
+                current_metadata["clip_start"],
+                teacher_metadata["clip_start"],
+                path,
+            )
+        )
     with np.load(str(path), allow_pickle=False) as cache:
         validate_crossclip_teacher_cache(
             cache,
@@ -292,8 +316,8 @@ def _load_overlap_side(
             expected_base_checkpoint,
             expected_stage,
         )
-        teacher_slice = slice(1, 16) if side == "left" else slice(0, 15)
-        student_slice = slice(0, 15) if side == "left" else slice(1, 16)
+        teacher_slice = slice(8, 16) if side == "left" else slice(0, 8)
+        student_slice = slice(0, 8) if side == "left" else slice(8, 16)
         expected_ids = list(student_absolute_ids[student_slice])
         actual_ids = cache["absolute_frame_ids"][teacher_slice].tolist()
         if actual_ids != expected_ids:
@@ -308,17 +332,12 @@ def _load_overlap_side(
             "confidence": torch.from_numpy(cache["confidence"][teacher_slice].copy()).detach(),
             "valid_mask": torch.from_numpy(cache["valid_mask"][teacher_slice].copy()).detach(),
             "intrinsics": torch.from_numpy(cache["intrinsics"][teacher_slice].copy()).detach(),
+            "extrinsics": torch.from_numpy(cache["extrinsics"][teacher_slice].copy()).detach(),
             "absolute_frame_ids": torch.tensor(actual_ids, dtype=torch.long),
-            "student_local_indices": torch.arange(
-                0 if side == "left" else 1,
-                15 if side == "left" else 16,
-                dtype=torch.long,
-            ),
-            "teacher_local_indices": torch.arange(
-                1 if side == "left" else 0,
-                16 if side == "left" else 15,
-                dtype=torch.long,
-            ),
+            "student_local_indices": torch.arange(0, 8, dtype=torch.long)
+            if side == "left" else torch.arange(8, 16, dtype=torch.long),
+            "teacher_local_indices": torch.arange(8, 16, dtype=torch.long)
+            if side == "left" else torch.arange(0, 8, dtype=torch.long),
             "clip_start": torch.tensor(int(teacher_metadata["clip_start"])),
             "sequence_id": str(teacher_metadata["sequence_id"]),
             "cache_path": str(path),
@@ -332,13 +351,14 @@ def _empty_overlap_side(
     height, width = shape
     return {
         "exists": torch.tensor(False),
-        "depth": torch.zeros(15, height, width),
-        "confidence": torch.zeros(15, height, width),
-        "valid_mask": torch.zeros(15, height, width, dtype=torch.bool),
-        "intrinsics": torch.zeros(15, 3, 3),
-        "absolute_frame_ids": torch.full((15,), -1, dtype=torch.long),
-        "student_local_indices": torch.full((15,), -1, dtype=torch.long),
-        "teacher_local_indices": torch.full((15,), -1, dtype=torch.long),
+        "depth": torch.zeros(8, height, width),
+        "confidence": torch.zeros(8, height, width),
+        "valid_mask": torch.zeros(8, height, width, dtype=torch.bool),
+        "intrinsics": torch.zeros(8, 3, 3),
+        "extrinsics": torch.zeros(8, 3, 4),
+        "absolute_frame_ids": torch.full((8,), -1, dtype=torch.long),
+        "student_local_indices": torch.full((8,), -1, dtype=torch.long),
+        "teacher_local_indices": torch.full((8,), -1, dtype=torch.long),
         "clip_start": torch.tensor(-1),
         "sequence_id": sequence_id,
         "cache_path": "",
@@ -346,7 +366,7 @@ def _empty_overlap_side(
 
 
 class ScaredCrossClipProjectionDataset(Dataset):
-    """Load C_t RGB and only the existing C_(t-1)/C_(t+1) teacher targets."""
+    """Load C_s RGB plus only the required C_(s-8)/C_(s+8) cache slices."""
 
     def __init__(
         self,
@@ -359,7 +379,9 @@ class ScaredCrossClipProjectionDataset(Dataset):
         self.cache_root = Path(cache_root)
         self.expected_base_checkpoint = expected_base_checkpoint
         self.expected_stage = expected_stage
-        self.neighbors = build_neighbor_clip_indices(rgb_dataset.clips)
+        if int(rgb_dataset.window_stride) != 8:
+            raise ValueError("RGB dataset window_stride must be 8")
+        self.neighbors = build_neighbor_clip_indices(rgb_dataset.clips, rgb_dataset.window_stride)
 
     def __len__(self) -> int:
         return len(self.rgb_dataset)
@@ -398,6 +420,7 @@ class ScaredCrossClipProjectionDataset(Dataset):
             return _load_overlap_side(
                 crossclip_teacher_cache_path(self.cache_root, teacher_metadata),
                 teacher_metadata,
+                metadata,
                 absolute_ids,
                 side,
                 shape,
@@ -411,7 +434,7 @@ class ScaredCrossClipProjectionDataset(Dataset):
         )
         clean = sample.get("inpainted_images")
         if clean is None:
-            clean = sample["images"].add(1.0).div(2.0).clamp(0.0, 1.0)
+            clean = sample["images"].clamp(0.0, 1.0)
         return {
             "images": sample["images"],
             "clean_images": clean,
@@ -431,6 +454,7 @@ _SIDE_TENSOR_KEYS = (
     "confidence",
     "valid_mask",
     "intrinsics",
+    "extrinsics",
     "absolute_frame_ids",
     "student_local_indices",
     "teacher_local_indices",

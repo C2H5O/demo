@@ -35,6 +35,7 @@ def _teacher_side(depth, exists=True):
         "confidence": torch.ones_like(depth),
         "valid_mask": torch.ones_like(depth, dtype=torch.bool),
         "intrinsics": torch.eye(3).view(1, 1, 3, 3).repeat(batch, frames, 1, 1),
+        "extrinsics": torch.eye(4).view(1, 1, 4, 4).repeat(batch, frames, 1, 1)[..., :3, :],
     }
 
 
@@ -61,9 +62,9 @@ def test_identity_camera_projection_returns_corresponding_pixels() -> None:
 
 
 def test_projection_loss_zero_for_equal_depth_and_positive_for_ten_percent_scale() -> None:
-    teacher_depth = torch.full((1, 15, 3, 4), 2.0)
-    points = _identity_plane(frames=15)
-    mask = torch.zeros(1, 15, 1, 3, 4, dtype=torch.bool)
+    teacher_depth = torch.full((1, 8, 3, 4), 2.0)
+    points = _identity_plane(frames=8)
+    mask = torch.zeros(1, 8, 1, 3, 4, dtype=torch.bool)
     config = CrossClipProjectionLossConfig(use_confidence_weight=False)
     equal, _, _ = compute_cross_clip_projection_loss(
         points, _teacher_side(teacher_depth), mask, config
@@ -76,11 +77,11 @@ def test_projection_loss_zero_for_equal_depth_and_positive_for_ten_percent_scale
 
 
 def test_zero_teacher_confidence_falls_back_to_uniform_projection_weight() -> None:
-    teacher_depth = torch.full((1, 15, 3, 4), 2.0)
-    points = _identity_plane(frames=15) * 1.1
+    teacher_depth = torch.full((1, 8, 3, 4), 2.0)
+    points = _identity_plane(frames=8) * 1.1
     side = _teacher_side(teacher_depth)
     side["confidence"].zero_()
-    mask = torch.zeros(1, 15, 1, 3, 4, dtype=torch.bool)
+    mask = torch.zeros(1, 8, 1, 3, 4, dtype=torch.bool)
     loss, effective_weight, _ = compute_cross_clip_projection_loss(
         points,
         side,
@@ -125,12 +126,12 @@ def test_total_loss_contains_exactly_three_terms_and_no_neighbor_projection() ->
         "highlight_masks": torch.zeros(1, 16, 1, 3, 4, dtype=torch.bool),
         "clean_images": torch.full((1, 16, 3, 3, 4), 0.5),
         "teacher_left": {
-            **_teacher_side(torch.zeros(1, 15, 3, 4), exists=False),
-            "absolute_frame_ids": torch.full((1, 15), -1),
+            **_teacher_side(torch.zeros(1, 8, 3, 4), exists=False),
+            "absolute_frame_ids": torch.full((1, 8), -1),
         },
         "teacher_right": {
-            **_teacher_side(torch.zeros(1, 15, 3, 4), exists=False),
-            "absolute_frame_ids": torch.full((1, 15), -1),
+            **_teacher_side(torch.zeros(1, 8, 3, 4), exists=False),
+            "absolute_frame_ids": torch.full((1, 8), -1),
         },
     }
     loss_fn = CrossClipProjectionLoss(
@@ -144,7 +145,7 @@ def test_total_loss_contains_exactly_three_terms_and_no_neighbor_projection() ->
             "use_confidence_weight": True,
         }
     )
-    total, logs = loss_fn({"pts3d_local": points}, batch)
+    total, logs = loss_fn({"xyz_local": points, "xyz_global": points}, batch)
     assert logs["loss/projection"] == 0.0
     assert set(name for name in logs if name.startswith("loss/")) == {
         "loss/total",

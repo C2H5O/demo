@@ -19,7 +19,7 @@ from datasets.crossclip_teacher_dataset import (
 )
 from datasets.scared_clip_dataset import clip_metadata
 from datasets.transforms import unnormalize_image
-from models.student.dune_fast3r_head import DuneFast3RHeadStudent
+from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
@@ -95,11 +95,11 @@ def _adaptive_range(
     return float(low), float(high)
 
 
-def _load_student_points(
+def _load_student_prediction(
     checkpoint_path: Path,
     config: Dict[str, Any],
     images: torch.Tensor,
-) -> np.ndarray:
+) -> Dict[str, np.ndarray]:
     if not checkpoint_path.is_file():
         raise FileNotFoundError("Student checkpoint not found: {}".format(checkpoint_path))
     checkpoint = torch.load(
@@ -110,12 +110,15 @@ def _load_student_points(
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA visualization requested but unavailable")
     model_config = checkpoint.get("config", {}).get("student", config["student"])
-    model = DuneFast3RHeadStudent(model_config, device=device)
+    model = DA3SmallStudent(model_config, device=device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     with torch.inference_mode(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
         prediction = model(images.unsqueeze(0).to(device))
-    return prediction["pts3d_local"][0].float().cpu().numpy()
+    return {
+        key: prediction[key][0].float().cpu().numpy()
+        for key in ("depth", "intrinsics", "extrinsics", "xyz_local", "xyz_global")
+    }
 
 
 def _load_teacher_points(
@@ -156,7 +159,7 @@ def export_crossclip_visualization(
     max_depth: float = 10.0,
     point_stride: int = 4,
 ) -> Path:
-    """Export fixed/adaptive depth and 16 independent camera-local PLY files."""
+    """Export depth, local PLYs, camera poses and one merged global DA3 PLY."""
     if source not in {"student", "teacher"}:
         raise ValueError("source must be student or teacher")
     if point_stride <= 0:
@@ -175,11 +178,14 @@ def export_crossclip_visualization(
     if source == "student":
         if checkpoint_path is None:
             raise ValueError("--checkpoint is required for source=student")
-        points = _load_student_points(checkpoint_path, config, sample["images"])
+        prediction = _load_student_prediction(checkpoint_path, config, sample["images"])
+        points = prediction["xyz_local"]
+        global_points = prediction["xyz_global"]
     else:
         points, teacher_cache, cache_stage = _load_teacher_points(
             config, dataset, clip_index, split
         )
+        global_points = None
     depth = points[..., 2]
     valid = np.isfinite(points).all(axis=-1) & np.isfinite(depth) & (depth > 0.0)
     adaptive = tuple(
@@ -228,6 +234,22 @@ def export_crossclip_visualization(
             points[offset][point_mask].astype(np.float32),
             rgb[offset][point_mask],
         )
+    if source == "student":
+        global_valid = np.isfinite(global_points).all(axis=-1) & valid
+        sampled = np.zeros(global_valid.shape[-2:], dtype=bool)
+        sampled[::point_stride, ::point_stride] = True
+        merged_mask = global_valid & sampled[None]
+        merged_colors = np.broadcast_to(rgb, global_points.shape).copy()
+        _write_binary_ply(
+            output / "pointcloud_global_merged.ply",
+            global_points[merged_mask].astype(np.float32),
+            merged_colors[merged_mask],
+        )
+        np.savez(
+            output / "camera_poses.npz",
+            intrinsics=prediction["intrinsics"].astype(np.float32),
+            extrinsics_w2c=prediction["extrinsics"].astype(np.float32),
+        )
     record: Dict[str, Any] = {
         "source": source,
         "checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
@@ -239,7 +261,10 @@ def export_crossclip_visualization(
         "clip_start": metadata["clip_start"],
         "absolute_frame_ids": metadata["frame_indices"],
         "frame_names": metadata["frame_names"],
-        "coordinate_system": "each frame has its own independent camera-local coordinates",
+        "coordinate_system": (
+            "DA3 local points plus merged global points; extrinsics are WORLD_TO_CAMERA"
+            if source == "student" else "teacher camera-local coordinates"
+        ),
         "fixed_depth_range": [min_depth, max_depth],
         "adaptive_percentiles": list(adaptive),
         "adaptive_depth_range": [adaptive_low, adaptive_high],

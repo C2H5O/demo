@@ -34,7 +34,7 @@ def main() -> None:
         raise RuntimeError("Environment mismatch: expected {}; got {}".format(expected, versions))
 
     root = Path(__file__).resolve().parents[1]
-    with (root / "configs" / "crossclip_teacher_projection.yaml").open(
+    with (root / "configs" / "vggtoda3.yaml").open(
         "r", encoding="utf-8"
     ) as handle:
         config = yaml.safe_load(handle)
@@ -47,17 +47,19 @@ def main() -> None:
     }
     if resolutions != {EXPECTED_RESOLUTION}:
         raise RuntimeError("Dataset/student resolutions must both be 448x560")
-    if dataset["clip_length"] != 16 or dataset["window_stride"] != 1:
-        raise RuntimeError("Cross-clip data must use 16 frames at stride one")
-    if list(student["encoder_layers"]) != [2, 5, 8, 11]:
-        raise RuntimeError("DUNE encoder layers must be [2,5,8,11]")
-    if student["freeze_encoder"] or student["use_fast3r_decoder"]:
-        raise RuntimeError(
-            "Current config must jointly train DUNE and keep the Fast3R decoder disabled"
-        )
+    if (dataset["clip_length"], dataset["sample_stride"], dataset["window_stride"]) != (16, 1, 8):
+        raise RuntimeError("Cross-clip data must use length=16 sample_stride=1 window_stride=8")
+    if student["architecture"] != "da3_small" or student["use_ray"] or student["use_ray_pose"]:
+        raise RuntimeError("Current config must use DA3-Small depth+camera without ray")
+    if student["patch_size"] != 14:
+        raise RuntimeError("DA3-Small patch size must be 14")
+    try:
+        import depth_anything_3  # noqa: F401
+    except ImportError as error:
+        raise RuntimeError("Run bash scripts/setup_da3.sh") from error
     if teacher["variant"] != "base" or not teacher["frozen"]:
         raise RuntimeError("Teacher must be the frozen base model")
-    print("environment and cross-clip config OK")
+    print("environment and VGGT-DA3 config OK")
 
 
 if __name__ == "__main__":

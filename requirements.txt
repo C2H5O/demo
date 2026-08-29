@@ -7,3 +7,6 @@ PyYAML>=6.0,<7
 einops>=0.8,<0.9
 opencv-python==4.10.0.84
 pytest>=8,<9
+addict>=2.4,<3
+omegaconf>=2.3,<3
+safetensors>=0.4,<1

@@ -8,9 +8,9 @@ from cache.generate_crossclip_teacher_cache import generate_crossclip_teacher_ca
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate raw frozen-base teacher caches for stride-one 16-frame clips"
+        description="OPTIONAL: generate high-resolution-teacher caches for stride8 16-frame clips"
     )
-    parser.add_argument("--config", default="configs/crossclip_teacher_projection.yaml")
+    parser.add_argument("--config", default="configs/vggtoda3.yaml")
     parser.add_argument("--split", choices=("train", "test"), default="train")
     parser.add_argument("--limit", type=int, default=None, help="Maximum number of 16-frame clips")
     parser.add_argument(

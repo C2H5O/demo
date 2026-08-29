@@ -34,6 +34,7 @@ data/*
 !data/README.md
 checkpoints/*
 !checkpoints/README.md
+checkpoints/da3-small/
 outputs/
 processed/
 teacher_cache/

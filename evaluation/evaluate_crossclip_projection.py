@@ -22,7 +22,7 @@ from evaluation.evaluate_depth import (
     _evaluate_sequence as evaluate_endo3r_sequence,
     extract_frame_id,
 )
-from models.student.dune_fast3r_head import DuneFast3RHeadStudent
+from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
@@ -39,7 +39,7 @@ def select_protocol(config: Dict[str, Any], override: Optional[str] = None) -> s
 
 def _load_model(
     checkpoint_path: Path, config: Dict[str, Any], device: torch.device
-) -> DuneFast3RHeadStudent:
+) -> DA3SmallStudent:
     try:
         checkpoint = torch.load(
             str(checkpoint_path), map_location="cpu", weights_only=False, mmap=True
@@ -55,7 +55,7 @@ def _load_model(
     state = checkpoint.get("model")
     if not isinstance(state, dict):
         raise ValueError("Cross-clip checkpoint has no model state")
-    model = DuneFast3RHeadStudent(model_config, device=device)
+    model = DA3SmallStudent(model_config, device=device)
     try:
         model.load_state_dict(state, strict=True, assign=True)
     except TypeError:
@@ -68,10 +68,10 @@ def _load_model(
 
 def _clip_depths(model: torch.nn.Module, images: torch.Tensor) -> torch.Tensor:
     prediction = model(images)
-    points = prediction["pts3d_local"]
-    if tuple(points.shape[:2]) != (1, 16):
-        raise RuntimeError("Expected one 16-frame point prediction")
-    depth = points[0, ..., 2].float()
+    depth_all = prediction["depth"]
+    if tuple(depth_all.shape[:2]) != (1, 16) or tuple(depth_all.shape[-2:]) != (448, 560):
+        raise RuntimeError("Expected DA3 depth [1,16,448,560]")
+    depth = depth_all[0].float()
     if not bool(torch.isfinite(depth).all()):
         raise FloatingPointError("Cross-clip student produced non-finite depth")
     return depth
@@ -214,9 +214,9 @@ def evaluate_vda(
         "complete_gt_coverage": complete,
         "full_test_set": limit_clips is None and processed == expected and complete,
         "clip_length": 16,
-        "clip_stride": 1,
+        "clip_stride": 8,
         "overlap_reduction": "mean disparity per absolute frame",
-        "prediction_semantics": "independent camera-local point Z, then reciprocal disparity",
+        "prediction_semantics": "joint DA3 depth, then reciprocal disparity",
         "mean_clip_inference_seconds": float(np.mean(times)) if times else None,
         "skipped_sequences_without_gt": skipped,
         "sequences": sequence_results,
@@ -318,9 +318,9 @@ def evaluate_endo3r(
         "processed_clip_count": processed,
         "expected_clip_count": expected,
         "clip_length": 16,
-        "clip_stride": 1,
+        "clip_stride": 8,
         "overlap_reduction": "mean depth per absolute frame",
-        "prediction_semantics": "independent camera-local point Z",
+        "prediction_semantics": "joint DA3 depth with native camera head",
         "skipped_sequences_without_gt": skipped,
         "sequences": sequence_results,
     }

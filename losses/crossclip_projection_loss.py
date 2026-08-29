@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.crossclip_geometry import project_student_points_to_teacher
+from utils.da3_geometry import global_to_camera_points
 
 
 def surface_normals(points: torch.Tensor) -> torch.Tensor:
@@ -62,7 +63,7 @@ def compute_cross_clip_projection_loss(
     student_highlight_mask: torch.Tensor,
     config: CrossClipProjectionLossConfig,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Project one 15-frame student overlap into its matching teacher clip."""
+    """Project one 8-frame student overlap expressed in teacher camera coordinates."""
     projected = project_student_points_to_teacher(
         student_points,
         teacher_side["depth"],
@@ -205,22 +206,34 @@ class CrossClipProjectionLoss(nn.Module):
         prediction: Dict[str, torch.Tensor],
         batch: Dict[str, Any],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        points = prediction["pts3d_local"]
+        points = prediction["xyz_local"]
+        global_points = prediction["xyz_global"]
         if points.ndim != 5 or points.shape[1] != 16 or points.shape[-1] != 3:
             raise ValueError("Student points must have shape [B,16,H,W,3]")
-        self._assert_absolute_mapping(batch, "teacher_left", slice(0, 15))
-        self._assert_absolute_mapping(batch, "teacher_right", slice(1, 16))
+        if tuple(global_points.shape) != tuple(points.shape):
+            raise ValueError("Student xyz_global must match xyz_local shape")
+        self._assert_absolute_mapping(batch, "teacher_left", slice(0, 8))
+        self._assert_absolute_mapping(batch, "teacher_right", slice(8, 16))
         highlight = batch["highlight_masks"].bool()
+        # DA3 local points depend on predicted depth+K. They are first transformed
+        # by predicted C2W, then by the frozen neighbor teacher W2C. Thus the
+        # unchanged projection residual trains depth, intrinsics and extrinsics.
+        left_teacher_points = global_to_camera_points(
+            global_points[:, 0:8], batch["teacher_left"]["extrinsics"]
+        )
+        right_teacher_points = global_to_camera_points(
+            global_points[:, 8:16], batch["teacher_right"]["extrinsics"]
+        )
         left_per, left_weight, left_ratio = compute_cross_clip_projection_loss(
-            points[:, 0:15],
+            left_teacher_points,
             batch["teacher_left"],
-            highlight[:, 0:15],
+            highlight[:, 0:8],
             self.config,
         )
         right_per, right_weight, right_ratio = compute_cross_clip_projection_loss(
-            points[:, 1:16],
+            right_teacher_points,
             batch["teacher_right"],
-            highlight[:, 1:16],
+            highlight[:, 8:16],
             self.config,
         )
         left_exists = batch["teacher_left"]["exists"].to(points.dtype)

@@ -10,7 +10,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Audit adjacent 16-frame teacher clips and write offline-aligned caches"
     )
-    parser.add_argument("--config", default="configs/crossclip_teacher_projection.yaml")
+    parser.add_argument("--config", default="configs/vggtoda3.yaml")
     parser.add_argument("--split", choices=("train", "test"), default="train")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--overwrite", action="store_true")

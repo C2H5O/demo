@@ -10,7 +10,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Visualize a 16-frame cross-clip student prediction or teacher cache"
     )
-    parser.add_argument("--config", default="configs/crossclip_teacher_projection.yaml")
+    parser.add_argument("--config", default="configs/vggtoda3.yaml")
     parser.add_argument("--source", choices=("student", "teacher"), default="student")
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--split", choices=("train", "test"), default="test")
@@ -29,7 +29,7 @@ def main() -> None:
         Path(args.config),
         args.split,
         args.clip_index,
-        args.output_dir or Path(str(visual.get("output_dir", "outputs/crossclip_teacher_projection/visualization"))),
+        args.output_dir or Path(str(visual.get("output_dir", "outputs/vggtoda3/visualization"))),
         args.source,
         args.checkpoint,
         args.min_depth if args.min_depth is not None else float(visual.get("min_depth", 0.1)),

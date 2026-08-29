@@ -1,30 +1,27 @@
 experiment:
-  name: crossclip_teacher_projection
+  name: vggtoda3
   hypothesis: >-
-    Frozen 16-frame VGGT-Omega context predictions can supervise an
-    jointly optimized DUNE ViT-S/14 plus Fast3R DPT point head through
-    adjacent-clip teacher-coordinate projection.
+    Frozen high-resolution VGGT-Omega teacher caches supervise the official
+    pretrained DA3-Small depth and camera heads on stride-eight 16-frame clips.
 
 seed: 42
 device: cuda
 
 dataset:
   name: scared
-  root: ./data/SCARED
-  canonical_root: ./data/processed
+  root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/scared
   train_manifest_path: null
   test_manifest_path: null
   frame_source: auto
   clip_length: 16
   sample_stride: 1
-  window_stride: 1
+  window_stride: 8
   drop_incomplete_clip: true
   random_clip_sampling: true
-  teacher_neighbor_offset: 1
   image_height: 448
   image_width: 560
   resize_mode: resize
-  normalize_mode: minus_one_one
+  normalize_mode: zero_one
   highlight:
     enabled: true
     absolute_threshold: 250.0
@@ -42,9 +39,9 @@ teacher:
   variant: base
   cache_protocol: crossclip_local_v1
   pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
-  raw_cache_root: ./data/teacher_cache_crossclip_base_raw_1024x1280_to_448x560
-  aligned_cache_root: ./data/teacher_cache_crossclip_base_aligned_1024x1280_to_448x560
-  use_aligned_cache: true
+  raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560
+  aligned_cache_root: null
+  use_aligned_cache: false
   cache_dtype: float32
   inference_batch_size: 4
   amp: true
@@ -58,12 +55,7 @@ teacher:
   max_depth: 150.0
   minimum_valid_fraction: 0.001
   scale_alignment:
-    enabled: true
-    confidence_threshold: 0.0
-    minimum_valid_pixels: 64
-    ignore_highlight: true
-    eps: 1.0e-6
-    report: ./outputs/crossclip_teacher_projection/teacher_scale_audit_{split}.json
+    enabled: false
 
 teacher_dataloader:
   num_workers: 8
@@ -72,22 +64,23 @@ teacher_dataloader:
   prefetch_factor: 4
 
 student:
-  architecture: dune_fast3r_dpt
+  architecture: da3_small
+  model_name: da3-small
   image_height: 448
   image_width: 560
-  encoder_variant: dune_vitsmall14_448
-  encoder_layers: [2, 5, 8, 11]
-  encoder_dim: 384
-  encoder_blocks: 12
   patch_size: 14
-  dune_checkpoint: ./checkpoints/dune/dune_vitsmall14_448.pth
-  freeze_encoder: false
-  use_fast3r_decoder: false
-  normalize_mode: minus_one_one
-  head_feature_dim: 256
-  head_last_dim: 128
-  head_initial_z_bias: 1.0
-  head_initial_weight_std: 0.0001
+  checkpoint: ./checkpoints/da3-small/model.safetensors
+  config_path: ./checkpoints/da3-small/config.json
+  normalize_mode: zero_one
+  use_ray: false
+  use_ray_pose: false
+  use_camera_head: true
+  freeze_backbone: false
+  freeze_depth_head: false
+  freeze_camera_encoder: false
+  freeze_camera_decoder: false
+  head_chunk_size: 8
+  ref_view_strategy: saddle_balanced
 
 loss:
   mode: crossclip_projection_highlight_smooth
@@ -120,14 +113,14 @@ training:
   max_consecutive_zero_projection_batches: 5
   log_every: 10
   save_every: 1
-  output_dir: ./outputs/crossclip_teacher_projection
+  output_dir: ./outputs/vggtoda3
   resume: null
 
 evaluation:
   protocol: vda
 
 vda_evaluation:
-  checkpoint: ./outputs/crossclip_teacher_projection/last.pt
+  checkpoint: ./outputs/vggtoda3/last.pt
   split: test
   protocol: vda
   frame_source: auto
@@ -135,10 +128,10 @@ vda_evaluation:
   gt_depth_channel: 0
   require_all_gt: true
   amp: true
-  output: ./outputs/crossclip_teacher_projection/evaluation_test_vda.json
+  output: ./outputs/vggtoda3/evaluation_test_vda.json
 
 endo3r_evaluation:
-  checkpoint: ./outputs/crossclip_teacher_projection/last.pt
+  checkpoint: ./outputs/vggtoda3/last.pt
   split: test
   protocol: endo3r
   frame_source: auto
@@ -146,10 +139,10 @@ endo3r_evaluation:
   gt_depth_channel: 0
   require_all_gt: true
   amp: true
-  output: ./outputs/crossclip_teacher_projection/evaluation_test_endo3r.json
+  output: ./outputs/vggtoda3/evaluation_test_endo3r.json
 
 visualization:
-  output_dir: ./outputs/crossclip_teacher_projection/visualization
+  output_dir: ./outputs/vggtoda3/visualization
   min_depth: 0.1
   max_depth: 10.0
   adaptive_percentiles: [5.0, 95.0]

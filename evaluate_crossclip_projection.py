@@ -10,7 +10,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate the 16-frame cross-clip student (VDA by default)"
     )
-    parser.add_argument("--config", default="configs/crossclip_teacher_projection.yaml")
+    parser.add_argument("--config", default="configs/vggtoda3.yaml")
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--split", choices=("train", "test"), default=None)
     parser.add_argument("--protocol", choices=("vda", "endo3r"), default=None)

@@ -1,4 +1,4 @@
-from models.student import DuneFast3RHeadConfig, DuneFast3RHeadStudent
+from models.student import DA3SmallConfig, DA3SmallStudent
 from models.teacher import VGGTOmegaTeacher
 
-__all__ = ["DuneFast3RHeadConfig", "DuneFast3RHeadStudent", "VGGTOmegaTeacher"]
+__all__ = ["DA3SmallConfig", "DA3SmallStudent", "VGGTOmegaTeacher"]
