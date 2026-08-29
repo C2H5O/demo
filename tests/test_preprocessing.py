@@ -9,8 +9,10 @@ from datasets.preprocessing.common import ProcessedFrame, SequenceWriter, contig
 from datasets.preprocessing.geometry import contain_depth_valid_aware
 from scripts.preprocess_c3vd import candidate_rgb_dirs
 from scripts.preprocess_endovis18 import left_frame_directories, sequence_id_for_left_frames
+from scripts.preprocess_scared import output_location
 from scripts.preprocess_stereomis import sequence_videos, split_stereo_frame
 from scripts.validate_preprocessed_datasets import clip_count, validate_sequence
+from datasets.scared_discovery import SequenceRecord
 
 
 def _write_sequence(root: Path, count: int, *, evaluation_only: bool = False) -> Path:
@@ -98,6 +100,29 @@ def test_stereomis_p1_video_and_p2_video_are_discovered_per_sequence(tmp_path: P
         (p1, p1 / "video.mp4"),
         (p2, p2 / "IFBS_ENDOSCOPE-part0000.mp4"),
     ]
+
+
+def test_scared_output_identity_is_dataset_keyframe_and_gap_safe(tmp_path: Path) -> None:
+    source = tmp_path / "dataset_1" / "key_frame_3" / "data" / "left"
+    record = SequenceRecord(
+        dataset_id=1,
+        keyframe_id="key_frame_3",
+        sequence_id="dataset_1/key_frame_3",
+        keyframe_directory=source.parents[2],
+        frame_directory=source,
+        frame_paths=(),
+        calibration_path=None,
+        depth_directory=None,
+        disparity_directory=None,
+        frame_data_directory=None,
+        reprojection_directory=None,
+        scene_points_directory=None,
+        point_cloud_path=None,
+        video_path=None,
+    )
+    sequence_id, destination = output_location(tmp_path / "processed", record, 1, 2)
+    assert sequence_id == "dataset_01/key_frame_3_run01"
+    assert destination == tmp_path / "processed" / "SCARED" / "dataset_01" / "key_frame_3_run01"
 
 
 def test_hamlyn_depth_matches_student_grid_and_preserves_invalids(tmp_path: Path) -> None:

@@ -15,6 +15,17 @@ anisotropic 16:9→4:5 stretch. It preserves the complete source FOV (including
 black/circular borders); an entrypoint may use a *published* rectification or
 reprojection before that common final step.
 
+## SCARED (extracted left RGB)
+
+- Local input layout: official `dataset_1` through `dataset_9`, each with
+  `key_frame*` directories and extracted temporal left RGB at `data/left/`.
+- Implementation: `scripts/preprocess_scared.py` uses the repository's
+  existing strict SCARED sequence discovery with `frame_source="left"` only.
+  It writes `processed/SCARED/dataset_XX/key_frame*/teacher_rgb` and
+  `student_rgb`, retaining source dataset/keyframe/frame identities.
+- Geometry: one source left image produces both canonical RGB resolutions via
+  the shared proportional 4:5 transform; no GT annotations are copied.
+
 ## C3VD
 
 - Official dataset URL: <https://durrlab.github.io/C3VD/>
