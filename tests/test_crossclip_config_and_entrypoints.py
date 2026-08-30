@@ -56,7 +56,10 @@ def test_da3_setup_is_compatible_with_git_without_dash_c() -> None:
     assert 'pip install --no-deps -e "${DA3_ROOT}"' in script
     assert "open3d" in script and "pip install open3d" not in script
     assert '--force-reinstall --no-cache-dir "numpy==1.26.4"' in script
+    assert 'conda install --yes --force-reinstall --prefix "${CONDA_PREFIX}"' in script
+    assert '"numpy=1.26.4" "numpy-base=1.26.4"' in script
     assert '"opencv-python-headless==4.10.0.84"' in script
+    assert "pip install --no-deps --force-reinstall" in script
     assert "opencv-contrib-python-headless" in script
     assert "verify_numpy_abi.py" in script
     for component in ("DinoV2", "DualDPT", "CameraEnc", "CameraDec"):
