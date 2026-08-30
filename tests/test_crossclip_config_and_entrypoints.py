@@ -53,3 +53,7 @@ def test_da3_setup_is_compatible_with_git_without_dash_c() -> None:
     script = (ROOT / "scripts" / "setup_da3.sh").read_text(encoding="utf-8")
     assert 'cd "${DA3_ROOT}"' in script
     assert "git -C" not in script
+    assert 'pip install --no-deps -e "${DA3_ROOT}"' in script
+    assert "open3d" in script and "pip install open3d" not in script
+    for component in ("DinoV2", "DualDPT", "CameraEnc", "CameraDec"):
+        assert "import {}".format(component) in script

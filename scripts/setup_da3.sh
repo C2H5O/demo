@@ -13,5 +13,9 @@ fi
   git fetch origin "${DA3_COMMIT}"
   git checkout --detach "${DA3_COMMIT}"
 )
-python -m pip install -e "${DA3_ROOT}"
-python -c "import depth_anything_3; print('Depth-Anything-3 import OK')"
+# The upstream package declares visualization/export/server dependencies such as
+# open3d and pycolmap as mandatory.  This experiment imports only the DA3-Small
+# network components, so install the pinned source without those optional tools.
+python -m pip install --no-deps -e "${DA3_ROOT}"
+python -m pip install addict e3nn einops omegaconf safetensors
+python -c "from depth_anything_3.cfg import create_object; from depth_anything_3.model.da3 import DepthAnything3Net; from depth_anything_3.model.dinov2.dinov2 import DinoV2; from depth_anything_3.model.dualdpt import DualDPT; from depth_anything_3.model.cam_enc import CameraEnc; from depth_anything_3.model.cam_dec import CameraDec; from depth_anything_3.model.utils.transform import pose_encoding_to_extri_intri; print('Depth-Anything-3 Small model imports OK')"
