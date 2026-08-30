@@ -382,6 +382,12 @@ def validate_crossclip_teacher_cache(
                 sorted(missing_statistics)
             )
         )
+    cached_frame_names = [str(value) for value in cache["frame_names"].tolist()]
+    if any(not value for value in cached_frame_names) or len(set(cached_frame_names)) != 16:
+        raise RuntimeError("Cross-clip cache frame_names must contain 16 unique names")
+    declared_frame_names = cache_metadata.get("frame_names")
+    if declared_frame_names is not None and list(declared_frame_names) != cached_frame_names:
+        raise RuntimeError("Cross-clip cache frame_names disagree with metadata_json")
     fractions = valid_counts.astype(np.float64) / float(height * width)
     if not np.allclose(
         fractions,
@@ -427,8 +433,9 @@ def validate_crossclip_teacher_cache(
                 raise RuntimeError("Cross-clip cache metadata mismatch for {}".format(key))
         if cache["absolute_frame_ids"].tolist() != list(metadata["frame_indices"]):
             raise RuntimeError("Cross-clip cache absolute frame IDs do not match RGB clip")
-        if cache["frame_names"].tolist() != list(metadata["frame_names"]):
-            raise RuntimeError("Cross-clip cache frame names do not match RGB clip")
+        # Processed student_rgb files may be renamed to 000000.png while an
+        # existing cache retains source-frame names. Sequence identity,
+        # clip_start and absolute_frame_ids are the stable cross-preprocess key.
 
 
 def _load_overlap_side(

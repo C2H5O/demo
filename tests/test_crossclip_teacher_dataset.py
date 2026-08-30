@@ -159,6 +159,27 @@ def test_crossclip_dataset_loads_only_8_shared_frames(tmp_path) -> None:
     assert sample["teacher_right"]["absolute_frame_ids"].tolist() == list(range(16, 24))
 
 
+def test_cache_source_names_may_differ_from_renamed_student_rgb(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 40)])
+    left_path = _write_cache(tmp_path, rgb, 0)
+    _write_cache(tmp_path, rgb, 2)
+    with np.load(left_path, allow_pickle=False) as cache:
+        arrays = {key: cache[key].copy() for key in cache.files}
+    source_names = ["source_{:06d}.png".format(index) for index in range(16)]
+    arrays["frame_names"] = np.asarray(source_names)
+    metadata = json.loads(str(arrays["metadata_json"].item()))
+    metadata["frame_names"] = source_names
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata))
+    np.savez_compressed(left_path, **arrays)
+
+    dataset = ScaredCrossClipProjectionDataset(
+        rgb, tmp_path, BASE_CHECKPOINT, expected_stage="aligned"
+    )
+    sample = dataset[1]
+    assert sample["teacher_left"]["exists"]
+    assert sample["teacher_left"]["absolute_frame_ids"].tolist() == list(range(8, 16))
+
+
 def test_rgb_index_falls_back_to_independent_teacher_cache_metadata(tmp_path) -> None:
     empty_processed_root = tmp_path / "processed" / "scared"
     empty_processed_root.mkdir(parents=True)
