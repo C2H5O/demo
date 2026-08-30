@@ -18,6 +18,7 @@ from datasets.crossclip_teacher_dataset import (
     crossclip_projection_collate,
     crossclip_teacher_cache_path,
     make_crossclip_rgb_dataset,
+    validate_crossclip_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
 from datasets.scared_dataset import ClipRecord
@@ -235,9 +236,10 @@ def test_single_16_frame_sequence_has_no_projection_teacher(tmp_path) -> None:
     assert not sample["teacher_left"]["valid_mask"].any()
 
 
-def test_degenerate_teacher_intrinsics_fail_closed(tmp_path) -> None:
+def test_degenerate_teacher_intrinsics_are_rejected_by_explicit_audit_not_hot_path(tmp_path) -> None:
     rgb = _FakeRGBDataset([_sequence("sequence_a", 40)])
     path = _write_cache(tmp_path, rgb, 0)
+    _write_cache(tmp_path, rgb, 2)
     with np.load(path, allow_pickle=False) as cache:
         arrays = {key: cache[key].copy() for key in cache.files}
     arrays["intrinsics"][:, 0, 0] = 0.0
@@ -245,8 +247,31 @@ def test_degenerate_teacher_intrinsics_fail_closed(tmp_path) -> None:
     dataset = ScaredCrossClipProjectionDataset(
         rgb, tmp_path, BASE_CHECKPOINT, expected_stage="aligned"
     )
+    sample = dataset[1]
+    assert sample["teacher_left"]["exists"]
+    metadata = clip_metadata(rgb, 0)
     with pytest.raises(RuntimeError, match="focal length"):
-        dataset[1]
+        with np.load(path, allow_pickle=False) as cache:
+            validate_crossclip_teacher_cache(
+                cache, metadata, rgb.shape, BASE_CHECKPOINT, "aligned"
+            )
+
+
+def test_training_hot_path_does_not_read_unused_teacher_xyz(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 40)])
+    left_path = _write_cache(tmp_path, rgb, 0)
+    _write_cache(tmp_path, rgb, 2)
+    with np.load(left_path, allow_pickle=False) as cache:
+        arrays = {key: cache[key].copy() for key in cache.files}
+    arrays["xyz_local"][:] = np.nan
+    arrays["xyz_global"][:] = np.nan
+    np.savez(left_path, **arrays)
+    dataset = ScaredCrossClipProjectionDataset(
+        rgb, tmp_path, BASE_CHECKPOINT, expected_stage="aligned"
+    )
+    sample = dataset[1]
+    assert sample["teacher_left"]["exists"]
+    assert torch.isfinite(sample["teacher_left"]["depth"]).all()
 
 
 def test_teacher_overlap_scale_uses_common_frames_and_ignores_highlight() -> None:

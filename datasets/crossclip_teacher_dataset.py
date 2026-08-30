@@ -444,9 +444,6 @@ def _load_overlap_side(
     current_metadata: Dict[str, Any],
     student_absolute_ids: Sequence[int],
     side: str,
-    expected_shape: Tuple[int, int],
-    expected_base_checkpoint: str,
-    expected_stage: str,
 ) -> Dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(
@@ -460,13 +457,11 @@ def _load_overlap_side(
             )
         )
     with np.load(str(path), allow_pickle=False) as cache:
-        validate_crossclip_teacher_cache(
-            cache,
-            teacher_metadata,
-            expected_shape,
-            expected_base_checkpoint,
-            expected_stage,
-        )
+        # Full cache integrity is checked once by audit_vggtoda3.py before a
+        # run.  Do not call validate_crossclip_teacher_cache here: it reads and
+        # scans every dense member (including both unused XYZ maps) for every
+        # sample and every epoch.  The training hot path only reads supervision
+        # consumed by the loss plus the IDs required for exact overlap mapping.
         teacher_slice = slice(8, 16) if side == "left" else slice(0, 8)
         student_slice = slice(0, 8) if side == "left" else slice(8, 16)
         expected_ids = list(student_absolute_ids[student_slice])
@@ -574,9 +569,6 @@ class ScaredCrossClipProjectionDataset(Dataset):
                 metadata,
                 absolute_ids,
                 side,
-                shape,
-                self.expected_base_checkpoint,
-                self.expected_stage,
             )
 
         highlight = sample.get(
