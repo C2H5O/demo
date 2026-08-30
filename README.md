@@ -60,6 +60,7 @@ bash scripts/setup_da3.sh
 ## Audit, train, evaluate, visualize
 
 ```bash
+python precompute_highlights.py --config configs/vggtoda3.yaml --split train --workers 4
 python audit_vggtoda3.py --config configs/vggtoda3.yaml --split train --limit 5
 python audit_vggtoda3.py --config configs/vggtoda3.yaml --split train --limit 0
 python train_crossclip_projection.py --config configs/vggtoda3.yaml --dry-run
@@ -69,6 +70,14 @@ python evaluate_crossclip_projection.py --config configs/vggtoda3.yaml
 python evaluate_crossclip_projection.py --config configs/vggtoda3.yaml --protocol endo3r
 python visualize_crossclip_projection.py --config configs/vggtoda3.yaml --source student --checkpoint outputs/vggtoda3/last.pt --split test --clip-index 0
 ```
+
+Run highlight precomputation once before audit/training. It writes exact-size
+binary masks to each keyframe's `student_highlight_mask/`, inpainted RGB to
+`student_inpainted_rgb/`, and a configuration-bound completion marker. Existing
+complete frame pairs are skipped, so an interrupted full run can be restarted
+with the same command. `--limit N` is available for a trial but intentionally
+does not write completion markers. Training never falls back to online OpenCV;
+missing/stale artifacts fail immediately.
 
 CUDA phase timing is enabled in the default training configuration. Every
 micro-batch prints one `TIMING` line and appends the same record to

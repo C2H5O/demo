@@ -17,6 +17,8 @@ def test_vggtoda3_config_encodes_fixed_contract() -> None:
     assert (dataset["clip_length"], dataset["sample_stride"], dataset["window_stride"]) == (16, 1, 8)
     assert dataset["root"] == "/public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/scared"
     assert dataset["normalize_mode"] == "zero_one"
+    assert dataset["highlight"]["enabled"] is True
+    assert dataset["highlight"]["storage"] == "precomputed"
     teacher = config["teacher"]
     assert teacher["raw_cache_root"] == "/public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560"
     assert teacher["use_aligned_cache"] is False

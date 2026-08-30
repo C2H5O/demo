@@ -11,10 +11,15 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
+from datasets.precomputed_highlight import parse_highlight_options, precomputed_highlight_paths
 from datasets.scared_clip_dataset import clip_metadata, make_scared_rgb_dataset
 from datasets.scared_dataset import ClipRecord, ScaredTemporalRGBDataset, seed_worker
-from datasets.transforms import load_rgb_tensor, tensor_from_numpy_buffer, unnormalize_image
+from datasets.transforms import (
+    load_precomputed_highlight_mask_tensor,
+    load_precomputed_student_rgb_tensor,
+    load_rgb_tensor,
+    tensor_from_numpy_buffer,
+)
 
 
 CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v1"
@@ -47,13 +52,12 @@ class CacheMetadataRGBDataset(Dataset):
         self.image_width = int(dataset_config.get("image_width", 560))
         self.resize_mode = str(dataset_config.get("resize_mode", "resize"))
         self.normalize_mode = str(dataset_config.get("normalize_mode", "zero_one"))
-        highlight_config = dict(dataset_config.get("highlight", {}))
-        self.highlight_processor = None
-        if bool(highlight_config.pop("enabled", False)):
-            highlight_config["enabled"] = True
-            self.highlight_processor = SpecularHighlightProcessor(
-                HighlightDetectionConfig(**highlight_config)
-            )
+        (
+            self.highlight_enabled,
+            _,
+            self.highlight_mask_directory,
+            self.highlight_inpainted_directory,
+        ) = parse_highlight_options(dataset_config.get("highlight", {}))
         self.sequences: List[Dict[str, Any]] = []
         self.clips: List[ClipRecord] = []
         identities = set()
@@ -105,7 +109,11 @@ class CacheMetadataRGBDataset(Dataset):
                     "teacher_frame_paths": [str(Path(value).expanduser()) for value in teacher_paths],
                     "absolute_frame_ids": absolute_ids,
                     "frame_directory": str(Path(paths[0]).parent),
-                    "keyframe_directory": str(metadata.get("keyframe_directory", Path(paths[0]).parent)),
+                    "keyframe_directory": str(
+                        Path(paths[0]).parent.parent
+                        if Path(paths[0]).parent.name == "student_rgb"
+                        else metadata.get("keyframe_directory", Path(paths[0]).parent)
+                    ),
                     "preprocessing_identity": str(metadata.get("preprocessing_identity", "teacher_cache_metadata")),
                     "cache_metadata_path": str(cache_path),
                 }
@@ -147,13 +155,28 @@ class CacheMetadataRGBDataset(Dataset):
             "frame_indices": torch.tensor(absolute_ids, dtype=torch.long),
             "clip_start": torch.tensor(record.clip_start, dtype=torch.long),
         }
-        if self.highlight_processor is not None:
-            processed = [
-                self.highlight_processor(unnormalize_image(image, self.normalize_mode))
-                for image in images
+        if self.highlight_enabled:
+            materialized = [
+                precomputed_highlight_paths(
+                    sequence["keyframe_directory"], Path(path).name,
+                    self.highlight_mask_directory, self.highlight_inpainted_directory,
+                )
+                for path in paths
             ]
-            sample["highlight_masks"] = torch.stack([value["highlight_mask"] for value in processed])
-            sample["inpainted_images"] = torch.stack([value["inpainted_image"] for value in processed])
+            missing = next(
+                (value for pair in materialized for value in pair if not value.is_file()), None
+            )
+            if missing is not None:
+                raise FileNotFoundError(
+                    "Precomputed highlight artifact is missing: {}. "
+                    "Run precompute_highlights.py first.".format(missing)
+                )
+            sample["highlight_masks"] = torch.stack(
+                [load_precomputed_highlight_mask_tensor(mask) for mask, _ in materialized]
+            )
+            sample["inpainted_images"] = torch.stack(
+                [load_precomputed_student_rgb_tensor(rgb, "zero_one") for _, rgb in materialized]
+            )
         return sample
 
 

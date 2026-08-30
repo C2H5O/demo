@@ -24,6 +24,9 @@ dataset:
   normalize_mode: zero_one
   highlight:
     enabled: true
+    storage: precomputed
+    mask_directory_name: student_highlight_mask
+    inpainted_directory_name: student_inpainted_rgb
     absolute_threshold: 250.0
     candidate_threshold: 230.0
     relative_threshold: 0.95

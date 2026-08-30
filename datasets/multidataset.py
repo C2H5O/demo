@@ -15,7 +15,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 import torch
 from torch.utils.data import Dataset
 
-from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
+from datasets.precomputed_highlight import (
+    parse_highlight_options,
+    precomputed_highlight_paths,
+    validate_precomputed_highlight,
+)
 from datasets.scared_discovery import (
     expected_dataset_ids,
     extract_dataset_id,
@@ -23,9 +27,9 @@ from datasets.scared_discovery import (
 )
 from datasets.scared_dataset import ClipRecord, _validate_temporal_config
 from datasets.transforms import (
+    load_precomputed_highlight_mask_tensor,
     load_precomputed_student_rgb_tensor,
     load_teacher_rgb_tensor,
-    unnormalize_image,
 )
 
 
@@ -200,11 +204,21 @@ class CanonicalTemporalRGBDataset(Dataset):
         self.clip_length, self.sample_stride, self.window_stride = clip_length, sample_stride, window_stride
         self.image_height, self.image_width = CANONICAL_STUDENT_SIZE
         self.resize_mode, self.normalize_mode = "precomputed", normalize_mode
-        options = dict(highlight or {})
-        self.highlight_processor = None
-        if bool(options.pop("enabled", False)):
-            options["enabled"] = True
-            self.highlight_processor = SpecularHighlightProcessor(HighlightDetectionConfig(**options))
+        (
+            self.highlight_enabled,
+            self.highlight_config,
+            self.highlight_mask_directory,
+            self.highlight_inpainted_directory,
+        ) = parse_highlight_options(highlight)
+        if self.highlight_enabled:
+            for sequence in self.sequences:
+                validate_precomputed_highlight(
+                    sequence["keyframe_directory"],
+                    int(sequence["sequence_length"]),
+                    self.highlight_config,
+                    self.highlight_mask_directory,
+                    self.highlight_inpainted_directory,
+                )
         self.clips: List[ClipRecord] = []
         span = (clip_length - 1) * sample_stride
         for sequence in self.sequences:
@@ -240,10 +254,31 @@ class CanonicalTemporalRGBDataset(Dataset):
             "teacher_frame_paths": [str(sequence["teacher_frame_paths"][item]) for item in record.frame_indices],
             "preprocessing_identity": str(sequence.get("preprocessing_identity", "unknown")),
         }
-        if self.highlight_processor is not None:
-            processed = [self.highlight_processor(unnormalize_image(image, self.normalize_mode)) for image in images]
-            sample["highlight_masks"] = torch.stack([item["highlight_mask"] for item in processed])
-            sample["inpainted_images"] = torch.stack([item["inpainted_image"] for item in processed])
+        if self.highlight_enabled:
+            materialized = [
+                precomputed_highlight_paths(
+                    sequence["keyframe_directory"],
+                    Path(path).name,
+                    self.highlight_mask_directory,
+                    self.highlight_inpainted_directory,
+                )
+                for path in paths
+            ]
+            missing = next(
+                (value for pair in materialized for value in pair if not value.is_file()),
+                None,
+            )
+            if missing is not None:
+                raise FileNotFoundError(
+                    "Precomputed highlight artifact is missing: {}. "
+                    "Run precompute_highlights.py first.".format(missing)
+                )
+            sample["highlight_masks"] = torch.stack(
+                [load_precomputed_highlight_mask_tensor(mask) for mask, _ in materialized]
+            )
+            sample["inpainted_images"] = torch.stack(
+                [load_precomputed_student_rgb_tensor(rgb, "zero_one") for _, rgb in materialized]
+            )
         return sample
 
 

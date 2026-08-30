@@ -15,8 +15,16 @@ from torch.utils.data.distributed import DistributedSampler
 from datasets.collate import scared_collate
 from datasets.scared_discovery import SequenceRecord, discover_scared_sequences
 from datasets.scared_manifest import load_scared_manifest, resolve_manifest_sequences
-from datasets.transforms import load_rgb_tensor, unnormalize_image
-from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
+from datasets.precomputed_highlight import (
+    parse_highlight_options,
+    precomputed_highlight_paths,
+    validate_precomputed_highlight,
+)
+from datasets.transforms import (
+    load_precomputed_highlight_mask_tensor,
+    load_precomputed_student_rgb_tensor,
+    load_rgb_tensor,
+)
 
 
 @dataclass(frozen=True)
@@ -71,13 +79,12 @@ class ScaredTemporalRGBDataset(Dataset):
         self.image_width = image_width
         self.resize_mode = resize_mode
         self.normalize_mode = normalize_mode
-        highlight_config = dict(highlight or {})
-        self.highlight_processor = None
-        if bool(highlight_config.pop("enabled", False)):
-            highlight_config["enabled"] = True
-            self.highlight_processor = SpecularHighlightProcessor(
-                HighlightDetectionConfig(**highlight_config)
-            )
+        (
+            self.highlight_enabled,
+            self.highlight_config,
+            self.highlight_mask_directory,
+            self.highlight_inpainted_directory,
+        ) = parse_highlight_options(highlight)
         self.malformed_sequences: List[str] = []
         if manifest_path:
             manifest = load_scared_manifest(manifest_path)
@@ -92,6 +99,13 @@ class ScaredTemporalRGBDataset(Dataset):
                 self.split,
             )
             self.malformed_sequences = malformed
+        if self.highlight_enabled:
+            for sequence in self.sequences:
+                validate_precomputed_highlight(
+                    sequence["keyframe_directory"], int(sequence["sequence_length"]),
+                    self.highlight_config, self.highlight_mask_directory,
+                    self.highlight_inpainted_directory,
+                )
         self.clips = self._build_clip_index()
         if not self.clips:
             raise RuntimeError("No complete temporal clips generated under {} for split {}. Check clip_length={}, sample_stride={}, and sequence lengths.".format(self.root, self.split, self.clip_length, self.sample_stride))
@@ -154,18 +168,27 @@ class ScaredTemporalRGBDataset(Dataset):
             "point_cloud_path": sequence.get("point_cloud_path"),
             "video_path": sequence.get("video_path"),
         }
-        if self.highlight_processor is not None:
-            processed = [
-                self.highlight_processor(
-                    unnormalize_image(frame, self.normalize_mode)
+        if self.highlight_enabled:
+            materialized = [
+                precomputed_highlight_paths(
+                    sequence["keyframe_directory"], Path(path).name,
+                    self.highlight_mask_directory, self.highlight_inpainted_directory,
                 )
-                for frame in images
+                for path in frame_paths
             ]
+            missing = next(
+                (value for pair in materialized for value in pair if not value.is_file()), None
+            )
+            if missing is not None:
+                raise FileNotFoundError(
+                    "Precomputed highlight artifact is missing: {}. "
+                    "Run precompute_highlights.py first.".format(missing)
+                )
             sample["highlight_masks"] = torch.stack(
-                [value["highlight_mask"] for value in processed], dim=0
+                [load_precomputed_highlight_mask_tensor(mask) for mask, _ in materialized]
             )
             sample["inpainted_images"] = torch.stack(
-                [value["inpainted_image"] for value in processed], dim=0
+                [load_precomputed_student_rgb_tensor(rgb, "zero_one") for _, rgb in materialized]
             )
         return sample
 

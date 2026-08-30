@@ -123,6 +123,23 @@ def _decode_rgb(path: Union[str, Path], expected_size: tuple[int, int], label: s
     return tensor
 
 
+def load_precomputed_highlight_mask_tensor(path: Union[str, Path]) -> torch.Tensor:
+    """Load an exact-size precomputed binary mask as ``[1,448,560]`` bool."""
+    try:
+        with Image.open(path) as image:
+            mask = image.convert("L")
+            if mask.size != (560, 448):
+                raise RuntimeError(
+                    "precomputed highlight mask {} has size {} but requires {}".format(
+                        path, mask.size, (560, 448)
+                    )
+                )
+            tensor = torch.frombuffer(bytearray(mask.tobytes()), dtype=torch.uint8)
+    except (OSError, ValueError) as error:
+        raise RuntimeError("Failed to decode precomputed highlight mask {}: {}".format(path, error)) from error
+    return tensor.reshape(1, 448, 560).gt(0)
+
+
 def load_precomputed_student_rgb_tensor(path: Union[str, Path], normalize_mode: str = "minus_one_one") -> torch.Tensor:
     """Canonical student input: decode 560x448 PNG, with no spatial resize."""
     return normalize_image(_decode_rgb(path, (560, 448), "precomputed student"), normalize_mode)

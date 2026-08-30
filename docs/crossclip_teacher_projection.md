@@ -11,6 +11,11 @@ Backbone adaptation uses standard LoRA only on the two MLP linear projections
 base, LoRA adapters, fully trainable DualDPT/CameraEnc/CameraDec heads, and
 disabled ray-only DualDPT branch are audited independently at startup.
 
+Highlight detection and inpainting are materialized once per unique student
+frame by `precompute_highlights.py`. Training strictly reads the resulting mask
+and clean-RGB PNGs, validated against a per-keyframe configuration marker; no
+OpenCV highlight processing executes in DataLoader workers.
+
 See [coordinate_conventions.md](coordinate_conventions.md) for the normative
 depth/camera geometry and exact eight-frame overlap mapping. See the repository
 README for complete audit, dry-run, training, resume, evaluation, visualization

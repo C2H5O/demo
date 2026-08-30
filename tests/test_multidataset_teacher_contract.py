@@ -17,12 +17,15 @@ from datasets.multidataset import (
     discover_canonical_sequences,
     discover_processed_scared_sequences,
 )
+from datasets.precomputed_highlight import highlight_manifest_payload, parse_highlight_options
 from datasets.transforms import (
+    load_precomputed_highlight_mask_tensor,
     load_precomputed_student_rgb_tensor,
     load_rgb_tensor,
     load_teacher_rgb_tensor,
     tensor_from_numpy_buffer,
 )
+from precompute_highlights import _initialize_worker, _process_frame
 
 
 def test_precomputed_student_decode_skips_resize_and_teacher_is_strict(tmp_path, monkeypatch) -> None:
@@ -162,4 +165,75 @@ def test_processed_scared_uses_student_rgb_and_retains_teacher_rgb(tmp_path) -> 
     ) == (
         tmp_path / "train" / "dataset_01" / "keyframe_1"
         / "dataset_1_keyframe_1" / "start_000000_len_016_stride_01.npz"
+    )
+
+
+def test_canonical_dataset_reads_precomputed_highlight_without_online_processor(tmp_path) -> None:
+    sequence_root = tmp_path / "dataset_01" / "keyframe_1"
+    student_root = sequence_root / "student_rgb"
+    teacher_root = sequence_root / "teacher_rgb"
+    mask_root = sequence_root / "student_highlight_mask"
+    inpainted_root = sequence_root / "student_inpainted_rgb"
+    for directory in (student_root, teacher_root, mask_root, inpainted_root):
+        directory.mkdir(parents=True, exist_ok=True)
+    frame_paths, teacher_paths = [], []
+    for index in range(16):
+        name = "{:06d}.png".format(index)
+        Image.new("RGB", (560, 448), color=(1, 2, 3)).save(student_root / name)
+        Image.new("RGB", (1280, 1024), color=(1, 2, 3)).save(teacher_root / name)
+        Image.new("L", (560, 448), color=255 if index == 0 else 0).save(mask_root / name)
+        Image.new("RGB", (560, 448), color=(10, 20, 30)).save(inpainted_root / name)
+        frame_paths.append(str(student_root / name))
+        teacher_paths.append(str(teacher_root / name))
+    highlight = {
+        "enabled": True,
+        "storage": "precomputed",
+        "mask_directory_name": mask_root.name,
+        "inpainted_directory_name": inpainted_root.name,
+    }
+    _, detection, mask_name, inpainted_name = parse_highlight_options(highlight)
+    (sequence_root / "_highlight_precompute_complete.json").write_text(
+        json.dumps(
+            highlight_manifest_payload(detection, 16, mask_name, inpainted_name)
+        ),
+        encoding="utf-8",
+    )
+    sequence = {
+        "dataset_name": "SCARED", "dataset_id": 1, "keyframe_id": "keyframe_1",
+        "sequence_id": "dataset_1/keyframe_1", "sequence_length": 16,
+        "frame_paths": frame_paths, "teacher_frame_paths": teacher_paths,
+        "absolute_frame_ids": list(range(16)), "frame_directory": str(student_root),
+        "keyframe_directory": str(sequence_root), "depth_directory": None,
+    }
+    dataset = CanonicalTemporalRGBDataset(
+        [sequence], clip_length=16, sample_stride=1, window_stride=8,
+        normalize_mode="zero_one", highlight=highlight,
+    )
+    sample = dataset[0]
+    assert sample["highlight_masks"].shape == (16, 1, 448, 560)
+    assert sample["highlight_masks"][0].all()
+    assert not sample["highlight_masks"][1:].any()
+    torch.testing.assert_close(
+        sample["inpainted_images"][0, :, 0, 0],
+        torch.tensor([10.0, 20.0, 30.0]) / 255.0,
+    )
+
+
+def test_offline_highlight_worker_materializes_loadable_pngs(tmp_path) -> None:
+    pytest.importorskip("cv2")
+    source = tmp_path / "student_rgb" / "000000.png"
+    mask = tmp_path / "student_highlight_mask" / source.name
+    inpainted = tmp_path / "student_inpainted_rgb" / source.name
+    source.parent.mkdir()
+    Image.new("RGB", (560, 448), color=(10, 20, 30)).save(source)
+    _, detection, _, _ = parse_highlight_options({"enabled": True})
+    _initialize_worker(
+        {name: getattr(detection, name) for name in detection.__dataclass_fields__}
+    )
+    assert _process_frame((str(source), str(mask), str(inpainted))) == str(source)
+    loaded_mask = load_precomputed_highlight_mask_tensor(mask)
+    loaded_rgb = load_precomputed_student_rgb_tensor(inpainted, "zero_one")
+    assert not loaded_mask.any()
+    torch.testing.assert_close(
+        loaded_rgb[:, 0, 0], torch.tensor([10.0, 20.0, 30.0]) / 255.0
     )
