@@ -47,3 +47,9 @@ def test_coordinate_document_covers_stride8_and_world_to_camera() -> None:
     assert "X_camera = R @ X_world + t" in text
     assert "C_(s-8)[8:16]" in text
     assert "C_(s+8)[0:8]" in text
+
+
+def test_da3_setup_is_compatible_with_git_without_dash_c() -> None:
+    script = (ROOT / "scripts" / "setup_da3.sh").read_text(encoding="utf-8")
+    assert 'cd "${DA3_ROOT}"' in script
+    assert "git -C" not in script
