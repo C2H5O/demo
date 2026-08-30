@@ -12,6 +12,8 @@ import numpy as np
 import torch
 import yaml
 
+from verify_numpy_abi import verify_numpy_abi
+
 
 EXPECTED_PYTHON = (3, 10, 20)
 EXPECTED_TORCH = "2.3.1"
@@ -55,6 +57,7 @@ def main() -> None:
                 expected, versions, diagnostics
             )
         )
+    verify_numpy_abi()
 
     root = Path(__file__).resolve().parents[1]
     with (root / "configs" / "vggtoda3.yaml").open(

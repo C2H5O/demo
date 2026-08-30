@@ -56,6 +56,9 @@ def test_da3_setup_is_compatible_with_git_without_dash_c() -> None:
     assert 'pip install --no-deps -e "${DA3_ROOT}"' in script
     assert "open3d" in script and "pip install open3d" not in script
     assert '--force-reinstall --no-cache-dir "numpy==1.26.4"' in script
+    assert '"opencv-python-headless==4.10.0.84"' in script
+    assert "opencv-contrib-python-headless" in script
+    assert "verify_numpy_abi.py" in script
     for component in ("DinoV2", "DualDPT", "CameraEnc", "CameraDec"):
         assert "import {}".format(component) in script
 
@@ -70,6 +73,14 @@ def test_environment_mismatch_reports_import_provenance() -> None:
         "PYTHONPATH",
     ):
         assert field in script
+    assert "verify_numpy_abi()" in script
+
+
+def test_numpy_abi_probe_covers_torch_and_opencv() -> None:
+    source = (ROOT / "scripts" / "verify_numpy_abi.py").read_text(encoding="utf-8")
+    assert "torch.from_numpy(image)" in source
+    assert "cv2.connectedComponentsWithStats(image, 8)" in source
+    assert "numpy_file" in source and "cv2_file" in source
 
 
 def test_da3_checkpoint_uses_sharing_aware_strict_safetensors_load() -> None:

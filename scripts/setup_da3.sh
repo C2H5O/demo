@@ -23,4 +23,12 @@ if ! python -c "import numpy; assert numpy.__version__ == '1.26.4', (numpy.__ver
   python -m pip install --force-reinstall --no-cache-dir "numpy==1.26.4"
 fi
 python -c "import numpy; assert numpy.__version__ == '1.26.4', (numpy.__version__, numpy.__file__); print('NumPy 1.26.4:', numpy.__file__)"
+if ! python "${PROJECT_ROOT}/scripts/verify_numpy_abi.py"; then
+  # OpenCV's four wheel variants all provide the same cv2 namespace. Remove
+  # competing variants and install exactly one server/headless build.
+  python -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
+  python -m pip install --force-reinstall --no-cache-dir \
+    "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
+fi
+python "${PROJECT_ROOT}/scripts/verify_numpy_abi.py"
 python -c "from depth_anything_3.cfg import create_object; from depth_anything_3.model.da3 import DepthAnything3Net; from depth_anything_3.model.dinov2.dinov2 import DinoV2; from depth_anything_3.model.dualdpt import DualDPT; from depth_anything_3.model.cam_enc import CameraEnc; from depth_anything_3.model.cam_dec import CameraDec; from depth_anything_3.model.utils.transform import pose_encoding_to_extri_intri; print('Depth-Anything-3 Small model imports OK')"
