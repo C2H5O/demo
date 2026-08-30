@@ -165,12 +165,9 @@ def discover_processed_scared_sequences(root: str | Path, split: str) -> List[Di
             student, teacher, ids = _require_matching_pngs(sequence_root, entries)
             if len(student) < 16:
                 continue
-            sequence_id = str(
-                metadata.get(
-                    "sequence_id",
-                    "dataset_{}/{}".format(dataset_id, sequence_root.name),
-                )
-            )
+            # This identity is part of the existing cross-clip cache path contract:
+            # dataset_01/keyframe_1/dataset_1_keyframe_1/start_*.npz.
+            sequence_id = "dataset_{}/{}".format(dataset_id, sequence_root.name)
             sequences.append({
                 "dataset_name": "SCARED",
                 "dataset_id": dataset_id,
@@ -187,6 +184,7 @@ def discover_processed_scared_sequences(root: str | Path, split: str) -> List[Di
                     "preprocessing_identity",
                     metadata.get("preprocess_version", marker.get("version", "unknown")),
                 ),
+                "source_sequence_id": str(metadata.get("sequence_id", sequence_id)),
                 "canonical": True,
                 "evaluation_only": False,
             })

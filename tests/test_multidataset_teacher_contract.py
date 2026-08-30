@@ -117,6 +117,8 @@ def test_processed_scared_uses_student_rgb_and_retains_teacher_rgb(tmp_path) -> 
     assert len(discovered) == 1
     assert Path(discovered[0]["frame_paths"][0]).parent.name == "student_rgb"
     assert Path(discovered[0]["teacher_frame_paths"][0]).parent.name == "teacher_rgb"
+    assert discovered[0]["sequence_id"] == "dataset_1/keyframe_1"
+    assert discovered[0]["source_sequence_id"] == "scared_case"
     dataset = make_crossclip_rgb_dataset({
         "root": str(tmp_path),
         "frame_source": "auto",
@@ -132,3 +134,15 @@ def test_processed_scared_uses_student_rgb_and_retains_teacher_rgb(tmp_path) -> 
     assert isinstance(dataset, CanonicalTemporalRGBDataset)
     assert [record.clip_start for record in dataset.clips] == [0, 8, 16]
     assert dataset.sequences[0]["absolute_frame_ids"] == list(range(100, 132))
+    assert crossclip_teacher_cache_path(
+        tmp_path / "train", {
+            "dataset_name": "SCARED",
+            "dataset_id": 1,
+            "keyframe_id": "keyframe_1",
+            "sequence_id": "dataset_1/keyframe_1",
+            "clip_start": 0,
+        },
+    ) == (
+        tmp_path / "train" / "dataset_01" / "keyframe_1"
+        / "dataset_1_keyframe_1" / "start_000000_len_016_stride_01.npz"
+    )
