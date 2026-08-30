@@ -66,12 +66,14 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
     dataset_config = config["dataset"]
     if (int(dataset_config["clip_length"]), int(dataset_config["sample_stride"]), int(dataset_config["window_stride"])) != (16, 1, 8):
         raise RuntimeError("Dataset config must be clip_length=16 sample_stride=1 window_stride=8")
-    dataset = make_crossclip_rgb_dataset(dataset_config, split)
+    teacher = config["teacher"]
+    cache_root = Path(str(teacher["raw_cache_root"])) / split
+    dataset = make_crossclip_rgb_dataset(
+        dataset_config, split, cache_root=None if dataset_only else cache_root
+    )
     neighbors = build_neighbor_clip_indices(dataset.clips, window_stride=8)
     count = len(dataset) if limit is None or limit == 0 else min(limit, len(dataset))
     print("split={} sequences={} stride8_samples={} auditing={}".format(split, len(dataset.sequences), len(dataset), count))
-    teacher = config["teacher"]
-    cache_root = Path(str(teacher["raw_cache_root"])) / split
     expected_shape = (448, 560)
     for index in range(count):
         metadata = clip_metadata(dataset, index)
@@ -81,6 +83,18 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
         ids = list(metadata["frame_indices"])
         if ids != list(range(ids[0], ids[0] + 16)):
             raise RuntimeError("Clip absolute frame IDs are not 16 consecutive IDs: {}".format(ids))
+        missing_rgb = next(
+            (path for path in metadata["frame_paths"] if not Path(path).is_file()),
+            None,
+        )
+        if missing_rgb is not None:
+            raise FileNotFoundError(
+                "Student RGB frame referenced by the dataset/cache metadata is missing: {}. "
+                "Teacher caches contain supervision, not RGB pixels; provide valid RGB "
+                "frame_paths or regenerate the cache with paths valid on this machine.".format(
+                    missing_rgb
+                )
+            )
         left_index, right_index = neighbors[index]
         side_records = []
         for side, neighbor_index in (("previous", left_index), ("next", right_index)):

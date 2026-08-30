@@ -36,15 +36,16 @@ def _project_path(value: str | Path) -> Path:
 def _build_dataset(
     config: Dict[str, Any], split: str
 ) -> ScaredCrossClipProjectionDataset:
-    rgb = make_crossclip_rgb_dataset(config["dataset"], split)
     teacher = config["teacher"]
     use_aligned = bool(teacher.get("use_aligned_cache", True))
     root_key = "aligned_cache_root" if use_aligned else "raw_cache_root"
     if not teacher.get(root_key):
         raise ValueError("teacher.{} must be configured".format(root_key))
+    cache_root = Path(str(teacher[root_key])) / split
+    rgb = make_crossclip_rgb_dataset(config["dataset"], split, cache_root=cache_root)
     dataset = ScaredCrossClipProjectionDataset(
         rgb,
-        Path(str(teacher[root_key])) / split,
+        cache_root,
         expected_base_checkpoint=str(teacher["pretrained_checkpoint"]),
         expected_stage="aligned" if use_aligned else "raw",
     )

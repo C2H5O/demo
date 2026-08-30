@@ -11,8 +11,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
 from datasets.scared_clip_dataset import clip_metadata, make_scared_rgb_dataset
 from datasets.scared_dataset import ClipRecord, ScaredTemporalRGBDataset, seed_worker
+from datasets.transforms import load_rgb_tensor, unnormalize_image
 
 
 CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v1"
@@ -29,9 +31,136 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "sequence"
 
 
+class CacheMetadataRGBDataset(Dataset):
+    """RGB clips indexed by frame paths embedded in independent teacher caches."""
+
+    def __init__(self, cache_root: Union[str, Path], dataset_config: Dict[str, Any]) -> None:
+        self.cache_root = Path(cache_root).expanduser()
+        if not self.cache_root.is_dir():
+            raise FileNotFoundError(
+                "Teacher cache root does not exist or is not a directory: {}".format(
+                    self.cache_root
+                )
+            )
+        self.clip_length, self.sample_stride, self.window_stride = 16, 1, 8
+        self.image_height = int(dataset_config.get("image_height", 448))
+        self.image_width = int(dataset_config.get("image_width", 560))
+        self.resize_mode = str(dataset_config.get("resize_mode", "resize"))
+        self.normalize_mode = str(dataset_config.get("normalize_mode", "zero_one"))
+        highlight_config = dict(dataset_config.get("highlight", {}))
+        self.highlight_processor = None
+        if bool(highlight_config.pop("enabled", False)):
+            highlight_config["enabled"] = True
+            self.highlight_processor = SpecularHighlightProcessor(
+                HighlightDetectionConfig(**highlight_config)
+            )
+        self.sequences: List[Dict[str, Any]] = []
+        self.clips: List[ClipRecord] = []
+        identities = set()
+        for cache_path in sorted(self.cache_root.rglob("*.npz")):
+            with np.load(str(cache_path), allow_pickle=False) as cache:
+                if "metadata_json" not in cache:
+                    continue
+                try:
+                    metadata = json.loads(str(cache["metadata_json"].item()))
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise RuntimeError(
+                        "Invalid metadata_json in teacher cache {}".format(cache_path)
+                    ) from error
+                frame_paths = metadata.get("frame_paths")
+                if not isinstance(frame_paths, list) or len(frame_paths) != 16:
+                    raise RuntimeError(
+                        "Teacher cache {} cannot index student RGB: metadata_json must "
+                        "contain 16 frame_paths".format(cache_path)
+                    )
+                absolute_ids = [int(value) for value in cache["absolute_frame_ids"].tolist()]
+                clip_start = int(cache["clip_start"].item())
+                cached_dataset_name = (
+                    str(cache["dataset_name"].item())
+                    if "dataset_name" in cache else "SCARED"
+                )
+                dataset_name = str(metadata.get("dataset_name", cached_dataset_name))
+                sequence_id = str(cache["sequence_id"].item())
+                identity = (dataset_name, sequence_id, clip_start)
+                if identity in identities:
+                    raise RuntimeError("Duplicate teacher cache clip identity {}".format(identity))
+                identities.add(identity)
+                if clip_start % 8 or absolute_ids != list(range(absolute_ids[0], absolute_ids[0] + 16)):
+                    raise RuntimeError(
+                        "Teacher cache {} does not describe a consecutive stride-8 clip".format(
+                            cache_path
+                        )
+                    )
+                paths = [str(Path(value).expanduser()) for value in frame_paths]
+                teacher_paths = metadata.get("teacher_frame_paths", paths)
+                if not isinstance(teacher_paths, list) or len(teacher_paths) != 16:
+                    teacher_paths = paths
+                sequence = {
+                    "dataset_name": dataset_name,
+                    "dataset_id": int(metadata.get("dataset_id", -1)),
+                    "keyframe_id": str(metadata.get("keyframe_id", "cache")),
+                    "sequence_id": sequence_id,
+                    "sequence_length": 16,
+                    "frame_paths": paths,
+                    "teacher_frame_paths": [str(Path(value).expanduser()) for value in teacher_paths],
+                    "absolute_frame_ids": absolute_ids,
+                    "frame_directory": str(Path(paths[0]).parent),
+                    "keyframe_directory": str(metadata.get("keyframe_directory", Path(paths[0]).parent)),
+                    "preprocessing_identity": str(metadata.get("preprocessing_identity", "teacher_cache_metadata")),
+                    "cache_metadata_path": str(cache_path),
+                }
+                self.sequences.append(sequence)
+                self.clips.append(ClipRecord(sequence, tuple(range(16)), clip_start))
+        if not self.clips:
+            raise RuntimeError(
+                "No teacher caches with embedded RGB frame metadata found under {}".format(
+                    self.cache_root
+                )
+            )
+
+    def __len__(self) -> int:
+        return len(self.clips)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        record = self.clips[index]
+        sequence = record.sequence
+        paths = [str(sequence["frame_paths"][item]) for item in record.frame_indices]
+        missing = next((path for path in paths if not Path(path).is_file()), None)
+        if missing is not None:
+            raise FileNotFoundError(
+                "Student RGB path embedded in teacher cache is missing: {} "
+                "(cache={}). Regenerate the cache on this machine or provide a manifest "
+                "with valid RGB frame_paths.".format(missing, sequence["cache_metadata_path"])
+            )
+        images = torch.stack([
+            load_rgb_tensor(
+                path, self.image_height, self.image_width,
+                self.resize_mode, self.normalize_mode,
+            )
+            for path in paths
+        ])
+        absolute_ids = [int(value) for value in sequence["absolute_frame_ids"]]
+        sample: Dict[str, Any] = {
+            "images": images,
+            "frame_paths": paths,
+            "frame_names": [Path(path).name for path in paths],
+            "frame_indices": torch.tensor(absolute_ids, dtype=torch.long),
+            "clip_start": torch.tensor(record.clip_start, dtype=torch.long),
+        }
+        if self.highlight_processor is not None:
+            processed = [
+                self.highlight_processor(unnormalize_image(image, self.normalize_mode))
+                for image in images
+            ]
+            sample["highlight_masks"] = torch.stack([value["highlight_mask"] for value in processed])
+            sample["inpainted_images"] = torch.stack([value["inpainted_image"] for value in processed])
+        return sample
+
+
 def make_crossclip_rgb_dataset(
-    dataset_config: Dict[str, Any], split: str
-) -> ScaredTemporalRGBDataset:
+    dataset_config: Dict[str, Any], split: str,
+    cache_root: Optional[Union[str, Path]] = None,
+) -> Any:
     """Build only C_0, C_8, C_16...; frames inside each clip stay consecutive."""
     config = dict(dataset_config)
     for key in ("random_clip_sampling", "teacher_neighbor_offset"):
@@ -44,7 +173,22 @@ def make_crossclip_rgb_dataset(
             "drop_incomplete_clip": True,
         }
     )
-    dataset = make_scared_rgb_dataset(config, split)
+    try:
+        dataset = make_scared_rgb_dataset(config, split)
+    except (FileNotFoundError, RuntimeError) as error:
+        discovery_error = (
+            "No usable SCARED temporal RGB sequences discovered" in str(error)
+            or "No legacy SCARED or complete canonical sequences were discovered" in str(error)
+            or "Missing required SCARED dataset IDs" in str(error)
+            or "SCARED dataset root does not exist" in str(error)
+        )
+        if cache_root is None or not discovery_error:
+            raise
+        dataset = CacheMetadataRGBDataset(cache_root, config)
+        print(
+            "RGB discovery fallback: indexed {} stride-8 clips from teacher cache "
+            "metadata under {}".format(len(dataset), cache_root)
+        )
     if dataset.clip_length != 16 or dataset.sample_stride != 1 or dataset.window_stride != 8:
         raise RuntimeError("Cross-clip dataset failed to enforce length=16 sample_stride=1 window_stride=8")
     if any(int(record.clip_start) % 8 for record in dataset.clips):

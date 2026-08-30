@@ -12,10 +12,12 @@ from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_FORMAT_VERSION,
     LOCAL_CAMERA_COORDINATE_SYSTEM,
     WORLD_TO_CAMERA_POSE_CONVENTION,
+    CacheMetadataRGBDataset,
     ScaredCrossClipProjectionDataset,
     build_neighbor_clip_indices,
     crossclip_projection_collate,
     crossclip_teacher_cache_path,
+    make_crossclip_rgb_dataset,
 )
 from datasets.scared_clip_dataset import clip_metadata
 from datasets.scared_dataset import ClipRecord
@@ -155,6 +157,35 @@ def test_crossclip_dataset_loads_only_8_shared_frames(tmp_path) -> None:
     assert sample["teacher_right"]["teacher_local_indices"].tolist() == list(range(8))
     assert sample["teacher_left"]["absolute_frame_ids"].tolist() == list(range(8, 16))
     assert sample["teacher_right"]["absolute_frame_ids"].tolist() == list(range(16, 24))
+
+
+def test_rgb_index_falls_back_to_independent_teacher_cache_metadata(tmp_path) -> None:
+    empty_processed_root = tmp_path / "processed" / "scared"
+    empty_processed_root.mkdir(parents=True)
+    cache_root = tmp_path / "teacher_cache" / "train"
+    source = _FakeRGBDataset([_sequence("sequence_a", 40)])
+    for index in range(len(source)):
+        _write_cache(cache_root, source, index, stage="raw")
+    dataset = make_crossclip_rgb_dataset(
+        {
+            "root": str(empty_processed_root),
+            "frame_source": "auto",
+            "clip_length": 16,
+            "sample_stride": 1,
+            "window_stride": 8,
+            "drop_incomplete_clip": True,
+            "image_height": 448,
+            "image_width": 560,
+            "resize_mode": "resize",
+            "normalize_mode": "zero_one",
+        },
+        "train",
+        cache_root=cache_root,
+    )
+    assert isinstance(dataset, CacheMetadataRGBDataset)
+    assert [record.clip_start for record in dataset.clips] == [0, 8, 16, 24]
+    assert clip_metadata(dataset, 1)["frame_indices"] == list(range(8, 24))
+    assert build_neighbor_clip_indices(dataset.clips)[1] == (0, 2)
 
 
 def test_raw_teacher_samples_collate_without_unused_point_maps(tmp_path) -> None:
