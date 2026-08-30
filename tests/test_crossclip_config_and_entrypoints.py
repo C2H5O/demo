@@ -55,5 +55,18 @@ def test_da3_setup_is_compatible_with_git_without_dash_c() -> None:
     assert "git -C" not in script
     assert 'pip install --no-deps -e "${DA3_ROOT}"' in script
     assert "open3d" in script and "pip install open3d" not in script
+    assert '--force-reinstall --no-cache-dir "numpy==1.26.4"' in script
     for component in ("DinoV2", "DualDPT", "CameraEnc", "CameraDec"):
         assert "import {}".format(component) in script
+
+
+def test_environment_mismatch_reports_import_provenance() -> None:
+    script = (ROOT / "scripts" / "verify_environment.py").read_text(encoding="utf-8")
+    for field in (
+        "python_executable",
+        "numpy_import_file",
+        "numpy_distribution_version",
+        "numpy_distribution_location",
+        "PYTHONPATH",
+    ):
+        assert field in script

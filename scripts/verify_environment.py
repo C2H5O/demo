@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import os
+import site
 import sys
 from pathlib import Path
 
@@ -31,7 +34,27 @@ def main() -> None:
         "numpy": EXPECTED_NUMPY,
     }
     if versions != expected:
-        raise RuntimeError("Environment mismatch: expected {}; got {}".format(expected, versions))
+        try:
+            numpy_distribution = importlib.metadata.distribution("numpy")
+            distribution_version = numpy_distribution.version
+            distribution_location = str(numpy_distribution.locate_file(""))
+        except importlib.metadata.PackageNotFoundError:
+            distribution_version = "not-found"
+            distribution_location = "not-found"
+        diagnostics = {
+            "python_executable": sys.executable,
+            "sys_prefix": sys.prefix,
+            "numpy_import_file": np.__file__,
+            "numpy_distribution_version": distribution_version,
+            "numpy_distribution_location": distribution_location,
+            "user_site": site.getusersitepackages(),
+            "PYTHONPATH": os.environ.get("PYTHONPATH"),
+        }
+        raise RuntimeError(
+            "Environment mismatch: expected {}; got {}; diagnostics={}".format(
+                expected, versions, diagnostics
+            )
+        )
 
     root = Path(__file__).resolve().parents[1]
     with (root / "configs" / "vggtoda3.yaml").open(
