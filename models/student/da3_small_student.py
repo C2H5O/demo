@@ -76,7 +76,8 @@ def _load_full_pretrained(config: DA3SmallConfig) -> tuple[nn.Module, Dict[str, 
     """Strictly load the complete official checkpoint before disabling ray execution."""
     create_object, OmegaConf, _ = _require_official_da3()
     try:
-        from safetensors.torch import load_file
+        from safetensors import safe_open
+        from safetensors.torch import load_model
     except ImportError as error:
         raise RuntimeError("safetensors is required to load DA3-Small") from error
     checkpoint_path = _project_path(config.checkpoint)
@@ -101,18 +102,30 @@ def _load_full_pretrained(config: DA3SmallConfig) -> tuple[nn.Module, Dict[str, 
     }:
         raise RuntimeError("Unexpected DA3-Small architecture: {}".format(architecture_audit))
     network = create_object(OmegaConf.create(official_config))
-    state = load_file(str(checkpoint_path), device="cpu")
-    if not state or any(not key.startswith("model.") for key in state):
+    with safe_open(str(checkpoint_path), framework="pt", device="cpu") as checkpoint:
+        keys = list(checkpoint.keys())
+    if not keys or any(not key.startswith("model.") for key in keys):
         raise RuntimeError("DA3 safetensors keys must all use the official model. prefix")
-    network_state = {key[len("model.") :]: value for key, value in state.items()}
-    incompatible = network.load_state_dict(network_state, strict=True)
-    if incompatible.missing_keys or incompatible.unexpected_keys:
-        raise RuntimeError("Strict DA3 checkpoint load unexpectedly reported incompatible keys")
+    # The official DualDPT shares LayerNorm modules across auxiliary levels.
+    # Safetensors intentionally stores a shared tensor once, so load_file plus
+    # load_state_dict would report its alias names as missing.  Preserve the
+    # checkpoint's model.* namespace and use the sharing-aware strict loader.
+    checkpoint_container = nn.Module()
+    checkpoint_container.add_module("model", network)
+    missing, unexpected = load_model(
+        checkpoint_container, str(checkpoint_path), strict=True, device="cpu"
+    )
+    if missing or unexpected:
+        raise RuntimeError(
+            "Strict DA3 checkpoint load reported missing={} unexpected={}".format(
+                missing, unexpected
+            )
+        )
     counts = {
-        "backbone": sum(key.startswith("model.backbone.") for key in state),
-        "depth_head": sum(key.startswith("model.head.") for key in state),
-        "camera_encoder": sum(key.startswith("model.cam_enc.") for key in state),
-        "camera_decoder": sum(key.startswith("model.cam_dec.") for key in state),
+        "backbone": sum(key.startswith("model.backbone.") for key in keys),
+        "depth_head": sum(key.startswith("model.head.") for key in keys),
+        "camera_encoder": sum(key.startswith("model.cam_enc.") for key in keys),
+        "camera_decoder": sum(key.startswith("model.cam_dec.") for key in keys),
     }
     if any(value <= 0 for value in counts.values()):
         raise RuntimeError("Checkpoint audit failed: {}".format(counts))

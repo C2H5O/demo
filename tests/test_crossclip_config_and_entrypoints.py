@@ -70,3 +70,13 @@ def test_environment_mismatch_reports_import_provenance() -> None:
         "PYTHONPATH",
     ):
         assert field in script
+
+
+def test_da3_checkpoint_uses_sharing_aware_strict_safetensors_load() -> None:
+    source = (ROOT / "models" / "student" / "da3_small_student.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from safetensors.torch import load_model" in source
+    assert 'checkpoint_container.add_module("model", network)' in source
+    assert "load_model(" in source and "strict=True" in source
+    assert "network.load_state_dict(network_state" not in source
