@@ -12,6 +12,7 @@ The student architecture is:
 ```text
 [B,16,3,448,560] RGB
   -> official pretrained DA3-Small DINOv2 ViT-S/14 (joint 16-view forward)
+     -> standard LoRA on each block's MLP fc1/fc2 only
   -> pretrained DualDPT main/depth modules -> depth + depth_conf
   -> native pretrained camera decoder -> K + T_w2c
   -> deterministic depth/camera geometry -> xyz_local + xyz_global
@@ -21,6 +22,15 @@ The full official checkpoint is strict-loaded before ray is disabled. The
 DualDPT ray-only fusion and output modules remain checkpoint-compatible but are
 frozen and bypassed; runtime hooks fail if any ray-specific module executes.
 Neither `ray` nor `ray_conf` is returned or consumed.
+
+The DINOv2 base weights are frozen. Standard LoRA (`rank=8`, `alpha=16`,
+`dropout=0.05`) trains the 24 `pretrained.blocks[i].mlp.{fc1,fc2}` linear
+projections; attention projections are untouched. This is ordinary LoRA, not
+EndoDAC DV-LoRA. DualDPT, CameraEnc, and CameraDec are configured for full
+parameter optimization. Because the unconditioned student forward uses
+`cam_token=None`, CameraEnc is retained in the optimizer for the requested
+configuration but receives no gradient unless camera-conditioned input is
+introduced; CameraDec is active and receives projection-loss gradients.
 
 ## Required assets
 

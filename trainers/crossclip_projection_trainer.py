@@ -123,7 +123,22 @@ def build_crossclip_optimizer(
             "name": "head",
         }
     ]
-    if model.config.freeze_backbone:
+    if model.config.use_backbone_lora:
+        if not encoder_parameters:
+            raise RuntimeError("DINOv2 LoRA mode has no trainable adapter parameters")
+        lora_learning_rate = float(
+            training_config.get("lora_learning_rate", head_learning_rate)
+        )
+        if lora_learning_rate <= 0.0:
+            raise ValueError("training.lora_learning_rate must be positive")
+        parameter_groups.append(
+            {
+                "params": encoder_parameters,
+                "lr": lora_learning_rate,
+                "name": "backbone_lora",
+            }
+        )
+    elif model.config.freeze_backbone:
         if encoder_parameters:
             raise RuntimeError("Frozen DA3 backbone parameters entered the optimizer")
     else:
@@ -328,11 +343,15 @@ def train_crossclip_projection(
         if checkpoint_student.get("architecture") != "da3_small":
             raise ValueError("Resume checkpoint is not a DA3-Small experiment")
         checkpoint_frozen = bool(checkpoint_student.get("freeze_backbone", False))
-        if checkpoint_frozen != bool(model.config.freeze_backbone):
+        checkpoint_lora = bool(checkpoint_student.get("use_backbone_lora", False))
+        if (checkpoint_frozen, checkpoint_lora) != (
+            bool(model.config.freeze_backbone), bool(model.config.use_backbone_lora)
+        ):
             raise ValueError(
-                "Checkpoint freeze_backbone={} does not match current {}. "
-                "Start a new run when changing backbone trainability.".format(
-                    checkpoint_frozen, model.config.freeze_backbone
+                "Checkpoint backbone mode freeze={} lora={} does not match current "
+                "freeze={} lora={}. Start a new run when changing backbone trainability.".format(
+                    checkpoint_frozen, checkpoint_lora,
+                    model.config.freeze_backbone, model.config.use_backbone_lora
                 )
             )
         model.load_state_dict(checkpoint["model"], strict=True)
@@ -356,12 +375,15 @@ def train_crossclip_projection(
     print(
         "VGGT-DA3 setup: clips={} batch={} frames=16 input=448x560 patch_grid=32x40 "
         "window_stride=8 trainable={:,} backbone_trainable={:,} "
-        "depth_trainable={:,} camera_encoder_trainable={:,} "
+        "backbone_lora_trainable={:,} lora_modules={} depth_trainable={:,} "
+        "camera_encoder_trainable={:,} "
         "camera_decoder_trainable={:,} ray_trainable={:,}".format(
             len(dataset),
             config["dataloader"]["batch_size"],
             stats["trainable"],
             stats["backbone_trainable"],
+            stats["backbone_lora_trainable"],
+            stats["lora_modules"],
             stats["depth_head_trainable"],
             stats["camera_encoder_trainable"],
             stats["camera_decoder_trainable"],

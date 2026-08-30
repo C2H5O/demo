@@ -6,6 +6,8 @@ import torch.nn as nn
 
 import models.student.da3_small_student as da3_module
 from models.student.da3_small_student import DA3SmallConfig, DA3SmallStudent
+from models.student.lora import LoRALinear, inject_da3_mlp_lora
+from trainers.crossclip_projection_trainer import build_crossclip_optimizer
 from utils.da3_geometry import (
     depth_intrinsics_to_local_points,
     global_to_camera_points,
@@ -93,6 +95,77 @@ class _FakeNetwork(nn.Module):
         self.head = _FakeHead()
         self.cam_enc = nn.Linear(1, 1)
         self.cam_dec = _FakeCameraDecoder()
+
+
+class _FakeMLPBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mlp = nn.Module()
+        self.mlp.fc1 = nn.Linear(4, 8)
+        self.mlp.fc2 = nn.Linear(8, 4)
+        self.attn = nn.Module()
+        self.attn.qkv = nn.Linear(4, 12)
+
+
+class _FakeDinoBackbone(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pretrained = nn.Module()
+        self.pretrained.blocks = nn.ModuleList([_FakeMLPBlock(), _FakeMLPBlock()])
+
+
+def test_standard_lora_targets_only_dinov2_mlp_linears() -> None:
+    backbone = _FakeDinoBackbone()
+    inputs = torch.randn(2, 4)
+    expected = backbone.pretrained.blocks[0].mlp.fc1(inputs).detach()
+    injected = inject_da3_mlp_lora(backbone, rank=2, alpha=4.0, dropout=0.0)
+    assert sorted(injected) == [
+        "pretrained.blocks.0.mlp.fc1",
+        "pretrained.blocks.0.mlp.fc2",
+        "pretrained.blocks.1.mlp.fc1",
+        "pretrained.blocks.1.mlp.fc2",
+    ]
+    assert isinstance(backbone.pretrained.blocks[0].mlp.fc1, LoRALinear)
+    assert isinstance(backbone.pretrained.blocks[0].attn.qkv, nn.Linear)
+    torch.testing.assert_close(backbone.pretrained.blocks[0].mlp.fc1(inputs), expected)
+    for module in injected.values():
+        assert not any(parameter.requires_grad for parameter in module.base_layer.parameters())
+        assert module.lora_A.requires_grad and module.lora_B.requires_grad
+
+
+def test_lora_config_requires_frozen_backbone() -> None:
+    with pytest.raises(ValueError, match="freeze_backbone=true"):
+        DA3SmallConfig(use_backbone_lora=True, freeze_backbone=False).validate()
+
+
+def test_student_lora_mode_freezes_dino_base_and_keeps_all_heads_trainable() -> None:
+    network = _FakeNetwork()
+    network.backbone = _FakeDinoBackbone()
+    model = DA3SmallStudent(
+        DA3SmallConfig(
+            use_backbone_lora=True, freeze_backbone=True, lora_expected_modules=4
+        ),
+        network=network,
+    )
+    model.assert_trainability_contract()
+    groups = model.parameter_groups()
+    assert len(groups["backbone"]) == 8
+    assert all(parameter.requires_grad for parameter in groups["depth_head"])
+    assert all(parameter.requires_grad for parameter in groups["camera_encoder"])
+    assert all(parameter.requires_grad for parameter in groups["camera_decoder"])
+    stats = model.parameter_statistics()
+    assert stats["backbone_trainable"] == stats["backbone_lora_trainable"]
+    assert stats["lora_modules"] == 4
+    optimizer = build_crossclip_optimizer(
+        model,
+        {
+            "learning_rate": 1.0e-4,
+            "lora_learning_rate": 2.0e-4,
+            "weight_decay": 0.05,
+        },
+    )
+    assert [group["name"] for group in optimizer.param_groups] == ["head", "backbone_lora"]
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(2.0e-4)
 
 
 def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> None:

@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.student.lora import LoRALinear, inject_da3_mlp_lora
 from utils.da3_geometry import depth_intrinsics_to_local_points, local_to_global_points
 
 
@@ -31,6 +32,11 @@ class DA3SmallConfig:
     use_ray_pose: bool = False
     use_camera_head: bool = True
     freeze_backbone: bool = False
+    use_backbone_lora: bool = False
+    lora_rank: int = 8
+    lora_alpha: float = 16.0
+    lora_dropout: float = 0.05
+    lora_expected_modules: int = 24
     freeze_depth_head: bool = False
     freeze_camera_encoder: bool = False
     freeze_camera_decoder: bool = False
@@ -50,6 +56,15 @@ class DA3SmallConfig:
             raise ValueError("ray and ray-pose branches are forbidden")
         if not self.use_camera_head:
             raise ValueError("DA3 native camera head is required")
+        if self.use_backbone_lora:
+            if not self.freeze_backbone:
+                raise ValueError("Standard backbone LoRA requires freeze_backbone=true")
+            if self.lora_rank <= 0 or self.lora_alpha <= 0.0:
+                raise ValueError("LoRA rank and alpha must be positive")
+            if not 0.0 <= self.lora_dropout < 1.0:
+                raise ValueError("LoRA dropout must be in [0,1)")
+            if self.lora_expected_modules <= 0:
+                raise ValueError("lora_expected_modules must be positive")
         if self.head_chunk_size <= 0:
             raise ValueError("head_chunk_size must be positive")
 
@@ -159,6 +174,22 @@ class DA3SmallStudent(nn.Module):
         for name in ("backbone", "head", "cam_enc", "cam_dec"):
             if not isinstance(getattr(self.network, name, None), nn.Module):
                 raise RuntimeError("Official DA3 network lacks {}".format(name))
+        self.lora_modules: Dict[str, LoRALinear] = {}
+        if self.config.use_backbone_lora:
+            self.lora_modules = inject_da3_mlp_lora(
+                self.backbone,
+                rank=self.config.lora_rank,
+                alpha=self.config.lora_alpha,
+                dropout=self.config.lora_dropout,
+            )
+            if len(self.lora_modules) != self.config.lora_expected_modules:
+                raise RuntimeError(
+                    "Expected {} DINOv2 MLP LoRA targets, found {}: {}".format(
+                        self.config.lora_expected_modules,
+                        len(self.lora_modules),
+                        sorted(self.lora_modules),
+                    )
+                )
         self.register_buffer(
             "imagenet_mean", torch.tensor((0.485, 0.456, 0.406)).view(1, 1, 3, 1, 1)
         )
@@ -208,7 +239,6 @@ class DA3SmallStudent(nn.Module):
 
     def _configure_trainability(self) -> None:
         groups = (
-            (self.backbone, not self.config.freeze_backbone),
             (self.depth_head, not self.config.freeze_depth_head),
             (self.camera_encoder, not self.config.freeze_camera_encoder),
             (self.camera_decoder, not self.config.freeze_camera_decoder),
@@ -216,6 +246,12 @@ class DA3SmallStudent(nn.Module):
         for module, trainable in groups:
             for parameter in module.parameters():
                 parameter.requires_grad_(trainable)
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad_(not self.config.freeze_backbone)
+        if self.config.use_backbone_lora:
+            for module in self.lora_modules.values():
+                module.lora_A.requires_grad_(True)
+                module.lora_B.requires_grad_(True)
         # The checkpoint was loaded strictly first. Ray-only weights are retained
         # for checkpoint compatibility, but are frozen and never placed in an optimizer.
         for module in self._ray_modules():
@@ -229,6 +265,17 @@ class DA3SmallStudent(nn.Module):
             raise RuntimeError("DA3 native camera decoder is not trainable")
         if any(parameter.requires_grad for module in self._ray_modules() for parameter in module.parameters()):
             raise RuntimeError("Ray-only parameters must be frozen")
+        if self.config.use_backbone_lora:
+            lora_ids = {
+                id(parameter)
+                for module in self.lora_modules.values()
+                for parameter in (module.lora_A, module.lora_B)
+            }
+            trainable_backbone_ids = {
+                id(parameter) for parameter in self.backbone.parameters() if parameter.requires_grad
+            }
+            if trainable_backbone_ids != lora_ids:
+                raise RuntimeError("DINOv2 LoRA mode exposed non-LoRA backbone parameters")
 
     def parameter_groups(self) -> Dict[str, list[nn.Parameter]]:
         ray_ids = {id(parameter) for module in self._ray_modules() for parameter in module.parameters()}
@@ -251,6 +298,13 @@ class DA3SmallStudent(nn.Module):
         result["ray_trainable"] = sum(
             p.numel() for module in self._ray_modules() for p in module.parameters() if p.requires_grad
         )
+        result["backbone_lora_trainable"] = sum(
+            parameter.numel()
+            for module in self.lora_modules.values()
+            for parameter in (module.lora_A, module.lora_B)
+            if parameter.requires_grad
+        )
+        result["lora_modules"] = len(self.lora_modules)
         return result
 
     def _fuse_depth_main(self, resized: list[torch.Tensor]) -> torch.Tensor:
