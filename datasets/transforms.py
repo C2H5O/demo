@@ -14,6 +14,40 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
+_NUMPY_TO_TORCH_DTYPE = {
+    np.dtype(np.bool_): torch.bool,
+    np.dtype(np.uint8): torch.uint8,
+    np.dtype(np.int32): torch.int32,
+    np.dtype(np.int64): torch.int64,
+    np.dtype(np.float32): torch.float32,
+    np.dtype(np.float64): torch.float64,
+}
+
+
+def tensor_from_numpy_buffer(array: np.ndarray) -> torch.Tensor:
+    """Copy a NumPy array through the buffer protocol, bypassing its C-API type bridge."""
+    contiguous = np.ascontiguousarray(array)
+    dtype = _NUMPY_TO_TORCH_DTYPE.get(contiguous.dtype)
+    if dtype is None:
+        raise TypeError("Unsupported NumPy dtype for Torch conversion: {}".format(contiguous.dtype))
+    # bytearray owns a writable copy; clone detaches the returned tensor from it.
+    return torch.frombuffer(
+        bytearray(contiguous.tobytes(order="C")), dtype=dtype
+    ).reshape(contiguous.shape).clone()
+
+
+def _rgb_image_to_tensor(image: Image.Image) -> torch.Tensor:
+    width, height = image.size
+    return (
+        torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
+        .reshape(height, width, 3)
+        .permute(2, 0, 1)
+        .contiguous()
+        .float()
+        .div_(255.0)
+    )
+
+
 def _resample_bicubic() -> int:
     return getattr(Image, "Resampling", Image).BICUBIC
 
@@ -69,8 +103,7 @@ def load_rgb_tensor(path: Union[str, Path], image_height: int, image_width: int,
             processed = _resize_image(image.convert("RGB"), image_height, image_width, resize_mode)
     except (OSError, ValueError) as error:
         raise RuntimeError("Failed to decode SCARED RGB image {}: {}".format(path, error)) from error
-    array = np.asarray(processed, dtype=np.float32) / 255.0
-    return normalize_image(torch.from_numpy(array).permute(2, 0, 1).contiguous(), normalize_mode)
+    return normalize_image(_rgb_image_to_tensor(processed), normalize_mode)
 
 
 def _decode_rgb(path: Union[str, Path], expected_size: tuple[int, int], label: str) -> torch.Tensor:
@@ -84,10 +117,10 @@ def _decode_rgb(path: Union[str, Path], expected_size: tuple[int, int], label: s
                         label, path, rgb.size, expected_size
                     )
                 )
-            array = np.asarray(rgb, dtype=np.float32) / 255.0
+            tensor = _rgb_image_to_tensor(rgb)
     except (OSError, ValueError) as error:
         raise RuntimeError("Failed to decode {} RGB image {}: {}".format(label, path, error)) from error
-    return torch.from_numpy(array).permute(2, 0, 1).contiguous()
+    return tensor
 
 
 def load_precomputed_student_rgb_tensor(path: Union[str, Path], normalize_mode: str = "minus_one_one") -> torch.Tensor:

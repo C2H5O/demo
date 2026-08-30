@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
 from datasets.scared_clip_dataset import clip_metadata, make_scared_rgb_dataset
 from datasets.scared_dataset import ClipRecord, ScaredTemporalRGBDataset, seed_worker
-from datasets.transforms import load_rgb_tensor, unnormalize_image
+from datasets.transforms import load_rgb_tensor, tensor_from_numpy_buffer, unnormalize_image
 
 
 CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v1"
@@ -479,11 +479,11 @@ def _load_overlap_side(
             )
         result: Dict[str, Any] = {
             "exists": torch.tensor(True),
-            "depth": torch.from_numpy(cache["depth"][teacher_slice].copy()).detach(),
-            "confidence": torch.from_numpy(cache["confidence"][teacher_slice].copy()).detach(),
-            "valid_mask": torch.from_numpy(cache["valid_mask"][teacher_slice].copy()).detach(),
-            "intrinsics": torch.from_numpy(cache["intrinsics"][teacher_slice].copy()).detach(),
-            "extrinsics": torch.from_numpy(cache["extrinsics"][teacher_slice].copy()).detach(),
+            "depth": tensor_from_numpy_buffer(cache["depth"][teacher_slice]),
+            "confidence": tensor_from_numpy_buffer(cache["confidence"][teacher_slice]),
+            "valid_mask": tensor_from_numpy_buffer(cache["valid_mask"][teacher_slice]),
+            "intrinsics": tensor_from_numpy_buffer(cache["intrinsics"][teacher_slice]),
+            "extrinsics": tensor_from_numpy_buffer(cache["extrinsics"][teacher_slice]),
             "absolute_frame_ids": torch.tensor(actual_ids, dtype=torch.long),
             "student_local_indices": torch.arange(0, 8, dtype=torch.long)
             if side == "left" else torch.arange(8, 16, dtype=torch.long),

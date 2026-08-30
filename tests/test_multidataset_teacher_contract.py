@@ -17,7 +17,12 @@ from datasets.multidataset import (
     discover_canonical_sequences,
     discover_processed_scared_sequences,
 )
-from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor, load_teacher_rgb_tensor
+from datasets.transforms import (
+    load_precomputed_student_rgb_tensor,
+    load_rgb_tensor,
+    load_teacher_rgb_tensor,
+    tensor_from_numpy_buffer,
+)
 
 
 def test_precomputed_student_decode_skips_resize_and_teacher_is_strict(tmp_path, monkeypatch) -> None:
@@ -32,10 +37,22 @@ def test_precomputed_student_decode_skips_resize_and_teacher_is_strict(tmp_path,
     assert load_rgb_tensor(legacy, 448, 560, normalize_mode="minus_one_one").shape == (3, 448, 560)
 
     monkeypatch.setattr("datasets.transforms._resize_image", lambda *args: (_ for _ in ()).throw(AssertionError("resize")))
-    assert load_precomputed_student_rgb_tensor(student).shape == (3, 448, 560)
+    student_tensor = load_precomputed_student_rgb_tensor(student)
+    assert student_tensor.shape == (3, 448, 560)
+    assert torch.allclose(
+        student_tensor[:, 0, 0],
+        (torch.tensor([4.0, 5.0, 6.0]) / 255.0) * 2.0 - 1.0,
+    )
     assert load_teacher_rgb_tensor(teacher).shape == (3, 1024, 1280)
     with pytest.raises(RuntimeError, match="requires"):
         load_teacher_rgb_tensor(student)
+
+
+def test_numpy_buffer_conversion_preserves_values_without_from_numpy() -> None:
+    floats = __import__("numpy").arange(12, dtype="float32").reshape(3, 4)
+    boolean = floats > 5
+    assert torch.equal(tensor_from_numpy_buffer(floats), torch.arange(12).float().reshape(3, 4))
+    assert torch.equal(tensor_from_numpy_buffer(boolean), torch.tensor(boolean.tolist()))
 
 
 def test_native_teacher_canonicalization_scales_k_and_preserves_z_depth() -> None:

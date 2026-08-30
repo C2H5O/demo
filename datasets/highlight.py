@@ -9,6 +9,8 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import torch
 
+from datasets.transforms import tensor_from_numpy_buffer
+
 
 def _cv2():
     try:
@@ -57,7 +59,20 @@ class SpecularHighlightProcessor:
             value = image.detach().cpu().float()
             if value.ndim != 3 or value.shape[0] != 3:
                 raise ValueError("Highlight input must have shape [3,H,W]")
-            value = value.permute(1, 2, 0).numpy()
+            maximum = float(torch.nan_to_num(value).max()) if value.numel() else 0.0
+            if maximum <= 1.0 + 1e-6:
+                value = value * 255.0
+            value_uint8 = (
+                torch.nan_to_num(value)
+                .clamp(0.0, 255.0)
+                .round()
+                .to(torch.uint8)
+                .permute(1, 2, 0)
+                .contiguous()
+            )
+            value = np.frombuffer(
+                bytes(value_uint8.untyped_storage()), dtype=np.uint8
+            ).reshape(tuple(value_uint8.shape)).copy()
         else:
             value = np.asarray(image)
         if value.ndim != 3 or value.shape[-1] != 3:
@@ -204,8 +219,8 @@ class SpecularHighlightProcessor:
         mask = self._classify(dilated)
         inpainted = self._inpaint(mask, rgb) / 255.0
         return {
-            "highlight_mask": torch.from_numpy(mask).unsqueeze(0).float(),
-            "inpainted_image": torch.from_numpy(inpainted)
+            "highlight_mask": tensor_from_numpy_buffer(mask).unsqueeze(0).float(),
+            "inpainted_image": tensor_from_numpy_buffer(inpainted)
             .permute(2, 0, 1)
             .contiguous()
             .float(),
