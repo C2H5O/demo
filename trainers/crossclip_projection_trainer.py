@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -26,6 +27,20 @@ from utils.seed import seed_everything
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _record_cuda_event(enabled: bool) -> Optional[torch.cuda.Event]:
+    if not enabled:
+        return None
+    event = torch.cuda.Event(enable_timing=True)
+    event.record()
+    return event
+
+
+def _elapsed_ms(
+    start: Optional[torch.cuda.Event], end: Optional[torch.cuda.Event]
+) -> float:
+    return start.elapsed_time(end) if start is not None and end is not None else 0.0
 
 
 def _project_path(value: str | Path) -> Path:
@@ -309,6 +324,14 @@ def train_crossclip_projection(
     model.train()
     loss_function = CrossClipProjectionLoss(config["loss"]).to(device)
     training_config = config["training"]
+    timing_config = dict(training_config.get("timing", {}))
+    timing_enabled = bool(timing_config.get("enabled", False))
+    timing_log_every = int(timing_config.get("log_every_micro_batches", 1))
+    if timing_enabled and device.type != "cuda":
+        raise ValueError("training.timing requires a CUDA device")
+    if timing_log_every <= 0:
+        raise ValueError("training.timing.log_every_micro_batches must be positive")
+    model.enable_cuda_timing(timing_enabled)
     optimizer = build_crossclip_optimizer(model, training_config)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     accumulation = int(training_config.get("gradient_accumulation_steps", 1))
@@ -398,23 +421,86 @@ def train_crossclip_projection(
     )
     if max_zero_projection_batches <= 0:
         raise ValueError("max_consecutive_zero_projection_batches must be positive")
+    if timing_enabled:
+        print(
+            "CUDA timing enabled: one synchronization per micro-batch; "
+            "diagnostic timings are written to {}/timing.jsonl".format(output_dir)
+        )
+
+    def finish_timing(
+        events: Dict[str, Optional[torch.cuda.Event]],
+        *,
+        epoch: int,
+        batch_index: int,
+        data_wait_seconds: float,
+        iteration_start: float,
+        optimizer_step: bool,
+        retried: bool,
+    ) -> None:
+        if not timing_enabled:
+            return
+        torch.cuda.synchronize(device)
+        forward_parts = model.forward_cuda_timings_ms()
+        final_event = events.get("optimizer_end")
+        if final_event is None:
+            final_event = events.get("backward_end")
+        record: Dict[str, Any] = {
+            "phase": "timing",
+            "epoch": epoch,
+            "micro_batch": epoch * len(loader) + batch_index + 1,
+            "batch_index": batch_index,
+            "global_step": global_step,
+            "optimizer_step": optimizer_step,
+            "amp_fp32_retry": retried,
+            "data_wait_ms": data_wait_seconds * 1000.0,
+            "iteration_wall_ms": (time.perf_counter() - iteration_start) * 1000.0,
+            "h2d_ms": _elapsed_ms(events.get("h2d_start"), events.get("h2d_end")),
+            "forward_ms": _elapsed_ms(events.get("forward_start"), events.get("forward_end")),
+            "loss_ms": _elapsed_ms(events.get("loss_start"), events.get("loss_end")),
+            "backward_ms": _elapsed_ms(events.get("backward_start"), events.get("backward_end")),
+            "optimizer_ms": _elapsed_ms(events.get("optimizer_start"), events.get("optimizer_end")),
+            "gpu_pipeline_ms": _elapsed_ms(events.get("h2d_start"), final_event),
+            **{"forward_{}_ms".format(name): value for name, value in forward_parts.items()},
+        }
+        _append_jsonl(output_dir / "timing.jsonl", record)
+        if (batch_index + 1) % timing_log_every == 0:
+            print(
+                "TIMING " + " ".join(
+                    "{}={:.3f}".format(key, value) if isinstance(value, float)
+                    else "{}={}".format(key, value)
+                    for key, value in record.items()
+                    if key != "phase"
+                ),
+                flush=True,
+            )
+
+    previous_iteration_end = time.perf_counter()
     for epoch in range(start_epoch, epochs):
         model.train()
         for batch_index, cpu_batch in enumerate(loader):
+            iteration_start = time.perf_counter()
+            data_wait_seconds = iteration_start - previous_iteration_end
+            timing_events: Dict[str, Optional[torch.cuda.Event]] = {}
+            timing_events["h2d_start"] = _record_cuda_event(timing_enabled)
             batch = _move_batch(cpu_batch, device)
+            timing_events["h2d_end"] = _record_cuda_event(timing_enabled)
+            timing_events["forward_start"] = _record_cuda_event(timing_enabled)
             prediction, retried, finite = _forward_with_fp32_retry(
                 model, batch["images"], amp_enabled, amp_dtype
             )
+            timing_events["forward_end"] = _record_cuda_event(timing_enabled)
             if not finite:
                 raise FloatingPointError(
                     "Student output remained non-finite after FP32 retry at epoch={} batch={}".format(
                         epoch, batch_index
                     )
                 )
+            timing_events["loss_start"] = _record_cuda_event(timing_enabled)
             with torch.cuda.amp.autocast(
                 enabled=amp_enabled and not retried, dtype=amp_dtype
             ):
                 loss, last_logs = loss_function(prediction, batch)
+            timing_events["loss_end"] = _record_cuda_event(timing_enabled)
             last_logs["stats/amp_fp32_retry"] = float(retried)
             has_projection = (
                 last_logs["stats/proj_left_valid_ratio"] > 0.0
@@ -439,11 +525,19 @@ def train_crossclip_projection(
                 raise FloatingPointError("Non-finite cross-clip loss: {}".format(last_logs))
             window_start = (batch_index // accumulation) * accumulation
             window_size = 1 if dry_run else min(accumulation, len(loader) - window_start)
+            timing_events["backward_start"] = _record_cuda_event(timing_enabled)
             scaler.scale(loss / window_size).backward()
+            timing_events["backward_end"] = _record_cuda_event(timing_enabled)
             should_step = dry_run or ((batch_index + 1) % accumulation == 0) or (
                 batch_index + 1 == len(loader)
             )
             if not should_step:
+                finish_timing(
+                    timing_events, epoch=epoch, batch_index=batch_index,
+                    data_wait_seconds=data_wait_seconds, iteration_start=iteration_start,
+                    optimizer_step=False, retried=retried,
+                )
+                previous_iteration_end = time.perf_counter()
                 continue
             if dry_run:
                 group_gradients = {
@@ -465,10 +559,16 @@ def train_crossclip_projection(
                         shapes, group_gradients, model._ray_forward_count
                     )
                 )
+                finish_timing(
+                    timing_events, epoch=epoch, batch_index=batch_index,
+                    data_wait_seconds=data_wait_seconds, iteration_start=iteration_start,
+                    optimizer_step=False, retried=retried,
+                )
                 return {
                     "status": "passed", "output_shapes": shapes,
                     "gradient_components": group_gradients, **last_logs,
                 }
+            timing_events["optimizer_start"] = _record_cuda_event(timing_enabled)
             scaler.unscale_(optimizer)
             bad_gradients = [
                 name
@@ -484,7 +584,13 @@ def train_crossclip_projection(
             scaler.update()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+            timing_events["optimizer_end"] = _record_cuda_event(timing_enabled)
             global_step += 1
+            finish_timing(
+                timing_events, epoch=epoch, batch_index=batch_index,
+                data_wait_seconds=data_wait_seconds, iteration_start=iteration_start,
+                optimizer_step=True, retried=retried,
+            )
             record = {
                 "phase": "train",
                 "epoch": epoch,
@@ -500,6 +606,7 @@ def train_crossclip_projection(
             if dry_run or global_step % int(training_config.get("log_every", 10)) == 0:
                 print(" ".join("{}={}".format(key, value) for key, value in record.items()))
             _append_jsonl(output_dir / "metrics.jsonl", record)
+            previous_iteration_end = time.perf_counter()
             if max_steps is not None and global_step >= max_steps:
                 return {"status": "stopped", "global_step": global_step, **last_logs}
 

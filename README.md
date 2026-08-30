@@ -70,6 +70,14 @@ python evaluate_crossclip_projection.py --config configs/vggtoda3.yaml --protoco
 python visualize_crossclip_projection.py --config configs/vggtoda3.yaml --source student --checkpoint outputs/vggtoda3/last.pt --split test --clip-index 0
 ```
 
+CUDA phase timing is enabled in the default training configuration. Every
+micro-batch prints one `TIMING` line and appends the same record to
+`outputs/vggtoda3/timing.jsonl`. It reports DataLoader wait, H2D, total forward,
+DINOv2 backbone, DPT depth, camera decoder, geometry, loss, backward, optimizer,
+and full GPU-pipeline milliseconds. Timing performs one CUDA synchronization per
+micro-batch and is intended for diagnosis; set `training.timing.enabled: false`
+after locating the bottleneck for maximum throughput.
+
 The visualizer writes RGB/depth panels, per-frame local PLY files, DA3 camera
 poses, and one merged multi-frame global PLY.
 

@@ -119,6 +119,9 @@ training:
   max_consecutive_zero_projection_batches: 5
   log_every: 10
   save_every: 1
+  timing:
+    enabled: true
+    log_every_micro_batches: 1
   output_dir: ./outputs/vggtoda3
   resume: null
 

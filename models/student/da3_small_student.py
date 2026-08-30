@@ -198,6 +198,8 @@ class DA3SmallStudent(nn.Module):
         )
         self._ray_forward_count = 0
         self._ray_hooks = []
+        self._timing_enabled = False
+        self._last_forward_timing_events: Dict[str, torch.cuda.Event] = {}
         self._install_ray_execution_audit()
         self._configure_trainability()
         self.to(device or torch.device("cpu"))
@@ -307,6 +309,31 @@ class DA3SmallStudent(nn.Module):
         result["lora_modules"] = len(self.lora_modules)
         return result
 
+    def enable_cuda_timing(self, enabled: bool) -> None:
+        self._timing_enabled = bool(enabled)
+
+    def _record_cuda_timing(self, name: str, device: torch.device) -> None:
+        if not self._timing_enabled or device.type != "cuda":
+            return
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        self._last_forward_timing_events[name] = event
+
+    def forward_cuda_timings_ms(self) -> Dict[str, float]:
+        events = self._last_forward_timing_events
+        pairs = {
+            "input_checks": ("start", "backbone_start"),
+            "backbone": ("backbone_start", "backbone_end"),
+            "depth_head": ("backbone_end", "depth_end"),
+            "camera_decoder": ("depth_end", "camera_end"),
+            "geometry": ("camera_end", "geometry_end"),
+        }
+        return {
+            name: events[start].elapsed_time(events[end])
+            for name, (start, end) in pairs.items()
+            if start in events and end in events
+        }
+
     def _fuse_depth_main(self, resized: list[torch.Tensor]) -> torch.Tensor:
         head = self.depth_head
         l1, l2, l3, l4 = resized
@@ -362,20 +389,25 @@ class DA3SmallStudent(nn.Module):
         )
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
+        self._last_forward_timing_events = {}
+        self._record_cuda_timing("start", images.device)
         if tuple(images.shape[1:]) != (16, 3, 448, 560):
             raise ValueError("DA3 student requires [B,16,3,448,560], got {}".format(tuple(images.shape)))
         if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
             raise ValueError("DA3 dataset RGB must be finite in [0,1]")
         normalized = (images - self.imagenet_mean) / self.imagenet_std
         self._ray_forward_count = 0
+        self._record_cuda_timing("backbone_start", images.device)
         feats, _ = self.backbone(
             normalized,
             cam_token=None,
             export_feat_layers=[],
             ref_view_strategy=self.config.ref_view_strategy,
         )
+        self._record_cuda_timing("backbone_end", images.device)
         with torch.autocast(device_type=images.device.type, enabled=False):
             depth, depth_conf = self._forward_depth_main(feats, 448, 560)
+            self._record_cuda_timing("depth_end", images.device)
             pose_encoding = self.camera_decoder(feats[-1][1])
             _, _, pose_encoding_to_extri_intri = _require_official_da3()
             c2w, intrinsics = pose_encoding_to_extri_intri(pose_encoding, (448, 560))
@@ -384,8 +416,10 @@ class DA3SmallStudent(nn.Module):
             )
             c2w_h[..., :3, :] = c2w
             extrinsics = torch.linalg.inv(c2w_h)[..., :3, :]
+            self._record_cuda_timing("camera_end", images.device)
             xyz_local = depth_intrinsics_to_local_points(depth, intrinsics)
             xyz_global = local_to_global_points(xyz_local, extrinsics)
+            self._record_cuda_timing("geometry_end", images.device)
         expected = {
             "depth": (images.shape[0], 16, 448, 560),
             "intrinsics": (images.shape[0], 16, 3, 3),

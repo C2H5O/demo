@@ -27,6 +27,10 @@ def test_vggtoda3_config_encodes_fixed_contract() -> None:
     loss = CrossClipProjectionLossConfig(**config["loss"])
     loss.validate()
     assert (loss.lambda_projection, loss.lambda_highlight, loss.lambda_smooth) == (1.0, 0.01, 0.1)
+    assert config["training"]["timing"] == {
+        "enabled": True,
+        "log_every_micro_batches": 1,
+    }
 
 
 def test_vda_is_default_and_endo3r_is_retained() -> None:
