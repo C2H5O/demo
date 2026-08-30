@@ -9,6 +9,7 @@ from datasets.multidataset import (
     CanonicalTemporalRGBDataset,
     MultiSourceTemporalRGBDataset,
     discover_canonical_sequences,
+    discover_processed_scared_sequences,
 )
 from datasets.scared_dataset import ScaredTemporalRGBDataset
 
@@ -39,33 +40,48 @@ def make_scared_rgb_dataset(
     config["manifest_path"] = dataset_config.get("{}_manifest_path".format(split))
     config["root"] = legacy_root
     datasets = []
-    try:
-        dataset = ScaredTemporalRGBDataset(**config)
-    except FileNotFoundError:
-        # A canonical-only evaluation machine need not mount legacy SCARED.
-        if not canonical_root:
-            raise
-        dataset = None
+    processed_scared = discover_processed_scared_sequences(legacy_root, split)
+    if processed_scared:
+        dataset = CanonicalTemporalRGBDataset(
+            processed_scared,
+            clip_length=int(config.get("clip_length", 16)),
+            sample_stride=int(config.get("sample_stride", 1)),
+            window_stride=int(config.get("window_stride", 1)),
+            normalize_mode=str(dataset_config.get("normalize_mode", "minus_one_one")),
+            highlight=dict(dataset_config.get("highlight", {})),
+        )
+    else:
+        try:
+            dataset = ScaredTemporalRGBDataset(**config)
+        except FileNotFoundError:
+            # A canonical-only evaluation machine need not mount legacy SCARED.
+            if not canonical_root:
+                raise
+            dataset = None
     if dataset is not None:
         for sequence in dataset.sequences:
             sequence["dataset_name"] = "SCARED"
-            sequence.setdefault("preprocessing_identity", "legacy_scared")
+            sequence.setdefault(
+                "preprocessing_identity",
+                "processed_scared" if processed_scared else "legacy_scared",
+            )
             sequence.setdefault("absolute_frame_ids", list(range(int(sequence["sequence_length"]))))
         datasets.append(dataset)
 
-        for sequence in dataset.sequences:
-            sequence["frame_paths"] = [_absolute_path(dataset.root, str(path)) for path in sequence["frame_paths"]]
-            for key in ("keyframe_directory", "frame_directory", "calibration_path", "depth_directory", "disparity_directory", "frame_data_directory", "reprojection_directory", "scene_points_directory", "point_cloud_path", "video_path"):
-                if key in sequence:
-                    sequence[key] = _absolute_path(dataset.root, sequence.get(key))
+        if not processed_scared:
+            for sequence in dataset.sequences:
+                sequence["frame_paths"] = [_absolute_path(dataset.root, str(path)) for path in sequence["frame_paths"]]
+                for key in ("keyframe_directory", "frame_directory", "calibration_path", "depth_directory", "disparity_directory", "frame_data_directory", "reprojection_directory", "scene_points_directory", "point_cloud_path", "video_path"):
+                    if key in sequence:
+                        sequence[key] = _absolute_path(dataset.root, sequence.get(key))
     if canonical_root:
         canonical = discover_canonical_sequences(canonical_root, split)
         if canonical:
             datasets.append(CanonicalTemporalRGBDataset(
                 canonical,
-                clip_length=16,
-                sample_stride=1,
-                window_stride=1,
+                clip_length=int(config.get("clip_length", 16)),
+                sample_stride=int(config.get("sample_stride", 1)),
+                window_stride=int(config.get("window_stride", 1)),
                 normalize_mode=str(dataset_config.get("normalize_mode", "minus_one_one")),
                 highlight=dict(dataset_config.get("highlight", {})),
             ))

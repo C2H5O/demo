@@ -16,6 +16,11 @@ import torch
 from torch.utils.data import Dataset
 
 from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
+from datasets.scared_discovery import (
+    expected_dataset_ids,
+    extract_dataset_id,
+    natural_sort_key,
+)
 from datasets.scared_dataset import ClipRecord, _validate_temporal_config
 from datasets.transforms import (
     load_precomputed_student_rgb_tensor,
@@ -121,6 +126,69 @@ def discover_canonical_sequences(root: str | Path, split: str) -> List[Dict[str,
                 "preprocessing_identity": metadata.get("preprocessing_identity", metadata.get("preprocess_version", marker.get("version", "unknown"))),
                 "canonical": True,
                 "evaluation_only": dataset_name == "Hamlyn",
+            })
+    return sequences
+
+
+def discover_processed_scared_sequences(root: str | Path, split: str) -> List[Dict[str, Any]]:
+    """Discover processed SCARED keyframes with separate student/teacher RGB."""
+    root = Path(root).expanduser()
+    if not root.is_dir():
+        return []
+    wanted = set(expected_dataset_ids(split))
+    sequences: List[Dict[str, Any]] = []
+    dataset_directories = []
+    for candidate in root.iterdir():
+        if not candidate.is_dir():
+            continue
+        dataset_id = extract_dataset_id(candidate.name)
+        if dataset_id is not None and dataset_id in wanted:
+            dataset_directories.append((dataset_id, candidate))
+    for dataset_id, dataset_root in sorted(dataset_directories):
+        keyframes = sorted(
+            (path for path in dataset_root.iterdir() if path.is_dir()),
+            key=lambda path: natural_sort_key(path.name),
+        )
+        for sequence_root in keyframes:
+            complete = sequence_root / "_preprocess_complete.json"
+            metadata_path = sequence_root / "metadata.json"
+            if not complete.is_file() or not metadata_path.is_file():
+                continue
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                marker = json.loads(complete.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    "invalid processed SCARED metadata in {}".format(sequence_root)
+                ) from error
+            entries = _frame_entries(metadata)
+            student, teacher, ids = _require_matching_pngs(sequence_root, entries)
+            if len(student) < 16:
+                continue
+            sequence_id = str(
+                metadata.get(
+                    "sequence_id",
+                    "dataset_{}/{}".format(dataset_id, sequence_root.name),
+                )
+            )
+            sequences.append({
+                "dataset_name": "SCARED",
+                "dataset_id": dataset_id,
+                "keyframe_id": sequence_root.name,
+                "sequence_id": sequence_id,
+                "sequence_length": len(student),
+                "frame_paths": [str(path) for path in student],
+                "teacher_frame_paths": [str(path) for path in teacher],
+                "absolute_frame_ids": ids,
+                "frame_directory": str(student[0].parent),
+                "keyframe_directory": str(sequence_root),
+                "depth_directory": None,
+                "preprocessing_identity": metadata.get(
+                    "preprocessing_identity",
+                    metadata.get("preprocess_version", marker.get("version", "unknown")),
+                ),
+                "canonical": True,
+                "evaluation_only": False,
             })
     return sequences
 
@@ -234,5 +302,5 @@ class MultiSourceTemporalRGBDataset(Dataset):
 __all__ = [
     "CANONICAL_EVALUATION_DATASETS", "CANONICAL_STUDENT_SIZE", "CANONICAL_TEACHER_SIZE",
     "CANONICAL_TRAIN_DATASETS", "CanonicalTemporalRGBDataset", "MultiSourceTemporalRGBDataset", "TeacherClipInputDataset",
-    "discover_canonical_sequences",
+    "discover_canonical_sequences", "discover_processed_scared_sequences",
 ]

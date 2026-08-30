@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import torch
 from PIL import Image
 
 from cache.generate_crossclip_teacher_cache import canonicalize_teacher_outputs
-from datasets.crossclip_teacher_dataset import crossclip_teacher_cache_path
-from datasets.multidataset import discover_canonical_sequences
+from datasets.crossclip_teacher_dataset import (
+    crossclip_teacher_cache_path,
+    make_crossclip_rgb_dataset,
+)
+from datasets.multidataset import (
+    CanonicalTemporalRGBDataset,
+    discover_canonical_sequences,
+    discover_processed_scared_sequences,
+)
 from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor, load_teacher_rgb_tensor
 
 
@@ -82,3 +90,45 @@ def test_hamlyn_is_evaluation_only_and_cache_identity_is_dataset_safe(tmp_path) 
     assert [item["dataset_name"] for item in test] == ["Hamlyn"]
     common = {"dataset_id": 1, "keyframe_id": "k", "sequence_id": "same", "clip_start": 0}
     assert crossclip_teacher_cache_path(tmp_path, {**common, "dataset_name": "C3VD"}) != crossclip_teacher_cache_path(tmp_path, {**common, "dataset_name": "StereoMIS"})
+
+
+def test_processed_scared_uses_student_rgb_and_retains_teacher_rgb(tmp_path) -> None:
+    sequence = tmp_path / "dataset_01" / "keyframe_1"
+    (sequence / "student_rgb").mkdir(parents=True)
+    (sequence / "teacher_rgb").mkdir()
+    frames = []
+    for index in range(32):
+        name = "{:06d}.png".format(index)
+        (sequence / "student_rgb" / name).touch()
+        (sequence / "teacher_rgb" / name).touch()
+        frames.append({
+            "processed_index": index,
+            "source_frame_id": 100 + index,
+            "student_rgb_file": "student_rgb/" + name,
+            "teacher_rgb_file": "teacher_rgb/" + name,
+        })
+    (sequence / "metadata.json").write_text(
+        json.dumps({"sequence_id": "scared_case", "frames": frames}),
+        encoding="utf-8",
+    )
+    (sequence / "_preprocess_complete.json").write_text("{}", encoding="utf-8")
+
+    discovered = discover_processed_scared_sequences(tmp_path, "train")
+    assert len(discovered) == 1
+    assert Path(discovered[0]["frame_paths"][0]).parent.name == "student_rgb"
+    assert Path(discovered[0]["teacher_frame_paths"][0]).parent.name == "teacher_rgb"
+    dataset = make_crossclip_rgb_dataset({
+        "root": str(tmp_path),
+        "frame_source": "auto",
+        "clip_length": 16,
+        "sample_stride": 1,
+        "window_stride": 8,
+        "drop_incomplete_clip": True,
+        "image_height": 448,
+        "image_width": 560,
+        "resize_mode": "resize",
+        "normalize_mode": "zero_one",
+    }, "train")
+    assert isinstance(dataset, CanonicalTemporalRGBDataset)
+    assert [record.clip_start for record in dataset.clips] == [0, 8, 16]
+    assert dataset.sequences[0]["absolute_frame_ids"] == list(range(100, 132))
