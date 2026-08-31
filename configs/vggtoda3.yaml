@@ -136,6 +136,7 @@ vda_evaluation:
   split: test
   protocol: vda
   frame_source: auto
+  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
   gt_relative_directory: data/depth
   gt_depth_channel: 0
   require_all_gt: true
@@ -147,6 +148,7 @@ endo3r_evaluation:
   split: test
   protocol: endo3r
   frame_source: auto
+  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
   gt_relative_directory: data/depth
   gt_depth_channel: 0
   require_all_gt: true

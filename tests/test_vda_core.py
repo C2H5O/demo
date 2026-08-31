@@ -32,3 +32,30 @@ def test_configured_gt_directory_is_indexed(tmp_path) -> None:
     )
     assert selected == depth_directory.resolve()
     assert indexed[7].name == "depth_0007.npy"
+
+
+def test_separate_gt_root_is_mapped_by_dataset_and_keyframe(tmp_path) -> None:
+    processed_keyframe = tmp_path / "processed" / "SCARED" / "dataset_8" / "keyframe_01"
+    processed_keyframe.mkdir(parents=True)
+    gt_root = tmp_path / "raw" / "scared"
+    depth_directory = gt_root / "dataset_08" / "key_frame_1" / "data" / "depth"
+    depth_directory.mkdir(parents=True)
+    np.save(depth_directory / "depth_0007.npy", np.ones((2, 3)))
+
+    selected, indexed = _find_sequence_gt_depths(
+        {
+            "sequence_id": "dataset_8/keyframe_01",
+            "dataset_id": 8,
+            "keyframe_id": "keyframe_01",
+            "keyframe_directory": str(processed_keyframe),
+            "depth_directory": None,
+        },
+        {
+            "gt_root": str(gt_root),
+            "gt_relative_directory": "data/depth",
+        },
+        {},
+    )
+
+    assert selected == depth_directory.resolve()
+    assert indexed[7].name == "depth_0007.npy"

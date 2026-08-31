@@ -257,7 +257,6 @@ def evaluate_endo3r(
     weighted = np.zeros(len(METRIC_NAMES), dtype=np.float64)
     total_weight = 0
     sequence_results: List[Dict[str, Any]] = []
-    gt_relative = str(eval_config.get("gt_relative_directory", "data/depth"))
     for sequence_id, sequence in sequences.items():
         indices = by_sequence.get(sequence_id, [])
         if not indices or remaining == 0:
@@ -287,7 +286,7 @@ def evaluate_endo3r(
             sums,
             counts,
             int(eval_config.get("gt_depth_channel", 0)),
-            gt_relative,
+            str(gt_depths[sequence_id][0]),
             bool(eval_config.get("require_all_gt", True)) and limit_clips is None,
         )
         weight = int(

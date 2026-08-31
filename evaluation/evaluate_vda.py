@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import importlib
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -11,6 +12,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 
+from datasets.scared_discovery import KEYFRAME_PATTERN, extract_dataset_id
 from evaluation.evaluate_depth import (
     ENDO3R_GT_DIRECTORY,
     ENDO3R_MAX_DEPTH,
@@ -26,6 +28,53 @@ VDA_METRIC_NAMES = (
     "rmse_linear",
     "delta1_acc",
 )
+
+
+def _keyframe_identity(value: str) -> Tuple[Any, ...]:
+    """Normalize keyframe spelling while preserving its numeric identity."""
+    match = KEYFRAME_PATTERN.match(value)
+    suffix = match.group(1) if match else value
+    return tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", suffix)
+        if part
+    )
+
+
+def _find_gt_keyframe(sequence: Dict[str, Any], gt_root: Path) -> Path:
+    """Map a processed RGB sequence to its keyframe in a separate GT tree."""
+    if not gt_root.is_dir():
+        raise FileNotFoundError("Configured SCARED GT root does not exist: {}".format(gt_root))
+    dataset_id = int(sequence["dataset_id"])
+    dataset_directories = [
+        path
+        for path in gt_root.iterdir()
+        if path.is_dir() and extract_dataset_id(path.name) == dataset_id
+    ]
+    if len(dataset_directories) != 1:
+        raise FileNotFoundError(
+            "Expected one dataset directory for dataset {} under {}; found {}".format(
+                dataset_id, gt_root, [str(path) for path in dataset_directories]
+            )
+        )
+    keyframe_id = str(sequence["keyframe_id"])
+    identity = _keyframe_identity(keyframe_id)
+    keyframes = [
+        path
+        for path in dataset_directories[0].iterdir()
+        if path.is_dir()
+        and KEYFRAME_PATTERN.match(path.name)
+        and _keyframe_identity(path.name) == identity
+    ]
+    if len(keyframes) != 1:
+        raise FileNotFoundError(
+            "Expected one GT keyframe matching {} under {}; found {}".format(
+                keyframe_id,
+                dataset_directories[0],
+                [str(path) for path in keyframes],
+            )
+        )
+    return keyframes[0]
 
 
 def _opencv() -> Any:
@@ -264,8 +313,15 @@ def _find_sequence_gt_depths(
     eval_config: Dict[str, Any],
     dataset_config: Dict[str, Any],
 ) -> Tuple[Path, Dict[int, Path]]:
-    del dataset_config
-    keyframe_directory = _keyframe_directory(sequence)
+    keyframe_directories: List[Path] = []
+    gt_root = eval_config.get("gt_root", dataset_config.get("gt_root"))
+    if gt_root:
+        keyframe_directories.append(
+            _find_gt_keyframe(sequence, Path(str(gt_root)).expanduser())
+        )
+    processed_keyframe_directory = _keyframe_directory(sequence)
+    if processed_keyframe_directory not in keyframe_directories:
+        keyframe_directories.append(processed_keyframe_directory)
     candidates: List[Path] = []
     explicit = eval_config.get("gt_relative_directory")
     if explicit:
@@ -277,13 +333,14 @@ def _find_sequence_gt_depths(
     if not candidates:
         candidates.append(Path(ENDO3R_GT_DIRECTORY))
     checked: List[str] = []
-    for candidate in candidates:
-        resolved = candidate if candidate.is_absolute() else keyframe_directory / candidate
-        checked.append(str(resolved))
-        try:
-            return _find_gt_depths(keyframe_directory, str(resolved))
-        except FileNotFoundError:
-            continue
+    for keyframe_directory in keyframe_directories:
+        for candidate in candidates:
+            resolved = candidate if candidate.is_absolute() else keyframe_directory / candidate
+            checked.append(str(resolved))
+            try:
+                return _find_gt_depths(keyframe_directory, str(resolved))
+            except FileNotFoundError:
+                continue
     raise FileNotFoundError(
         "No supported depth GT found for {}. Checked: {}".format(
             sequence.get("sequence_id"), checked
