@@ -266,3 +266,33 @@ def test_evaluation_tail_window_covers_last_frame() -> None:
     assert training.clips[-1].frame_indices[-1] == 943
     assert evaluation.clips[-1].clip_start == 929
     assert evaluation.clips[-1].frame_indices[-1] == 944
+
+
+def test_scared_factory_ignores_crossclip_training_options(monkeypatch) -> None:
+    import datasets.scared_clip_dataset as scared_clip
+
+    captured = {}
+
+    class EmptyTemporalDataset:
+        sequences = []
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(scared_clip, "discover_processed_scared_sequences", lambda *_: [])
+    monkeypatch.setattr(scared_clip, "ScaredTemporalRGBDataset", EmptyTemporalDataset)
+    dataset = scared_clip.make_scared_rgb_dataset(
+        {
+            "name": "scared",
+            "root": "/raw/scared",
+            "random_clip_sampling": True,
+            "teacher_neighbor_offset": 8,
+        },
+        "test",
+    )
+
+    assert isinstance(dataset, EmptyTemporalDataset)
+    assert "random_clip_sampling" not in captured
+    assert "teacher_neighbor_offset" not in captured
+    assert captured["root"] == "/raw/scared"
+    assert captured["split"] == "test"
