@@ -135,6 +135,7 @@ vda_evaluation:
   checkpoint: ./outputs/vggtoda3/last.pt
   split: test
   protocol: vda
+  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
   frame_source: auto
   gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
   gt_relative_directory: data/depth
@@ -147,6 +148,7 @@ endo3r_evaluation:
   checkpoint: ./outputs/vggtoda3/last.pt
   split: test
   protocol: endo3r
+  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
   frame_source: auto
   gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
   gt_relative_directory: data/depth

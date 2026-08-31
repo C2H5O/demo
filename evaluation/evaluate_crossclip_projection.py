@@ -15,8 +15,8 @@ import torch
 import evaluation.evaluate_vda as vda_core
 from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_PROTOCOL,
-    make_crossclip_rgb_dataset,
 )
+from datasets.scared_clip_dataset import make_scared_rgb_dataset
 from evaluation.depth_metrics import METRIC_NAMES
 from evaluation.evaluate_depth import (
     _evaluate_sequence as evaluate_endo3r_sequence,
@@ -81,6 +81,14 @@ def _dataset_and_ground_truth(
     config: Dict[str, Any], eval_config: Dict[str, Any], split: str
 ) -> Tuple[Any, Dict[str, Dict[str, Any]], Dict[str, Tuple[Path, Dict[int, Path]]], List[Dict[str, str]]]:
     dataset_config = dict(config["dataset"])
+    rgb_root = eval_config.get("rgb_root")
+    if rgb_root:
+        # Evaluation RGB and training's preprocessed student RGB are separate
+        # data sources. An explicit evaluation root must take precedence over
+        # every legacy/canonical training-root alias.
+        dataset_config["root"] = str(rgb_root)
+        dataset_config["legacy_scared_root"] = str(rgb_root)
+        dataset_config["canonical_root"] = None
     dataset_config["frame_source"] = str(
         eval_config.get("frame_source", dataset_config.get("frame_source", "auto"))
     )
@@ -89,7 +97,9 @@ def _dataset_and_ground_truth(
     dataset_config["drop_incomplete_clip"] = False
     # Detection/inpainting is a training-only auxiliary and does not alter RGB.
     dataset_config["highlight"] = {"enabled": False}
-    dataset = make_crossclip_rgb_dataset(dataset_config, split)
+    # Evaluation needs RGB only. The cross-clip training factory intentionally
+    # forces strict stride-eight tail dropping for teacher-cache compatibility.
+    dataset = make_scared_rgb_dataset(dataset_config, split)
     sequences = {str(item["sequence_id"]): item for item in dataset.sequences}
     gt_by_sequence: Dict[str, Tuple[Path, Dict[int, Path]]] = {}
     skipped: List[Dict[str, str]] = []

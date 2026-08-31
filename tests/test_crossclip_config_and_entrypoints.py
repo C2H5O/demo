@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import evaluation.evaluate_crossclip_projection as crossclip_evaluation
 from evaluation.evaluate_crossclip_projection import select_protocol
 from losses.crossclip_projection_loss import CrossClipProjectionLossConfig
 from models.student.da3_small_student import DA3SmallConfig
@@ -39,6 +40,44 @@ def test_vda_is_default_and_endo3r_is_retained() -> None:
     config = load_config(CONFIG_PATH)
     assert select_protocol(config) == "vda"
     assert select_protocol(config, "endo3r") == "endo3r"
+    raw_scared = "/public/home/2024141520249/Documents/datasets/vggtodistilldata/scared"
+    assert config["vda_evaluation"]["rgb_root"] == raw_scared
+    assert config["vda_evaluation"]["gt_root"] == raw_scared
+    assert config["endo3r_evaluation"]["rgb_root"] == raw_scared
+    assert config["endo3r_evaluation"]["gt_root"] == raw_scared
+
+
+def test_evaluation_rgb_root_overrides_processed_training_root(monkeypatch) -> None:
+    captured = {}
+
+    class EmptyDataset:
+        sequences = []
+
+    def make_dataset(dataset_config, split):
+        captured.update(dataset_config)
+        captured["split"] = split
+        return EmptyDataset()
+
+    monkeypatch.setattr(
+        crossclip_evaluation, "make_scared_rgb_dataset", make_dataset
+    )
+    crossclip_evaluation._dataset_and_ground_truth(
+        {
+            "dataset": {
+                "root": "/processed",
+                "legacy_scared_root": "/legacy",
+                "canonical_root": "/canonical",
+            }
+        },
+        {"rgb_root": "/raw/scared", "frame_source": "auto"},
+        "test",
+    )
+
+    assert captured["root"] == "/raw/scared"
+    assert captured["legacy_scared_root"] == "/raw/scared"
+    assert captured["canonical_root"] is None
+    assert captured["drop_incomplete_clip"] is False
+    assert captured["split"] == "test"
 
 
 def test_adaptive_visualization_range_uses_only_valid_depth() -> None:
