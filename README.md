@@ -88,6 +88,15 @@ python evaluate_crossclip_projection.py \
   --checkpoint outputs/vggtoda3_direct/last.pt \
   --protocol endo3r
 
+# Untouched official DA3-Small baseline on raw SCARED datasets 8 and 9.
+python evaluate_da3_small_baseline.py \
+  --config configs/vggtoda3.yaml \
+  --protocol vda
+
+python evaluate_da3_small_baseline.py \
+  --config configs/vggtoda3.yaml \
+  --protocol endo3r
+
 python visualize_crossclip_projection.py \
   --config configs/vggtoda3.yaml \
   --source student \

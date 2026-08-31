@@ -27,6 +27,10 @@ from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
 
+TRAINED_STUDENT_SOURCE = "trained_student_checkpoint"
+OFFICIAL_DA3_SMALL_SOURCE = "official_da3_small"
+
+
 def select_protocol(config: Dict[str, Any], override: Optional[str] = None) -> str:
     value = override or str(config.get("evaluation", {}).get("protocol", "vda"))
     protocol = value.strip().lower()
@@ -64,6 +68,67 @@ def _load_model(
     del state, checkpoint
     gc.collect()
     return model.eval().to(device)
+
+
+def _official_da3_small_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an inference-only config with no distillation adapters or weights."""
+    model_config = dict(config["student"])
+    model_config.update(
+        {
+            "freeze_backbone": True,
+            "use_backbone_lora": False,
+            "freeze_depth_head": True,
+            "freeze_camera_encoder": True,
+            "freeze_camera_decoder": True,
+        }
+    )
+    return model_config
+
+
+def _load_official_da3_small(
+    config: Dict[str, Any], device: torch.device
+) -> DA3SmallStudent:
+    """Strict-load the untouched official DA3-Small safetensors for baseline eval."""
+    model = DA3SmallStudent(_official_da3_small_config(config), device=device)
+    if model.lora_modules:
+        raise RuntimeError("Official DA3-Small baseline must not contain LoRA modules")
+    if any(parameter.requires_grad for parameter in model.parameters()):
+        raise RuntimeError("Official DA3-Small baseline must be inference-only")
+    return model.eval().to(device)
+
+
+def _require_scared_8_9(sequences: Dict[str, Dict[str, Any]]) -> None:
+    dataset_ids = {int(sequence["dataset_id"]) for sequence in sequences.values()}
+    if dataset_ids != {8, 9}:
+        raise RuntimeError(
+            "Official DA3-Small baseline requires exactly SCARED datasets 8 and 9; "
+            "discovered {}".format(sorted(dataset_ids))
+        )
+
+
+def _evaluation_section(protocol: str, model_source: str) -> str:
+    if model_source == OFFICIAL_DA3_SMALL_SOURCE:
+        return "da3_small_baseline_{}_evaluation".format(protocol)
+    if model_source == TRAINED_STUDENT_SOURCE:
+        return "{}_evaluation".format(protocol)
+    raise ValueError("Unsupported evaluation model source {!r}".format(model_source))
+
+
+def _evaluation_model(
+    checkpoint: Optional[Path],
+    config: Dict[str, Any],
+    device: torch.device,
+    model_source: str,
+) -> DA3SmallStudent:
+    if model_source == OFFICIAL_DA3_SMALL_SOURCE:
+        if checkpoint is not None:
+            raise ValueError("Official DA3-Small baseline does not accept a training checkpoint")
+        return _load_official_da3_small(config, device)
+    if model_source != TRAINED_STUDENT_SOURCE:
+        raise ValueError("Unsupported evaluation model source {!r}".format(model_source))
+    if checkpoint is None or not checkpoint.is_file():
+        raise FileNotFoundError("Student checkpoint not found: {}".format(checkpoint))
+    return _load_model(checkpoint, config, device)
 
 
 def _clip_depths(model: torch.nn.Module, images: torch.Tensor) -> torch.Tensor:
@@ -129,14 +194,19 @@ def evaluate_vda(
     split_override: Optional[str] = None,
     output_override: Optional[Path] = None,
     limit_clips: Optional[int] = None,
+    model_source: str = TRAINED_STUDENT_SOURCE,
 ) -> Dict[str, Any]:
     """Average overlapping clip disparities, then use the unchanged VDA core."""
     config = load_config(config_path)
-    eval_config = dict(config.get("vda_evaluation", {}))
+    eval_config = dict(config.get(_evaluation_section("vda", model_source), {}))
     split = split_override or str(eval_config.get("split", "test"))
-    checkpoint = checkpoint_override or Path(str(eval_config["checkpoint"]))
-    if not checkpoint.is_file():
-        raise FileNotFoundError("Student checkpoint not found: {}".format(checkpoint))
+    if model_source == OFFICIAL_DA3_SMALL_SOURCE and split != "test":
+        raise ValueError("Official DA3-Small baseline is fixed to SCARED test split 8 and 9")
+    checkpoint = (
+        None
+        if model_source == OFFICIAL_DA3_SMALL_SOURCE
+        else checkpoint_override or Path(str(eval_config["checkpoint"]))
+    )
     output = output_override or Path(str(eval_config["output"]))
     ensure_dir(output.parent)
     device = torch.device(str(config.get("device", "cuda")))
@@ -145,11 +215,13 @@ def evaluate_vda(
     dataset, sequences, gt_depths, skipped = _dataset_and_ground_truth(
         config, eval_config, split
     )
+    if model_source == OFFICIAL_DA3_SMALL_SOURCE:
+        _require_scared_8_9(sequences)
     by_sequence = _indices_by_sequence(dataset, gt_depths)
     expected = sum(len(value) for value in by_sequence.values())
     if expected == 0:
         raise RuntimeError("No cross-clip sequences contain configured depth GT")
-    model = _load_model(checkpoint, config, device)
+    model = _evaluation_model(checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
     height = int(config["dataset"]["image_height"])
     width = int(config["dataset"]["image_width"])
@@ -217,7 +289,12 @@ def evaluate_vda(
     result = {
         "protocol": "video-depth-anything-depth",
         "config": str(config_path),
-        "checkpoint": str(checkpoint),
+        "model_source": model_source,
+        "checkpoint": (
+            str(checkpoint)
+            if checkpoint is not None
+            else str(config["student"]["checkpoint"])
+        ),
         "split": split,
         "metrics": metrics,
         "sequence_count": len(sequence_results),
@@ -245,14 +322,19 @@ def evaluate_endo3r(
     split_override: Optional[str] = None,
     output_override: Optional[Path] = None,
     limit_clips: Optional[int] = None,
+    model_source: str = TRAINED_STUDENT_SOURCE,
 ) -> Dict[str, Any]:
     """Average overlapping camera-local Z maps before Endo3R scoring."""
     config = load_config(config_path)
-    eval_config = dict(config.get("endo3r_evaluation", {}))
+    eval_config = dict(config.get(_evaluation_section("endo3r", model_source), {}))
     split = split_override or str(eval_config.get("split", "test"))
-    checkpoint = checkpoint_override or Path(str(eval_config["checkpoint"]))
-    if not checkpoint.is_file():
-        raise FileNotFoundError("Student checkpoint not found: {}".format(checkpoint))
+    if model_source == OFFICIAL_DA3_SMALL_SOURCE and split != "test":
+        raise ValueError("Official DA3-Small baseline is fixed to SCARED test split 8 and 9")
+    checkpoint = (
+        None
+        if model_source == OFFICIAL_DA3_SMALL_SOURCE
+        else checkpoint_override or Path(str(eval_config["checkpoint"]))
+    )
     output = output_override or Path(str(eval_config["output"]))
     ensure_dir(output.parent)
     device = torch.device(str(config.get("device", "cuda")))
@@ -261,9 +343,11 @@ def evaluate_endo3r(
     dataset, sequences, gt_depths, skipped = _dataset_and_ground_truth(
         config, eval_config, split
     )
+    if model_source == OFFICIAL_DA3_SMALL_SOURCE:
+        _require_scared_8_9(sequences)
     by_sequence = _indices_by_sequence(dataset, gt_depths)
     expected = sum(len(value) for value in by_sequence.values())
-    model = _load_model(checkpoint, config, device)
+    model = _evaluation_model(checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
     remaining = limit_clips
     processed = 0
@@ -324,7 +408,12 @@ def evaluate_endo3r(
     result = {
         "protocol": "Official Endo3R SCARED depth evaluation",
         "config": str(config_path),
-        "checkpoint": str(checkpoint),
+        "model_source": model_source,
+        "checkpoint": (
+            str(checkpoint)
+            if checkpoint is not None
+            else str(config["student"]["checkpoint"])
+        ),
         "split": split,
         "metrics": metrics,
         "processed_clip_count": processed,
@@ -348,11 +437,40 @@ def evaluate(
     output: Optional[Path] = None,
     limit_clips: Optional[int] = None,
     protocol: Optional[str] = None,
+    model_source: str = TRAINED_STUDENT_SOURCE,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     selected = select_protocol(config, protocol)
     function = evaluate_vda if selected == "vda" else evaluate_endo3r
-    return function(config_path, checkpoint, split, output, limit_clips)
+    return function(
+        config_path, checkpoint, split, output, limit_clips, model_source
+    )
 
 
-__all__ = ["evaluate", "evaluate_endo3r", "evaluate_vda", "select_protocol"]
+def evaluate_official_da3_small(
+    config_path: Path,
+    output: Optional[Path] = None,
+    limit_clips: Optional[int] = None,
+    protocol: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Evaluate untouched official DA3-Small on raw SCARED datasets 8 and 9."""
+    return evaluate(
+        config_path,
+        checkpoint=None,
+        split="test",
+        output=output,
+        limit_clips=limit_clips,
+        protocol=protocol,
+        model_source=OFFICIAL_DA3_SMALL_SOURCE,
+    )
+
+
+__all__ = [
+    "OFFICIAL_DA3_SMALL_SOURCE",
+    "TRAINED_STUDENT_SOURCE",
+    "evaluate",
+    "evaluate_endo3r",
+    "evaluate_official_da3_small",
+    "evaluate_vda",
+    "select_protocol",
+]

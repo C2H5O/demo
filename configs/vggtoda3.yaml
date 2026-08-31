@@ -156,6 +156,30 @@ endo3r_evaluation:
   amp: true
   output: ./outputs/vggtoda3_direct/evaluation_test_endo3r.json
 
+da3_small_baseline_vda_evaluation:
+  split: test
+  protocol: vda
+  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
+  frame_source: auto
+  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  amp: true
+  output: ./outputs/da3_small_baseline/evaluation_scared_8_9_vda.json
+
+da3_small_baseline_endo3r_evaluation:
+  split: test
+  protocol: endo3r
+  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
+  frame_source: auto
+  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  amp: true
+  output: ./outputs/da3_small_baseline/evaluation_scared_8_9_endo3r.json
+
 visualization:
   output_dir: ./outputs/vggtoda3_direct/visualization
   min_depth: 0.1

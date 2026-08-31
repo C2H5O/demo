@@ -2,6 +2,12 @@ from pathlib import Path
 
 import evaluation.evaluate_crossclip_projection as crossclip_evaluation
 from evaluation.evaluate_crossclip_projection import select_protocol
+from evaluation.evaluate_crossclip_projection import (
+    OFFICIAL_DA3_SMALL_SOURCE,
+    _evaluation_section,
+    _official_da3_small_config,
+    _require_scared_8_9,
+)
 from losses.direct_teacher_distillation_loss import (
     DirectTeacherDistillationLossConfig,
 )
@@ -60,6 +66,45 @@ def test_vda_is_default_and_endo3r_is_retained() -> None:
     assert config["vda_evaluation"]["gt_root"] == raw_scared
     assert config["endo3r_evaluation"]["rgb_root"] == raw_scared
     assert config["endo3r_evaluation"]["gt_root"] == raw_scared
+    for protocol in ("vda", "endo3r"):
+        baseline = config["da3_small_baseline_{}_evaluation".format(protocol)]
+        assert baseline["split"] == "test"
+        assert baseline["rgb_root"] == raw_scared
+        assert baseline["gt_root"] == raw_scared
+        assert "scared_8_9" in baseline["output"]
+
+
+def test_official_da3_small_baseline_disables_training_state() -> None:
+    config = load_config(CONFIG_PATH)
+    baseline = _official_da3_small_config(config)
+    assert baseline["checkpoint"] == config["student"]["checkpoint"]
+    assert baseline["use_backbone_lora"] is False
+    assert baseline["freeze_backbone"] is True
+    assert baseline["freeze_depth_head"] is True
+    assert baseline["freeze_camera_encoder"] is True
+    assert baseline["freeze_camera_decoder"] is True
+    assert _evaluation_section("vda", OFFICIAL_DA3_SMALL_SOURCE) == (
+        "da3_small_baseline_vda_evaluation"
+    )
+
+
+def test_official_da3_small_baseline_requires_scared_8_and_9() -> None:
+    import pytest
+
+    _require_scared_8_9(
+        {
+            "dataset_8/key_frame_1": {"dataset_id": 8},
+            "dataset_9/key_frame_1": {"dataset_id": 9},
+        }
+    )
+    with pytest.raises(RuntimeError, match="exactly SCARED datasets 8 and 9"):
+        _require_scared_8_9({"dataset_8/key_frame_1": {"dataset_id": 8}})
+
+
+def test_official_da3_small_baseline_entrypoint_has_no_training_checkpoint() -> None:
+    source = (ROOT / "evaluate_da3_small_baseline.py").read_text(encoding="utf-8")
+    assert "evaluate_official_da3_small" in source
+    assert 'add_argument("--checkpoint"' not in source
 
 
 def test_evaluation_rgb_root_overrides_processed_training_root(monkeypatch) -> None:
