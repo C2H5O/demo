@@ -1,4 +1,4 @@
-"""Fail-closed stride/cache/checkpoint audit without loading the DA3 model."""
+"""Fail-closed same-clip cache/checkpoint audit without loading DA3."""
 
 from __future__ import annotations
 
@@ -11,9 +11,8 @@ from typing import Any
 import numpy as np
 
 from datasets.crossclip_teacher_dataset import (
-    build_neighbor_clip_indices,
     crossclip_teacher_cache_path,
-    make_crossclip_rgb_dataset,
+    make_teacher_cache_rgb_dataset,
     validate_crossclip_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
@@ -68,12 +67,11 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
         raise RuntimeError("Dataset config must be clip_length=16 sample_stride=1 window_stride=8")
     teacher = config["teacher"]
     cache_root = Path(str(teacher["raw_cache_root"])) / split
-    dataset = make_crossclip_rgb_dataset(
+    dataset = make_teacher_cache_rgb_dataset(
         dataset_config, split, cache_root=None if dataset_only else cache_root
     )
-    neighbors = build_neighbor_clip_indices(dataset.clips, window_stride=8)
     count = len(dataset) if limit is None or limit == 0 else min(limit, len(dataset))
-    print("split={} sequences={} stride8_samples={} auditing={}".format(split, len(dataset.sequences), len(dataset), count))
+    print("split={} sequences={} cache_stride8_samples={} auditing={}".format(split, len(dataset.sequences), len(dataset), count))
     expected_shape = (448, 560)
     for index in range(count):
         metadata = clip_metadata(dataset, index)
@@ -95,27 +93,7 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
                     missing_rgb
                 )
             )
-        left_index, right_index = neighbors[index]
-        side_records = []
-        for side, neighbor_index in (("previous", left_index), ("next", right_index)):
-            if neighbor_index is None:
-                side_records.append("{}=None overlap=0".format(side))
-                continue
-            neighbor = clip_metadata(dataset, neighbor_index)
-            expected_start = start + (-8 if side == "previous" else 8)
-            if int(neighbor["clip_start"]) != expected_start:
-                raise RuntimeError("{} neighbor start {} != {}".format(side, neighbor["clip_start"], expected_start))
-            overlap = sorted(set(ids).intersection(neighbor["frame_indices"]))
-            if len(overlap) != 8:
-                raise RuntimeError("{} overlap is {} rather than 8: {}".format(side, len(overlap), overlap))
-            neighbor_path = crossclip_teacher_cache_path(cache_root, neighbor)
-            if not dataset_only and not neighbor_path.is_file():
-                raise FileNotFoundError(
-                    "Missing neighbor cache: dataset={} sequence={} clip_start={} expected_neighbor_start={} expected_cache_path={}".format(
-                        metadata.get("dataset_name", metadata.get("dataset_id")), metadata["sequence_id"], start, expected_start, neighbor_path
-                    )
-                )
-            side_records.append("{}_start={} overlap={} ids={}".format(side, expected_start, len(overlap), overlap))
+        records = []
         cache_path = crossclip_teacher_cache_path(cache_root, metadata)
         if not dataset_only:
             if not cache_path.is_file():
@@ -129,8 +107,20 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
                     (int(cache["teacher_input_height"]), int(cache["teacher_input_width"]))
                     if "teacher_input_height" in cache else "not-recorded-v1"
                 )
-            side_records.append("cache_shape=448x560 teacher_native={}".format(native))
-        print("sequence={} current_start={} absolute_ids={} {}".format(metadata["sequence_id"], start, ids, " | ".join(side_records)))
+                teacher_start = int(cache["clip_start"].item())
+                teacher_ids = [
+                    int(value) for value in cache["absolute_frame_ids"].tolist()
+                ]
+            records.append(
+                "teacher_start={} teacher_ids={} cache_shape=448x560 teacher_native={}".format(
+                    teacher_start, teacher_ids, native,
+                )
+            )
+        print(
+            "sequence={} student_start={} absolute_ids={} {}".format(
+                metadata["sequence_id"], start, ids, " | ".join(records)
+            )
+        )
     _audit_checkpoint(config)
     print("VGGT-DA3 audit passed")
 

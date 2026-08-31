@@ -1,6 +1,6 @@
-from losses.crossclip_projection_loss import (
-    CrossClipProjectionLoss,
-    CrossClipProjectionLossConfig,
+from losses.direct_teacher_distillation_loss import (
+    DirectTeacherDistillationLoss,
+    DirectTeacherDistillationLossConfig,
 )
 
-__all__ = ["CrossClipProjectionLoss", "CrossClipProjectionLossConfig"]
+__all__ = ["DirectTeacherDistillationLoss", "DirectTeacherDistillationLossConfig"]

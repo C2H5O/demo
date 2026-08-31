@@ -32,10 +32,6 @@ def make_scared_rgb_dataset(
     """
     config = dict(dataset_config)
     config.pop("name", None)
-    # These options belong to cross-clip training orchestration rather than
-    # the underlying temporal RGB dataset constructor.
-    config.pop("random_clip_sampling", None)
-    config.pop("teacher_neighbor_offset", None)
     canonical_root = config.pop("canonical_root", None)
     legacy_root = config.pop("legacy_scared_root", config.get("root"))
     config.pop("train_manifest_path", None)

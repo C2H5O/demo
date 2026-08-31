@@ -1,36 +1,38 @@
-# VGGT-Omega teacher to Depth Anything 3 Small student
+# Same-clip VGGT-Omega to DA3-Small distillation
 
-This branch replaces only the original DUNE/Fast3R student. Frozen VGGT-Omega
-teacher caches, teacher confidence, and the three-term objective remain:
-
-```text
-L = 1.0 L_projection + 0.01 L_highlight + 0.1 L_smooth
-```
-
-The student architecture is:
+The active objective is `direct_teacher_distillation_v1`: one legal
+stride-eight 16-frame Student clip is paired with the already-generated raw
+VGGT-Omega cache having exactly the same start and absolute frame IDs.
 
 ```text
-[B,16,3,448,560] RGB
-  -> official pretrained DA3-Small DINOv2 ViT-S/14 (joint 16-view forward)
-     -> standard LoRA on each block's MLP fc1/fc2 only
-  -> pretrained DualDPT main/depth modules -> depth + depth_conf
-  -> native pretrained camera decoder -> K + T_w2c
-  -> deterministic depth/camera geometry -> xyz_local + xyz_global
+Student RGB C_n [B,16,3,448,560]
+  -> official DA3-Small
+     -> DINOv2 ViT-S/14 with standard MLP fc1/fc2 LoRA
+     -> fully trainable DualDPT depth head
+     -> fully trainable CameraDec
+     -> depth, K, W2C pose, xyz_local
+
+raw Teacher cache C_n
+  -> depth, confidence, valid_mask, K, W2C pose
 ```
 
-The full official checkpoint is strict-loaded before ray is disabled. The
-DualDPT ray-only fusion and output modules remain checkpoint-compatible but are
-frozen and bypassed; runtime hooks fail if any ray-specific module executes.
-Neither `ray` nor `ray_conf` is returned or consumed.
+There is no neighboring cache, overlap mapping, reprojection, grid sampling,
+or scale alignment. Teacher depth is pixel-aligned pseudo-GT. The loss is:
 
-The DINOv2 base weights are frozen. Standard LoRA (`rank=8`, `alpha=16`,
-`dropout=0.05`) trains the 24 `pretrained.blocks[i].mlp.{fc1,fc2}` linear
-projections; attention projections are untouched. This is ordinary LoRA, not
-EndoDAC DV-LoRA. DualDPT, CameraEnc, and CameraDec are configured for full
-parameter optimization. Because the unconditioned student forward uses
-`cam_token=None`, CameraEnc is retained in the optimizer for the requested
-configuration but receives no gradient unless camera-conditioned input is
-introduced; CameraDec is active and receives projection-loss gradients.
+```text
+L = 1.0 L_depth + 0.1 L_camera + 0.01 L_highlight + 0.1 L_smooth
+```
+
+`L_depth` is confidence-weighted direct L1 depth with a per-sample uniform
+fallback when all valid confidence weights are zero. `L_camera` compares W2C
+relative poses `E_i @ inverse(E_0)`, translation direction/log magnitude, and
+normalized focal lengths. See
+[docs/coordinate_conventions.md](docs/coordinate_conventions.md).
+
+The official DA3 checkpoint is strict-loaded before ray-only modules are
+frozen. CameraEnc is retained for strict checkpoint compatibility but excluded
+from the optimizer because the real forward uses `cam_token=None`; CameraDec
+executes and is supervised by the camera loss.
 
 ## Required assets
 
@@ -39,67 +41,79 @@ checkpoints/da3-small/config.json
 checkpoints/da3-small/model.safetensors
 ```
 
-Both are ignored by Git. On the server the expected absolute paths are under:
-
-```text
-/public/home/2024141520249/Documents/Projects/vggtoda3/checkpoints/da3-small/
-```
+The existing Teacher cache root remains configured as
+`teacher.raw_cache_root`. Cache format/protocol names remain
+`crossclip_local_v1` solely for compatibility with existing `.npz` files.
+Training reads only `depth`, `confidence`, `valid_mask`, `intrinsics`,
+`extrinsics`, IDs, and scalar identity metadata. Cached XYZ arrays are not
+loaded by the training DataLoader.
 
 ## Environment
 
 ```bash
 conda env create --file environment.yml
-conda activate vggtofast3r
-python -m pip install -r requirements.txt
+conda activate vggtomast3r
 bash scripts/setup_da3.sh
 ```
 
-`setup_da3.sh` installs the official ByteDance-Seed repository at pinned commit
-`3d835ec1a5802d64a8b8b15f817a1ab54809bfe4` as an editable local package.
-
-## Audit, train, evaluate, visualize
+## Prepare, audit, train
 
 ```bash
 python precompute_highlights.py --config configs/vggtoda3.yaml --split train --workers 4
 python audit_vggtoda3.py --config configs/vggtoda3.yaml --split train --limit 5
 python audit_vggtoda3.py --config configs/vggtoda3.yaml --split train --limit 0
-python train_crossclip_projection.py --config configs/vggtoda3.yaml --dry-run
-python train_crossclip_projection.py --config configs/vggtoda3.yaml
-python train_crossclip_projection.py --config configs/vggtoda3.yaml --resume outputs/vggtoda3/last.pt
-python evaluate_crossclip_projection.py --config configs/vggtoda3.yaml
-python evaluate_crossclip_projection.py --config configs/vggtoda3.yaml --protocol endo3r
-python visualize_crossclip_projection.py --config configs/vggtoda3.yaml --source student --checkpoint outputs/vggtoda3/last.pt --split test --clip-index 0
+
+python train_direct_teacher_distillation.py --config configs/vggtoda3.yaml --dry-run
+python train_direct_teacher_distillation.py --config configs/vggtoda3.yaml
+python train_direct_teacher_distillation.py \
+  --config configs/vggtoda3.yaml \
+  --resume outputs/vggtoda3_direct/last.pt
 ```
 
-Run highlight precomputation once before audit/training. It writes exact-size
-binary masks to each keyframe's `student_highlight_mask/`, inpainted RGB to
-`student_inpainted_rgb/`, and a configuration-bound completion marker. Existing
-complete frame pairs are skipped, so an interrupted full run can be restarted
-with the same command. `--limit N` is available for a trial but intentionally
-does not write completion markers. Training never falls back to online OpenCV;
-missing/stale artifacts fail immediately.
+An old projection checkpoint cannot resume this objective. New checkpoints
+store `objective_protocol: direct_teacher_distillation_v1` and validate the
+loss mode, DA3 architecture, LoRA settings, and module trainability before any
+optimizer or scheduler state is loaded.
 
-CUDA phase timing is enabled in the default training configuration. Every
-micro-batch prints one `TIMING` line and appends the same record to
-`outputs/vggtoda3/timing.jsonl`. It reports DataLoader wait, H2D, total forward,
-DINOv2 backbone, DPT depth, camera decoder, geometry, loss, backward, optimizer,
-and full GPU-pipeline milliseconds. Timing performs one CUDA synchronization per
-micro-batch and is intended for diagnosis; set `training.timing.enabled: false`
-after locating the bottleneck for maximum throughput.
-
-The visualizer writes RGB/depth panels, per-frame local PLY files, DA3 camera
-poses, and one merged multi-frame global PLY.
-
-The existing cache is read-only and is never regenerated by the default flow.
-Run `audit_vggtoda3.py` before training: full dense-cache integrity checks are
-intentionally audit-only. The training DataLoader reads only overlap IDs,
-depth, confidence, validity, intrinsics, and extrinsics; it does not rescan the
-unused teacher XYZ maps for every sample and epoch.
-If regeneration is explicitly needed, write to a separate project-local root:
+## Evaluate and visualize
 
 ```bash
-python generate_crossclip_teacher_cache.py --config configs/vggtoda3.yaml --split train --cache-root ./data/teacher_cache_vggtoda3_regenerated_448x560
+python evaluate_crossclip_projection.py \
+  --config configs/vggtoda3.yaml \
+  --checkpoint outputs/vggtoda3_direct/last.pt \
+  --protocol vda
+
+python evaluate_crossclip_projection.py \
+  --config configs/vggtoda3.yaml \
+  --checkpoint outputs/vggtoda3_direct/last.pt \
+  --protocol endo3r
+
+python visualize_crossclip_projection.py \
+  --config configs/vggtoda3.yaml \
+  --source student \
+  --checkpoint outputs/vggtoda3_direct/last.pt \
+  --split test \
+  --clip-index 0
 ```
 
-That optional path retains the original high-resolution teacher input pipeline,
-then resizes/canonicalizes dense outputs to 448x560.
+Evaluation names are retained for CLI compatibility; neither evaluation path
+implements the removed training projection objective.
+
+## Diagnostics
+
+`metrics.jsonl` records raw and weighted depth/camera/regularization terms,
+depth validity and ranges, Teacher confidence, relative camera errors and
+focal-length diagnostics. CUDA timing remains available under
+`training.timing`; its phases are DataLoader wait, H2D, Student forward, direct
+loss, backward, optimizer, and the meaningful DA3 forward sub-phases.
+
+Teacher-cache generation remains available only for explicit maintenance and
+is not part of training. It preserves all legacy fields, including XYZ and the
+historical `alignment_scale=1` compatibility scalar:
+
+```bash
+python generate_crossclip_teacher_cache.py \
+  --config configs/vggtoda3.yaml \
+  --split train \
+  --cache-root ./data/teacher_cache_regenerated_448x560
+```

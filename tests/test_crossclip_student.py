@@ -7,10 +7,11 @@ import torch.nn as nn
 import models.student.da3_small_student as da3_module
 from models.student.da3_small_student import DA3SmallConfig, DA3SmallStudent
 from models.student.lora import LoRALinear, inject_da3_mlp_lora
-from trainers.crossclip_projection_trainer import build_crossclip_optimizer
+from trainers.direct_teacher_distillation_trainer import (
+    build_direct_distillation_optimizer,
+)
 from utils.da3_geometry import (
     depth_intrinsics_to_local_points,
-    global_to_camera_points,
     local_to_global_points,
 )
 
@@ -35,9 +36,8 @@ def test_depth_camera_geometry_preserves_z_and_round_trips() -> None:
     extrinsics = extrinsics.clone().requires_grad_()
     local = depth_intrinsics_to_local_points(depth, intrinsics)
     global_points = local_to_global_points(local, extrinsics)
-    round_trip = global_to_camera_points(global_points, extrinsics)
     torch.testing.assert_close(local[..., 2], depth)
-    torch.testing.assert_close(round_trip, local)
+    torch.testing.assert_close(global_points, local)
     (global_points.square().mean()).backward()
     assert depth.grad is not None
     assert intrinsics.grad is not None
@@ -138,7 +138,7 @@ def test_lora_config_requires_frozen_backbone() -> None:
         DA3SmallConfig(use_backbone_lora=True, freeze_backbone=False).validate()
 
 
-def test_student_lora_mode_freezes_dino_base_and_keeps_all_heads_trainable() -> None:
+def test_student_lora_mode_freezes_dino_base_and_inactive_camera_encoder() -> None:
     network = _FakeNetwork()
     network.backbone = _FakeDinoBackbone()
     model = DA3SmallStudent(
@@ -151,12 +151,12 @@ def test_student_lora_mode_freezes_dino_base_and_keeps_all_heads_trainable() -> 
     groups = model.parameter_groups()
     assert len(groups["backbone"]) == 8
     assert all(parameter.requires_grad for parameter in groups["depth_head"])
-    assert all(parameter.requires_grad for parameter in groups["camera_encoder"])
+    assert not groups["camera_encoder"]
     assert all(parameter.requires_grad for parameter in groups["camera_decoder"])
     stats = model.parameter_statistics()
     assert stats["backbone_trainable"] == stats["backbone_lora_trainable"]
     assert stats["lora_modules"] == 4
-    optimizer = build_crossclip_optimizer(
+    optimizer = build_direct_distillation_optimizer(
         model,
         {
             "learning_rate": 1.0e-4,
@@ -164,7 +164,7 @@ def test_student_lora_mode_freezes_dino_base_and_keeps_all_heads_trainable() -> 
             "weight_decay": 0.05,
         },
     )
-    assert [group["name"] for group in optimizer.param_groups] == ["head", "backbone_lora"]
+    assert [group["name"] for group in optimizer.param_groups] == ["heads", "backbone_lora"]
     assert optimizer.param_groups[1]["lr"] == pytest.approx(2.0e-4)
 
 

@@ -1,21 +1,21 @@
 from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_FORMAT_VERSION,
     CROSSCLIP_CACHE_PROTOCOL,
-    ScaredCrossClipProjectionDataset,
-    build_crossclip_projection_dataloader,
-    build_neighbor_clip_indices,
     crossclip_teacher_cache_path,
-    make_crossclip_rgb_dataset,
+    make_teacher_cache_rgb_dataset,
     validate_crossclip_teacher_cache,
+)
+from datasets.direct_teacher_distillation_dataset import (
+    DirectTeacherDistillationDataset,
+    build_direct_teacher_distillation_dataloader,
 )
 
 __all__ = [
     "CROSSCLIP_CACHE_FORMAT_VERSION",
     "CROSSCLIP_CACHE_PROTOCOL",
-    "ScaredCrossClipProjectionDataset",
-    "build_crossclip_projection_dataloader",
-    "build_neighbor_clip_indices",
+    "DirectTeacherDistillationDataset",
+    "build_direct_teacher_distillation_dataloader",
     "crossclip_teacher_cache_path",
-    "make_crossclip_rgb_dataset",
+    "make_teacher_cache_rgb_dataset",
     "validate_crossclip_teacher_cache",
 ]

@@ -70,23 +70,8 @@ def local_to_global_points(
     return xyz_global
 
 
-def global_to_camera_points(
-    xyz_global: torch.Tensor, extrinsics_w2c: torch.Tensor
-) -> torch.Tensor:
-    """Transform world XYZ to camera XYZ with W2C poses."""
-    if xyz_global.ndim != 5 or xyz_global.shape[-1] != 3:
-        raise ValueError("xyz_global must have shape [B,T,H,W,3]")
-    if extrinsics_w2c.shape[:2] != xyz_global.shape[:2]:
-        raise ValueError("extrinsics leading dimensions must match xyz_global")
-    w2c = _as_homogeneous(extrinsics_w2c).to(xyz_global)
-    ones = torch.ones_like(xyz_global[..., :1])
-    global_h = torch.cat((xyz_global, ones), dim=-1)
-    return torch.einsum("btij,bthwj->bthwi", w2c, global_h)[..., :3]
-
-
 __all__ = [
     "WORLD_TO_CAMERA",
     "depth_intrinsics_to_local_points",
-    "global_to_camera_points",
     "local_to_global_points",
 ]

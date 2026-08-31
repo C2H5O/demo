@@ -10,7 +10,7 @@ from PIL import Image
 from cache.generate_crossclip_teacher_cache import canonicalize_teacher_outputs
 from datasets.crossclip_teacher_dataset import (
     crossclip_teacher_cache_path,
-    make_crossclip_rgb_dataset,
+    make_teacher_cache_rgb_dataset,
 )
 from datasets.multidataset import (
     CanonicalTemporalRGBDataset,
@@ -139,7 +139,7 @@ def test_processed_scared_uses_student_rgb_and_retains_teacher_rgb(tmp_path) -> 
     assert Path(discovered[0]["teacher_frame_paths"][0]).parent.name == "teacher_rgb"
     assert discovered[0]["sequence_id"] == "dataset_1/keyframe_1"
     assert discovered[0]["source_sequence_id"] == "scared_case"
-    dataset = make_crossclip_rgb_dataset({
+    dataset = make_teacher_cache_rgb_dataset({
         "root": str(tmp_path),
         "frame_source": "auto",
         "clip_length": 16,
@@ -266,33 +266,3 @@ def test_evaluation_tail_window_covers_last_frame() -> None:
     assert training.clips[-1].frame_indices[-1] == 943
     assert evaluation.clips[-1].clip_start == 929
     assert evaluation.clips[-1].frame_indices[-1] == 944
-
-
-def test_scared_factory_ignores_crossclip_training_options(monkeypatch) -> None:
-    import datasets.scared_clip_dataset as scared_clip
-
-    captured = {}
-
-    class EmptyTemporalDataset:
-        sequences = []
-
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(scared_clip, "discover_processed_scared_sequences", lambda *_: [])
-    monkeypatch.setattr(scared_clip, "ScaredTemporalRGBDataset", EmptyTemporalDataset)
-    dataset = scared_clip.make_scared_rgb_dataset(
-        {
-            "name": "scared",
-            "root": "/raw/scared",
-            "random_clip_sampling": True,
-            "teacher_neighbor_offset": 8,
-        },
-        "test",
-    )
-
-    assert isinstance(dataset, EmptyTemporalDataset)
-    assert "random_clip_sampling" not in captured
-    assert "teacher_neighbor_offset" not in captured
-    assert captured["root"] == "/raw/scared"
-    assert captured["split"] == "test"

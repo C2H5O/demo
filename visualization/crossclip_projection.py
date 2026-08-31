@@ -14,7 +14,7 @@ from PIL import Image
 from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_PROTOCOL,
     crossclip_teacher_cache_path,
-    make_crossclip_rgb_dataset,
+    make_teacher_cache_rgb_dataset,
     validate_crossclip_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
@@ -128,11 +128,11 @@ def _load_teacher_points(
     split: str,
 ) -> tuple[np.ndarray, Path, str]:
     teacher = config["teacher"]
-    use_aligned = bool(teacher.get("use_aligned_cache", True))
-    stage = "aligned" if use_aligned else "raw"
-    root_key = "aligned_cache_root" if use_aligned else "raw_cache_root"
+    stage = "raw"
     metadata = clip_metadata(dataset, dataset_index)
-    path = crossclip_teacher_cache_path(Path(str(teacher[root_key])) / split, metadata)
+    path = crossclip_teacher_cache_path(
+        Path(str(teacher["raw_cache_root"])) / split, metadata
+    )
     if not path.is_file():
         raise FileNotFoundError("Teacher cache not found: {}".format(path))
     shape = (int(config["dataset"]["image_height"]), int(config["dataset"]["image_width"]))
@@ -167,7 +167,7 @@ def export_crossclip_visualization(
     config = load_config(config_path)
     dataset_config = dict(config["dataset"])
     dataset_config["highlight"] = {"enabled": False}
-    dataset = make_crossclip_rgb_dataset(dataset_config, split)
+    dataset = make_teacher_cache_rgb_dataset(dataset_config, split)
     if not 0 <= clip_index < len(dataset):
         raise IndexError("clip_index={} is outside [0,{})".format(clip_index, len(dataset)))
     sample = dataset[clip_index]

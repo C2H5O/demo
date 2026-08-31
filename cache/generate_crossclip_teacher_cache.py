@@ -1,4 +1,4 @@
-"""Generate raw frozen-base VGGT-Omega caches for every stride-one 16-frame clip."""
+"""Generate raw frozen-base VGGT-Omega caches for legal 16-frame clip starts."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from datasets.crossclip_teacher_dataset import (
     LOCAL_CAMERA_COORDINATE_SYSTEM,
     WORLD_TO_CAMERA_POSE_CONVENTION,
     crossclip_teacher_cache_path,
-    make_crossclip_rgb_dataset,
+    make_teacher_cache_rgb_dataset,
     validate_crossclip_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
@@ -208,7 +208,7 @@ def generate_crossclip_teacher_cache(
         if cache_root_override is not None
         else Path(str(teacher_config["raw_cache_root"]))
     ) / split
-    dataset = make_crossclip_rgb_dataset(dataset_config, split)
+    dataset = make_teacher_cache_rgb_dataset(dataset_config, split)
     expected_shape = (
         int(dataset_config["image_height"]),
         int(dataset_config["image_width"]),

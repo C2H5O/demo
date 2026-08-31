@@ -2,9 +2,15 @@ from pathlib import Path
 
 import evaluation.evaluate_crossclip_projection as crossclip_evaluation
 from evaluation.evaluate_crossclip_projection import select_protocol
-from losses.crossclip_projection_loss import CrossClipProjectionLossConfig
+from losses.direct_teacher_distillation_loss import (
+    DirectTeacherDistillationLossConfig,
+)
 from models.student.da3_small_student import DA3SmallConfig
 from utils.config import load_config
+from utils.checkpoint import (
+    DIRECT_TEACHER_DISTILLATION_PROTOCOL,
+    require_training_objective,
+)
 from visualization.crossclip_projection import _adaptive_range
 
 
@@ -22,14 +28,18 @@ def test_vggtoda3_config_encodes_fixed_contract() -> None:
     assert dataset["highlight"]["storage"] == "precomputed"
     teacher = config["teacher"]
     assert teacher["raw_cache_root"] == "/public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560"
-    assert teacher["use_aligned_cache"] is False
+    assert "aligned_cache_root" not in teacher
+    assert "use_aligned_cache" not in teacher
+    assert "scale_alignment" not in teacher
     student = DA3SmallConfig(**config["student"])
     student.validate()
     assert student.use_ray is False and student.use_ray_pose is False
     assert student.use_camera_head is True
-    loss = CrossClipProjectionLossConfig(**config["loss"])
-    loss.validate()
-    assert (loss.lambda_projection, loss.lambda_highlight, loss.lambda_smooth) == (1.0, 0.01, 0.1)
+    loss = DirectTeacherDistillationLossConfig.from_mapping(config["loss"])
+    assert (loss.lambda_depth, loss.lambda_camera) == (1.0, 0.1)
+    assert (loss.lambda_highlight, loss.lambda_smooth) == (0.01, 0.1)
+    assert config["experiment"]["objective_protocol"] == "direct_teacher_distillation_v1"
+    assert student.freeze_camera_encoder is True
     assert config["training"]["timing"] == {
         "enabled": True,
         "log_every_micro_batches": 1,
@@ -87,11 +97,11 @@ def test_adaptive_visualization_range_uses_only_valid_depth() -> None:
     assert _adaptive_range(depth, valid, (0.0, 100.0)) == (1.0, 3.0)
 
 
-def test_coordinate_document_covers_stride8_and_world_to_camera() -> None:
+def test_coordinate_document_covers_same_clip_w2c_relative_pose() -> None:
     text = (ROOT / "docs" / "coordinate_conventions.md").read_text(encoding="utf-8")
     assert "X_camera = R @ X_world + t" in text
-    assert "C_(s-8)[8:16]" in text
-    assert "C_(s+8)[0:8]" in text
+    assert "C_n^S" in text and "C_n^T" in text
+    assert "E_i @ inverse(E_0)" in text
 
 
 def test_da3_setup_is_compatible_with_git_without_dash_c() -> None:
@@ -139,3 +149,46 @@ def test_da3_checkpoint_uses_sharing_aware_strict_safetensors_load() -> None:
     assert 'checkpoint_container.add_module("model", network)' in source
     assert "load_model(" in source and "strict=True" in source
     assert "network.load_state_dict(network_state" not in source
+
+
+def test_old_projection_checkpoint_cannot_resume_new_objective() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="Start a new training run"):
+        require_training_objective(
+            {"config": {"loss": {"mode": "crossclip_projection_highlight_smooth"}}},
+            DIRECT_TEACHER_DISTILLATION_PROTOCOL,
+        )
+    require_training_objective(
+        {"objective_protocol": DIRECT_TEACHER_DISTILLATION_PROTOCOL},
+        DIRECT_TEACHER_DISTILLATION_PROTOCOL,
+    )
+
+
+def test_active_training_path_has_no_projection_or_neighbor_calls() -> None:
+    active_files = (
+        ROOT / "datasets" / "direct_teacher_distillation_dataset.py",
+        ROOT / "losses" / "direct_teacher_distillation_loss.py",
+        ROOT / "trainers" / "direct_teacher_distillation_trainer.py",
+    )
+    source = "\n".join(path.read_text(encoding="utf-8") for path in active_files)
+    for forbidden in (
+        "project_student_points_to_teacher",
+        "grid_sample",
+        "global_to_camera_points",
+        "teacher_left",
+        "teacher_right",
+        "build_neighbor_clip_indices",
+        "alignment_scale",
+        "scale_alignment",
+    ):
+        assert forbidden not in source
+
+
+def test_camera_encoder_is_checkpoint_only_and_decoder_executes() -> None:
+    source = (ROOT / "models" / "student" / "da3_small_student.py").read_text(
+        encoding="utf-8"
+    )
+    assert "cam_token=None" in source
+    assert "self.camera_decoder(feats[-1][1])" in source
+    assert "self.camera_encoder(" not in source

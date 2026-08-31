@@ -1,24 +1,23 @@
-"""Stride-eight 16-frame samples with lazy neighboring teacher cache reads."""
+"""Compatibility helpers for the existing VGGT-Omega teacher-cache format."""
 
 from __future__ import annotations
 
 import re
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 from datasets.precomputed_highlight import parse_highlight_options, precomputed_highlight_paths
-from datasets.scared_clip_dataset import clip_metadata, make_scared_rgb_dataset
-from datasets.scared_dataset import ClipRecord, ScaredTemporalRGBDataset, seed_worker
+from datasets.scared_clip_dataset import make_scared_rgb_dataset
+from datasets.scared_dataset import ClipRecord
 from datasets.transforms import (
     load_precomputed_highlight_mask_tensor,
     load_precomputed_student_rgb_tensor,
     load_rgb_tensor,
-    tensor_from_numpy_buffer,
 )
 
 
@@ -79,6 +78,11 @@ class CacheMetadataRGBDataset(Dataset):
                     )
                 absolute_ids = [int(value) for value in cache["absolute_frame_ids"].tolist()]
                 clip_start = int(cache["clip_start"].item())
+                if clip_start % 8:
+                    # Existing roots may also contain stride-one caches. The
+                    # training sampler is intentionally restricted to the
+                    # configured legal cache starts 0,8,16,... .
+                    continue
                 cached_dataset_name = (
                     str(cache["dataset_name"].item())
                     if "dataset_name" in cache else "SCARED"
@@ -89,7 +93,7 @@ class CacheMetadataRGBDataset(Dataset):
                 if identity in identities:
                     raise RuntimeError("Duplicate teacher cache clip identity {}".format(identity))
                 identities.add(identity)
-                if clip_start % 8 or absolute_ids != list(range(absolute_ids[0], absolute_ids[0] + 16)):
+                if absolute_ids != list(range(absolute_ids[0], absolute_ids[0] + 16)):
                     raise RuntimeError(
                         "Teacher cache {} does not describe a consecutive stride-8 clip".format(
                             cache_path
@@ -180,14 +184,12 @@ class CacheMetadataRGBDataset(Dataset):
         return sample
 
 
-def make_crossclip_rgb_dataset(
+def make_teacher_cache_rgb_dataset(
     dataset_config: Dict[str, Any], split: str,
     cache_root: Optional[Union[str, Path]] = None,
 ) -> Any:
-    """Build only C_0, C_8, C_16...; frames inside each clip stay consecutive."""
+    """Build consecutive 16-frame RGB clips at cache-compatible stride-eight starts."""
     config = dict(dataset_config)
-    for key in ("random_clip_sampling", "teacher_neighbor_offset"):
-        config.pop(key, None)
     config.update(
         {
             "clip_length": 16,
@@ -237,33 +239,6 @@ def crossclip_teacher_cache_path(
             int(metadata["clip_start"])
         )
     )
-
-
-def build_neighbor_clip_indices(
-    clips: Sequence[ClipRecord],
-    window_stride: int = 8,
-) -> List[Tuple[Optional[int], Optional[int]]]:
-    """Return dataset indices for C_(t-8), C_(t+8) in the same dataset/sequence."""
-    if window_stride != 8:
-        raise ValueError("Cross-clip neighbor stride must be 8")
-    lookup: Dict[Tuple[str, str, int], int] = {}
-    for index, record in enumerate(clips):
-        key = (str(record.sequence.get("dataset_name", "SCARED")), str(record.sequence["sequence_id"]), int(record.clip_start))
-        if key in lookup:
-            raise RuntimeError("Duplicate clip identity {}".format(key))
-        lookup[key] = index
-    result = []
-    for record in clips:
-        dataset_name = str(record.sequence.get("dataset_name", "SCARED"))
-        sequence_id = str(record.sequence["sequence_id"])
-        start = int(record.clip_start)
-        result.append(
-            (
-                lookup.get((dataset_name, sequence_id, start - window_stride)),
-                lookup.get((dataset_name, sequence_id, start + window_stride)),
-            )
-        )
-    return result
 
 
 REQUIRED_CROSSCLIP_CACHE_KEYS = (
@@ -461,235 +436,13 @@ def validate_crossclip_teacher_cache(
         # clip_start and absolute_frame_ids are the stable cross-preprocess key.
 
 
-def _load_overlap_side(
-    path: Path,
-    teacher_metadata: Dict[str, Any],
-    current_metadata: Dict[str, Any],
-    student_absolute_ids: Sequence[int],
-    side: str,
-) -> Dict[str, Any]:
-    if not path.is_file():
-        raise FileNotFoundError(
-            "Neighbor teacher cache missing: dataset={} sequence={} clip_start={} "
-            "expected_neighbor_start={} expected_cache_path={}".format(
-                teacher_metadata.get("dataset_name", teacher_metadata.get("dataset_id")),
-                teacher_metadata["sequence_id"],
-                current_metadata["clip_start"],
-                teacher_metadata["clip_start"],
-                path,
-            )
-        )
-    with np.load(str(path), allow_pickle=False) as cache:
-        # Full cache integrity is checked once by audit_vggtoda3.py before a
-        # run.  Do not call validate_crossclip_teacher_cache here: it reads and
-        # scans every dense member (including both unused XYZ maps) for every
-        # sample and every epoch.  The training hot path only reads supervision
-        # consumed by the loss plus the IDs required for exact overlap mapping.
-        teacher_slice = slice(8, 16) if side == "left" else slice(0, 8)
-        student_slice = slice(0, 8) if side == "left" else slice(8, 16)
-        expected_ids = list(student_absolute_ids[student_slice])
-        actual_ids = cache["absolute_frame_ids"][teacher_slice].tolist()
-        if actual_ids != expected_ids:
-            raise RuntimeError(
-                "{} teacher absolute-frame mapping mismatch: {} != {}".format(
-                    side, actual_ids, expected_ids
-                )
-            )
-        result: Dict[str, Any] = {
-            "exists": torch.tensor(True),
-            "depth": tensor_from_numpy_buffer(cache["depth"][teacher_slice]),
-            "confidence": tensor_from_numpy_buffer(cache["confidence"][teacher_slice]),
-            "valid_mask": tensor_from_numpy_buffer(cache["valid_mask"][teacher_slice]),
-            "intrinsics": tensor_from_numpy_buffer(cache["intrinsics"][teacher_slice]),
-            "extrinsics": tensor_from_numpy_buffer(cache["extrinsics"][teacher_slice]),
-            "absolute_frame_ids": torch.tensor(actual_ids, dtype=torch.long),
-            "student_local_indices": torch.arange(0, 8, dtype=torch.long)
-            if side == "left" else torch.arange(8, 16, dtype=torch.long),
-            "teacher_local_indices": torch.arange(8, 16, dtype=torch.long)
-            if side == "left" else torch.arange(0, 8, dtype=torch.long),
-            "clip_start": torch.tensor(int(teacher_metadata["clip_start"])),
-            "sequence_id": str(teacher_metadata["sequence_id"]),
-            "cache_path": str(path),
-        }
-    return result
-
-
-def _empty_overlap_side(
-    shape: Tuple[int, int], sequence_id: str
-) -> Dict[str, Any]:
-    height, width = shape
-    return {
-        "exists": torch.tensor(False),
-        "depth": torch.zeros(8, height, width),
-        "confidence": torch.zeros(8, height, width),
-        "valid_mask": torch.zeros(8, height, width, dtype=torch.bool),
-        "intrinsics": torch.zeros(8, 3, 3),
-        "extrinsics": torch.zeros(8, 3, 4),
-        "absolute_frame_ids": torch.full((8,), -1, dtype=torch.long),
-        "student_local_indices": torch.full((8,), -1, dtype=torch.long),
-        "teacher_local_indices": torch.full((8,), -1, dtype=torch.long),
-        "clip_start": torch.tensor(-1),
-        "sequence_id": sequence_id,
-        "cache_path": "",
-    }
-
-
-class ScaredCrossClipProjectionDataset(Dataset):
-    """Load C_s RGB plus only the required C_(s-8)/C_(s+8) cache slices."""
-
-    def __init__(
-        self,
-        rgb_dataset: ScaredTemporalRGBDataset,
-        cache_root: Union[str, Path],
-        expected_base_checkpoint: str,
-        expected_stage: str = "aligned",
-    ) -> None:
-        self.rgb_dataset = rgb_dataset
-        self.cache_root = Path(cache_root)
-        self.expected_base_checkpoint = expected_base_checkpoint
-        self.expected_stage = expected_stage
-        if int(rgb_dataset.window_stride) != 8:
-            raise ValueError("RGB dataset window_stride must be 8")
-        self.neighbors = build_neighbor_clip_indices(rgb_dataset.clips, rgb_dataset.window_stride)
-
-    def __len__(self) -> int:
-        return len(self.rgb_dataset)
-
-    def _metadata(self, index: int) -> Dict[str, Any]:
-        return clip_metadata(self.rgb_dataset, index)
-
-    def missing_neighbor_cache_paths(self, limit: int = 10) -> List[Path]:
-        missing: List[Path] = []
-        for left, right in self.neighbors:
-            for neighbor in (left, right):
-                if neighbor is None:
-                    continue
-                path = crossclip_teacher_cache_path(
-                    self.cache_root, self._metadata(neighbor)
-                )
-                if not path.is_file() and path not in missing:
-                    missing.append(path)
-                    if len(missing) >= limit:
-                        return missing
-        return missing
-
-    def __getitem__(self, index: int) -> Dict[str, Any]:
-        sample = self.rgb_dataset[index]
-        metadata = self._metadata(index)
-        shape = tuple(int(value) for value in sample["images"].shape[-2:])
-        absolute_ids = metadata["frame_indices"]
-        left_index, right_index = self.neighbors[index]
-
-        def side_value(neighbor: Optional[int], side: str) -> Dict[str, Any]:
-            if neighbor is None:
-                return _empty_overlap_side(shape, metadata["sequence_id"])
-            teacher_metadata = self._metadata(neighbor)
-            if teacher_metadata["sequence_id"] != metadata["sequence_id"]:
-                raise RuntimeError("Cross-clip neighbor crossed a sequence boundary")
-            return _load_overlap_side(
-                crossclip_teacher_cache_path(self.cache_root, teacher_metadata),
-                teacher_metadata,
-                metadata,
-                absolute_ids,
-                side,
-            )
-
-        highlight = sample.get(
-            "highlight_masks",
-            torch.zeros(16, 1, *shape, dtype=sample["images"].dtype),
-        )
-        clean = sample.get("inpainted_images")
-        if clean is None:
-            clean = sample["images"].clamp(0.0, 1.0)
-        return {
-            "images": sample["images"],
-            "clean_images": clean,
-            "highlight_masks": highlight.bool(),
-            "frame_indices": sample["frame_indices"],
-            "sequence_id": metadata["sequence_id"],
-            "clip_start": sample["clip_start"],
-            "absolute_frame_ids": sample["frame_indices"],
-            "teacher_left": side_value(left_index, "left"),
-            "teacher_right": side_value(right_index, "right"),
-        }
-
-
-_SIDE_TENSOR_KEYS = (
-    "exists",
-    "depth",
-    "confidence",
-    "valid_mask",
-    "intrinsics",
-    "extrinsics",
-    "absolute_frame_ids",
-    "student_local_indices",
-    "teacher_local_indices",
-    "clip_start",
-)
-
-
-def crossclip_projection_collate(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
-    if not samples:
-        raise ValueError("Cannot collate an empty cross-clip batch")
-
-    def collate_side(name: str) -> Dict[str, Any]:
-        values: Dict[str, Any] = {
-            key: torch.stack([sample[name][key] for sample in samples])
-            for key in _SIDE_TENSOR_KEYS
-        }
-        values["sequence_id"] = [sample[name]["sequence_id"] for sample in samples]
-        values["cache_path"] = [sample[name]["cache_path"] for sample in samples]
-        return values
-
-    return {
-        "images": torch.stack([sample["images"] for sample in samples]),
-        "clean_images": torch.stack([sample["clean_images"] for sample in samples]),
-        "highlight_masks": torch.stack([sample["highlight_masks"] for sample in samples]),
-        "frame_indices": torch.stack([sample["frame_indices"] for sample in samples]),
-        "absolute_frame_ids": torch.stack([sample["absolute_frame_ids"] for sample in samples]),
-        "clip_start": torch.stack([sample["clip_start"] for sample in samples]),
-        "sequence_id": [sample["sequence_id"] for sample in samples],
-        "teacher_left": collate_side("teacher_left"),
-        "teacher_right": collate_side("teacher_right"),
-    }
-
-
-def build_crossclip_projection_dataloader(
-    dataset: ScaredCrossClipProjectionDataset,
-    loader_config: Dict[str, Any],
-    seed: int,
-    shuffle: bool,
-) -> DataLoader:
-    num_workers = int(loader_config.get("num_workers", 0))
-    generator = torch.Generator().manual_seed(seed)
-    kwargs: Dict[str, Any] = {
-        "dataset": dataset,
-        "batch_size": int(loader_config.get("batch_size", 1)),
-        "shuffle": shuffle,
-        "num_workers": num_workers,
-        "pin_memory": bool(loader_config.get("pin_memory", False)),
-        "persistent_workers": bool(loader_config.get("persistent_workers", False)) if num_workers else False,
-        "drop_last": bool(loader_config.get("drop_last", False)),
-        "collate_fn": crossclip_projection_collate,
-        "worker_init_fn": seed_worker,
-        "generator": generator,
-    }
-    if num_workers:
-        kwargs["prefetch_factor"] = int(loader_config.get("prefetch_factor", 2))
-    return DataLoader(**kwargs)
-
-
 __all__ = [
     "CROSSCLIP_CACHE_FORMAT_VERSION",
     "CROSSCLIP_CACHE_PROTOCOL",
     "LOCAL_CAMERA_COORDINATE_SYSTEM",
     "REQUIRED_CROSSCLIP_CACHE_KEYS",
-    "ScaredCrossClipProjectionDataset",
     "WORLD_TO_CAMERA_POSE_CONVENTION",
-    "build_crossclip_projection_dataloader",
-    "build_neighbor_clip_indices",
-    "crossclip_projection_collate",
     "crossclip_teacher_cache_path",
-    "make_crossclip_rgb_dataset",
+    "make_teacher_cache_rgb_dataset",
     "validate_crossclip_teacher_cache",
 ]

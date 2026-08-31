@@ -1,8 +1,9 @@
 experiment:
   name: vggtoda3
+  objective_protocol: direct_teacher_distillation_v1
   hypothesis: >-
-    Frozen high-resolution VGGT-Omega teacher caches supervise the official
-    pretrained DA3-Small depth and camera heads on stride-eight 16-frame clips.
+    Same-clip frozen VGGT-Omega pseudo-labels directly supervise the official
+    pretrained DA3-Small depth and camera heads on 16-frame clips.
 
 seed: 42
 device: cuda
@@ -17,7 +18,6 @@ dataset:
   sample_stride: 1
   window_stride: 8
   drop_incomplete_clip: true
-  random_clip_sampling: true
   image_height: 448
   image_width: 560
   resize_mode: resize
@@ -43,8 +43,6 @@ teacher:
   cache_protocol: crossclip_local_v1
   pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
   raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560
-  aligned_cache_root: null
-  use_aligned_cache: false
   cache_dtype: float32
   inference_batch_size: 4
   amp: true
@@ -57,8 +55,6 @@ teacher:
   min_depth: 0.1
   max_depth: 150.0
   minimum_valid_fraction: 0.001
-  scale_alignment:
-    enabled: false
 
 teacher_dataloader:
   num_workers: 8
@@ -85,18 +81,23 @@ student:
   lora_dropout: 0.05
   lora_expected_modules: 24
   freeze_depth_head: false
-  freeze_camera_encoder: false
+  freeze_camera_encoder: true
   freeze_camera_decoder: false
   head_chunk_size: 8
   ref_view_strategy: saddle_balanced
 
 loss:
-  mode: crossclip_projection_highlight_smooth
-  lambda_projection: 1.0
+  mode: direct_teacher_distillation
+  lambda_depth: 1.0
+  lambda_camera: 0.1
+  camera:
+    lambda_rotation: 1.0
+    lambda_translation_direction: 1.0
+    lambda_translation_magnitude: 1.0
+    lambda_intrinsics: 1.0
   lambda_highlight: 0.01
   lambda_smooth: 0.1
-  projection_eps: 1.0e-6
-  projection_ignore_highlight: false
+  eps: 1.0e-6
   use_confidence_weight: true
 
 dataloader:
@@ -110,7 +111,6 @@ dataloader:
 training:
   epochs: 20
   learning_rate: 1.0e-4
-  encoder_learning_rate: 1.0e-5
   lora_learning_rate: 1.0e-4
   min_learning_rate: 1.0e-6
   weight_decay: 0.05
@@ -119,20 +119,19 @@ training:
   gradient_clip_norm: 1.0
   amp: true
   amp_dtype: auto
-  max_consecutive_zero_projection_batches: 5
   log_every: 10
   save_every: 1
   timing:
     enabled: true
     log_every_micro_batches: 1
-  output_dir: ./outputs/vggtoda3
+  output_dir: ./outputs/vggtoda3_direct
   resume: null
 
 evaluation:
   protocol: vda
 
 vda_evaluation:
-  checkpoint: ./outputs/vggtoda3/last.pt
+  checkpoint: ./outputs/vggtoda3_direct/last.pt
   split: test
   protocol: vda
   rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
@@ -142,10 +141,10 @@ vda_evaluation:
   gt_depth_channel: 0
   require_all_gt: true
   amp: true
-  output: ./outputs/vggtoda3/evaluation_test_vda.json
+  output: ./outputs/vggtoda3_direct/evaluation_test_vda.json
 
 endo3r_evaluation:
-  checkpoint: ./outputs/vggtoda3/last.pt
+  checkpoint: ./outputs/vggtoda3_direct/last.pt
   split: test
   protocol: endo3r
   rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
@@ -155,10 +154,10 @@ endo3r_evaluation:
   gt_depth_channel: 0
   require_all_gt: true
   amp: true
-  output: ./outputs/vggtoda3/evaluation_test_endo3r.json
+  output: ./outputs/vggtoda3_direct/evaluation_test_endo3r.json
 
 visualization:
-  output_dir: ./outputs/vggtoda3/visualization
+  output_dir: ./outputs/vggtoda3_direct/visualization
   min_depth: 0.1
   max_depth: 10.0
   adaptive_percentiles: [5.0, 95.0]

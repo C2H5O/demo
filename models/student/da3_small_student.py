@@ -38,7 +38,7 @@ class DA3SmallConfig:
     lora_dropout: float = 0.05
     lora_expected_modules: int = 24
     freeze_depth_head: bool = False
-    freeze_camera_encoder: bool = False
+    freeze_camera_encoder: bool = True
     freeze_camera_decoder: bool = False
     head_chunk_size: int = 8
     ref_view_strategy: str = "saddle_balanced"
@@ -56,6 +56,10 @@ class DA3SmallConfig:
             raise ValueError("ray and ray-pose branches are forbidden")
         if not self.use_camera_head:
             raise ValueError("DA3 native camera head is required")
+        if not self.freeze_camera_encoder:
+            raise ValueError(
+                "DA3 camera_encoder is inactive when backbone cam_token=None and must be frozen"
+            )
         if self.use_backbone_lora:
             if not self.freeze_backbone:
                 raise ValueError("Standard backbone LoRA requires freeze_backbone=true")
@@ -242,7 +246,10 @@ class DA3SmallStudent(nn.Module):
     def _configure_trainability(self) -> None:
         groups = (
             (self.depth_head, not self.config.freeze_depth_head),
-            (self.camera_encoder, not self.config.freeze_camera_encoder),
+            # cam_enc is strict-loaded for official checkpoint compatibility,
+            # but the unconditioned forward passes cam_token=None and never
+            # executes this module.
+            (self.camera_encoder, False),
             (self.camera_decoder, not self.config.freeze_camera_decoder),
         )
         for module, trainable in groups:
@@ -267,6 +274,8 @@ class DA3SmallStudent(nn.Module):
             raise RuntimeError("DA3 native camera decoder is not trainable")
         if any(parameter.requires_grad for module in self._ray_modules() for parameter in module.parameters()):
             raise RuntimeError("Ray-only parameters must be frozen")
+        if any(parameter.requires_grad for parameter in self.camera_encoder.parameters()):
+            raise RuntimeError("Inactive DA3 camera encoder must not enter the optimizer")
         if self.config.use_backbone_lora:
             lora_ids = {
                 id(parameter)
@@ -388,7 +397,9 @@ class DA3SmallStudent(nn.Module):
             torch.cat(confidences).reshape(batch, frames, height, width),
         )
 
-    def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(
+        self, images: torch.Tensor, include_global_points: bool = True
+    ) -> Dict[str, torch.Tensor]:
         self._last_forward_timing_events = {}
         self._record_cuda_timing("start", images.device)
         if tuple(images.shape[1:]) != (16, 3, 448, 560):
@@ -418,34 +429,41 @@ class DA3SmallStudent(nn.Module):
             extrinsics = torch.linalg.inv(c2w_h)[..., :3, :]
             self._record_cuda_timing("camera_end", images.device)
             xyz_local = depth_intrinsics_to_local_points(depth, intrinsics)
-            xyz_global = local_to_global_points(xyz_local, extrinsics)
+            xyz_global = (
+                local_to_global_points(xyz_local, extrinsics)
+                if include_global_points else None
+            )
             self._record_cuda_timing("geometry_end", images.device)
         expected = {
             "depth": (images.shape[0], 16, 448, 560),
             "intrinsics": (images.shape[0], 16, 3, 3),
             "extrinsics": (images.shape[0], 16, 3, 4),
             "xyz_local": (images.shape[0], 16, 448, 560, 3),
-            "xyz_global": (images.shape[0], 16, 448, 560, 3),
         }
+        if include_global_points:
+            expected["xyz_global"] = (images.shape[0], 16, 448, 560, 3)
         actual = {
             "depth": tuple(depth.shape), "intrinsics": tuple(intrinsics.shape),
             "extrinsics": tuple(extrinsics.shape), "xyz_local": tuple(xyz_local.shape),
-            "xyz_global": tuple(xyz_global.shape),
         }
+        if xyz_global is not None:
+            actual["xyz_global"] = tuple(xyz_global.shape)
         if actual != expected:
             raise RuntimeError("DA3 output contract mismatch: {} != {}".format(actual, expected))
         if self._ray_forward_count != 0:
             raise RuntimeError("Ray-specific branch executed {} modules".format(self._ray_forward_count))
-        return {
+        output = {
             "depth": depth,
             "depth_conf": depth_conf,
             "intrinsics": intrinsics,
             "extrinsics": extrinsics,
             "xyz_local": xyz_local,
-            "xyz_global": xyz_global,
             # Compatibility alias for the unchanged highlight/smoothness loss API.
             "pts3d_local": xyz_local,
         }
+        if xyz_global is not None:
+            output["xyz_global"] = xyz_global
+        return output
 
 
 __all__ = ["DA3SmallConfig", "DA3SmallStudent"]

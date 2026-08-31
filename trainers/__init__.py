@@ -1,3 +1,3 @@
-from trainers.crossclip_projection_trainer import train_crossclip_projection
+from trainers.direct_teacher_distillation_trainer import train_direct_teacher_distillation
 
-__all__ = ["train_crossclip_projection"]
+__all__ = ["train_direct_teacher_distillation"]

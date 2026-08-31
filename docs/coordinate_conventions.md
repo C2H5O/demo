@@ -1,57 +1,49 @@
-# VGGT-DA3 coordinate and overlap conventions
+# VGGT-DA3 direct-distillation coordinate conventions
 
-The student consumes one joint tensor `[B,16,3,448,560]`. DA3 predicts depth,
-pixel-space intrinsics and camera poses. All extrinsics exposed by this project
-are world-to-camera matrices:
+The Student and Teacher consume the same consecutive 16-frame clip at one
+cache-compatible start `n`:
 
 ```text
-X_camera = R @ X_world + t
+C_n^S = [n, n+1, ..., n+15]
+C_n^T = [n, n+1, ..., n+15]
 ```
 
-The official camera decoder first produces C2W pose encodings. The student
-wrapper follows DA3's own conversion, then inverts C2W exactly once and exposes
-`extrinsics_w2c` with shape `[B,16,3,4]`.
+The dataset requires identical `clip_start`, sequence identity, spatial
+resolution, and all 16 `absolute_frame_ids` before returning a sample. The
+cache sampling stride is eight only because those are the legal starts used by
+the existing cache. No previous or next clip is read.
 
-## Deterministic geometry
+## Depth
 
-For each pixel `(u,v)` and predicted depth `Z`:
+Student and Teacher depth are compared at the same frame and pixel. No point
+projection, resampling, or scale alignment is applied. Student local geometry
+is deterministically reconstructed only for the unchanged highlight and
+smoothness regularizers:
 
 ```text
 X = (u-cx)/fx * Z
 Y = (v-cy)/fy * Z
 xyz_local = [X,Y,Z]
-xyz_global = inverse(T_w2c) @ homogeneous(xyz_local)
 ```
 
-Runtime checks require `depth == xyz_local[...,2]`, positive depth, finite
-camera matrices, and exact output shapes. There is no learned point-map or ray
-geometry head in the reconstruction path.
+## Camera poses
 
-## Stride-eight neighbors
-
-Clip frames remain consecutive, while legal starts are `s = 0,8,16,...`:
+Both cache and Student expose world-to-camera matrices:
 
 ```text
-C_0  = [0,...,15]
-C_8  = [8,...,23]
-C_16 = [16,...,31]
+X_camera = R @ X_world + t
 ```
 
-For current `C_s`, previous supervision is `C_(s-8)[8:16]` matched to
-`C_s[0:8]`; next supervision is `C_(s+8)[0:8]` matched to `C_s[8:16]`.
-Both intersections must contain exactly eight identical absolute frame IDs.
-Neighbors are keyed by dataset, sequence and `clip_start`; no stride-one or
-cross-sequence fallback is allowed.
+The official DA3 camera conversion first returns C2W. The Student wrapper
+inverts it exactly once to expose W2C. Camera distillation never compares
+absolute poses. With frame zero as the clip reference, it compares:
 
-## Projection frame
+```text
+T(i <- 0) = E_i @ inverse(E_0),  i = 1,...,15
+```
 
-DA3 local points depend on predicted depth and K. They are transformed by the
-predicted C2W to `xyz_global`, then by the frozen matching teacher W2C to the
-teacher camera frame. The existing relative depth projection residual and
-teacher confidence weighting are applied there. This preserves the original
-projection/highlight/smoothness objective while allowing projection gradients
-to reach the DA3 backbone, depth head and camera decoder.
-
-Teacher arrays remain detached, lazy-loaded pseudo-labels. Dense supervision
-is always 448x560. A cache may additionally retain native high-resolution
-teacher input metadata; this is audited but never used to resize student input.
+This maps coordinates from reference camera zero into camera `i` and cancels a
+common absolute world gauge. Rotation is supervised with the SO(3) geodesic
+angle; translation direction and log magnitude are supervised independently.
+Intrinsics supervision uses `fx/W` and `fy/H`; fixed principal-point terms are
+diagnostic only and do not enter the loss.
