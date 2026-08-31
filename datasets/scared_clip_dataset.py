@@ -49,6 +49,7 @@ def make_scared_rgb_dataset(
             window_stride=int(config.get("window_stride", 1)),
             normalize_mode=str(dataset_config.get("normalize_mode", "minus_one_one")),
             highlight=dict(dataset_config.get("highlight", {})),
+            drop_incomplete_clip=bool(config.get("drop_incomplete_clip", True)),
         )
     else:
         try:
@@ -84,6 +85,7 @@ def make_scared_rgb_dataset(
                 window_stride=int(config.get("window_stride", 1)),
                 normalize_mode=str(dataset_config.get("normalize_mode", "minus_one_one")),
                 highlight=dict(dataset_config.get("highlight", {})),
+                drop_incomplete_clip=bool(config.get("drop_incomplete_clip", True)),
             ))
     if not datasets:
         raise RuntimeError("No legacy SCARED or complete canonical sequences were discovered")

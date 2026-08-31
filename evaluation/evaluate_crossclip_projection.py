@@ -84,6 +84,9 @@ def _dataset_and_ground_truth(
     dataset_config["frame_source"] = str(
         eval_config.get("frame_source", dataset_config.get("frame_source", "auto"))
     )
+    # Add one final complete 16-frame window when a sequence length is not
+    # aligned to stride eight, so every available RGB/GT tail frame is scored.
+    dataset_config["drop_incomplete_clip"] = False
     # Detection/inpainting is a training-only auxiliary and does not alter RGB.
     dataset_config["highlight"] = {"enabled": False}
     dataset = make_crossclip_rgb_dataset(dataset_config, split)

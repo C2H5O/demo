@@ -198,10 +198,11 @@ def discover_processed_scared_sequences(root: str | Path, split: str) -> List[Di
 class CanonicalTemporalRGBDataset(Dataset):
     """Read already-materialized student PNGs without a second spatial resize."""
 
-    def __init__(self, sequences: Sequence[Dict[str, Any]], *, clip_length: int, sample_stride: int, window_stride: int, normalize_mode: str, highlight: Dict[str, Any] | None = None) -> None:
+    def __init__(self, sequences: Sequence[Dict[str, Any]], *, clip_length: int, sample_stride: int, window_stride: int, normalize_mode: str, highlight: Dict[str, Any] | None = None, drop_incomplete_clip: bool = True) -> None:
         _validate_temporal_config(clip_length, sample_stride, window_stride)
         self.sequences = list(sequences)
         self.clip_length, self.sample_stride, self.window_stride = clip_length, sample_stride, window_stride
+        self.drop_incomplete_clip = bool(drop_incomplete_clip)
         self.image_height, self.image_width = CANONICAL_STUDENT_SIZE
         self.resize_mode, self.normalize_mode = "precomputed", normalize_mode
         (
@@ -223,7 +224,17 @@ class CanonicalTemporalRGBDataset(Dataset):
         span = (clip_length - 1) * sample_stride
         for sequence in self.sequences:
             last = int(sequence["sequence_length"]) - span - 1
-            for start in range(0, max(last + 1, 0), window_stride):
+            starts = list(range(0, max(last + 1, 0), window_stride))
+            if (
+                not self.drop_incomplete_clip
+                and last >= 0
+                and starts
+                and starts[-1] != last
+            ):
+                # Evaluation needs a final fixed-size window ending at the
+                # last RGB frame, even when that start is off the train stride.
+                starts.append(last)
+            for start in starts:
                 self.clips.append(ClipRecord(sequence, tuple(start + step * sample_stride for step in range(clip_length)), start))
 
     def __len__(self) -> int:

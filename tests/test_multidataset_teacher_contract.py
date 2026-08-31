@@ -237,3 +237,32 @@ def test_offline_highlight_worker_materializes_loadable_pngs(tmp_path) -> None:
     torch.testing.assert_close(
         loaded_rgb[:, 0, 0], torch.tensor([10.0, 20.0, 30.0]) / 255.0
     )
+
+
+def test_evaluation_tail_window_covers_last_frame() -> None:
+    sequence = {
+        "dataset_name": "SCARED",
+        "dataset_id": 8,
+        "keyframe_id": "keyframe_1",
+        "sequence_id": "dataset_8/keyframe_1",
+        "sequence_length": 945,
+        "frame_paths": ["{:06d}.png".format(index) for index in range(945)],
+        "teacher_frame_paths": ["{:06d}.png".format(index) for index in range(945)],
+        "absolute_frame_ids": list(range(945)),
+        "frame_directory": "student_rgb",
+        "keyframe_directory": ".",
+        "depth_directory": None,
+    }
+    training = CanonicalTemporalRGBDataset(
+        [sequence], clip_length=16, sample_stride=1, window_stride=8,
+        normalize_mode="zero_one", drop_incomplete_clip=True,
+    )
+    evaluation = CanonicalTemporalRGBDataset(
+        [sequence], clip_length=16, sample_stride=1, window_stride=8,
+        normalize_mode="zero_one", drop_incomplete_clip=False,
+    )
+
+    assert training.clips[-1].clip_start == 928
+    assert training.clips[-1].frame_indices[-1] == 943
+    assert evaluation.clips[-1].clip_start == 929
+    assert evaluation.clips[-1].frame_indices[-1] == 944
