@@ -22,7 +22,7 @@ def test_vggtoda3_config_encodes_fixed_contract() -> None:
     config = load_config(CONFIG_PATH)
     dataset = config["dataset"]
     assert (dataset["clip_length"], dataset["sample_stride"], dataset["window_stride"]) == (16, 1, 8)
-    assert dataset["root"] == "/public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/scared"
+    assert dataset["root"] == "/public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/SCARED"
     assert dataset["normalize_mode"] == "zero_one"
     assert dataset["highlight"]["enabled"] is True
     assert dataset["highlight"]["storage"] == "precomputed"
@@ -44,6 +44,11 @@ def test_vggtoda3_config_encodes_fixed_contract() -> None:
         "enabled": True,
         "log_every_micro_batches": 1,
     }
+    assert config["dataloader"]["batch_size"] == 16
+    assert config["training"]["gradient_accumulation_steps"] == 1
+    assert config["training"]["learning_rate"] == 1.0e-5
+    assert config["training"]["lora_learning_rate"] == 1.0e-5
+    assert config["training"]["min_learning_rate"] == 1.0e-6
 
 
 def test_vda_is_default_and_endo3r_is_retained() -> None:

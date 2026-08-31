@@ -10,7 +10,7 @@ device: cuda
 
 dataset:
   name: scared
-  root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/scared
+  root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/SCARED
   train_manifest_path: null
   test_manifest_path: null
   frame_source: auto
@@ -101,7 +101,7 @@ loss:
   use_confidence_weight: true
 
 dataloader:
-  batch_size: 1
+  batch_size: 16
   num_workers: 4
   pin_memory: true
   persistent_workers: true
@@ -110,12 +110,12 @@ dataloader:
 
 training:
   epochs: 20
-  learning_rate: 1.0e-4
-  lora_learning_rate: 1.0e-4
+  learning_rate: 1.0e-5
+  lora_learning_rate: 1.0e-5
   min_learning_rate: 1.0e-6
   weight_decay: 0.05
   warmup_fraction: 0.05
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 1
   gradient_clip_norm: 1.0
   amp: true
   amp_dtype: auto
