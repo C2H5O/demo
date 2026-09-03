@@ -18,6 +18,7 @@ from utils.checkpoint import (
     require_training_objective,
 )
 from visualization.crossclip_projection import _adaptive_range
+from visualization.crossclip_projection import _visualization_dataset
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,6 +106,48 @@ def test_official_da3_small_baseline_entrypoint_has_no_training_checkpoint() -> 
     source = (ROOT / "evaluate_da3_small_baseline.py").read_text(encoding="utf-8")
     assert "evaluate_official_da3_small" in source
     assert 'add_argument("--checkpoint"' not in source
+
+
+def test_official_da3_small_visualization_uses_raw_test_rgb(monkeypatch) -> None:
+    config = load_config(CONFIG_PATH)
+    captured = {}
+
+    class Dataset:
+        sequences = [
+            {"sequence_id": "dataset_8/key_frame_1", "dataset_id": 8},
+            {"sequence_id": "dataset_9/key_frame_1", "dataset_id": 9},
+        ]
+
+    def make_dataset(dataset_config, split):
+        captured.update(dataset_config)
+        captured["split"] = split
+        return Dataset()
+
+    monkeypatch.setattr(
+        "visualization.crossclip_projection.make_scared_rgb_dataset", make_dataset
+    )
+    _visualization_dataset(config, "test", OFFICIAL_DA3_SMALL_SOURCE)
+    raw_root = "/public/home/2024141520249/Documents/datasets/vggtodistilldata/scared"
+    assert captured["root"] == raw_root
+    assert captured["legacy_scared_root"] == raw_root
+    assert captured["canonical_root"] is None
+    assert captured["highlight"] == {"enabled": False}
+    assert captured["drop_incomplete_clip"] is False
+    assert captured["split"] == "test"
+
+
+def test_official_da3_small_visualization_entrypoint_has_no_checkpoint() -> None:
+    source = (ROOT / "visualize_da3_small_baseline.py").read_text(encoding="utf-8")
+    assert "OFFICIAL_DA3_SMALL_SOURCE" in source
+    assert 'add_argument("--checkpoint"' not in source
+    config = load_config(CONFIG_PATH)["da3_small_baseline_visualization"]
+    assert config["output_dir"] == "./outputs/da3_small_baseline/visualization"
+    visualization_source = (
+        ROOT / "visualization" / "crossclip_projection.py"
+    ).read_text(encoding="utf-8")
+    assert 'da3_source = source in {"student", OFFICIAL_DA3_SMALL_SOURCE}' in visualization_source
+    assert 'if da3_source:' in visualization_source
+    assert '"da3_small_baseline_visualization"' in visualization_source
 
 
 def test_evaluation_rgb_root_overrides_processed_training_root(monkeypatch) -> None:

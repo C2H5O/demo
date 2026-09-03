@@ -97,6 +97,10 @@ python evaluate_da3_small_baseline.py \
   --config configs/vggtoda3.yaml \
   --protocol endo3r
 
+python visualize_da3_small_baseline.py \
+  --config configs/vggtoda3.yaml \
+  --clip-index 0
+
 python visualize_crossclip_projection.py \
   --config configs/vggtoda3.yaml \
   --source student \

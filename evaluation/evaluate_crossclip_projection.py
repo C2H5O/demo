@@ -85,7 +85,7 @@ def _official_da3_small_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return model_config
 
 
-def _load_official_da3_small(
+def load_official_da3_small(
     config: Dict[str, Any], device: torch.device
 ) -> DA3SmallStudent:
     """Strict-load the untouched official DA3-Small safetensors for baseline eval."""
@@ -123,7 +123,7 @@ def _evaluation_model(
     if model_source == OFFICIAL_DA3_SMALL_SOURCE:
         if checkpoint is not None:
             raise ValueError("Official DA3-Small baseline does not accept a training checkpoint")
-        return _load_official_da3_small(config, device)
+        return load_official_da3_small(config, device)
     if model_source != TRAINED_STUDENT_SOURCE:
         raise ValueError("Unsupported evaluation model source {!r}".format(model_source))
     if checkpoint is None or not checkpoint.is_file():
@@ -472,5 +472,6 @@ __all__ = [
     "evaluate_endo3r",
     "evaluate_official_da3_small",
     "evaluate_vda",
+    "load_official_da3_small",
     "select_protocol",
 ]

@@ -18,7 +18,13 @@ from datasets.crossclip_teacher_dataset import (
     validate_crossclip_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
+from datasets.scared_clip_dataset import make_scared_rgb_dataset
 from datasets.transforms import unnormalize_image
+from evaluation.evaluate_crossclip_projection import (
+    OFFICIAL_DA3_SMALL_SOURCE,
+    _require_scared_8_9,
+    load_official_da3_small,
+)
 from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
@@ -121,6 +127,47 @@ def _load_student_prediction(
     }
 
 
+def _load_official_da3_small_prediction(
+    config: Dict[str, Any], images: torch.Tensor
+) -> Dict[str, np.ndarray]:
+    """Run untouched official DA3-Small without LoRA or a training checkpoint."""
+    device = torch.device(str(config.get("device", "cuda")))
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA visualization requested but unavailable")
+    model = load_official_da3_small(config, device)
+    with torch.inference_mode(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+        prediction = model(images.unsqueeze(0).to(device))
+    return {
+        key: prediction[key][0].float().cpu().numpy()
+        for key in ("depth", "intrinsics", "extrinsics", "xyz_local", "xyz_global")
+    }
+
+
+def _visualization_dataset(
+    config: Dict[str, Any], split: str, source: str
+) -> Any:
+    dataset_config = dict(config["dataset"])
+    dataset_config["highlight"] = {"enabled": False}
+    if source != OFFICIAL_DA3_SMALL_SOURCE:
+        return make_teacher_cache_rgb_dataset(dataset_config, split)
+    if split != "test":
+        raise ValueError("Official DA3-Small visualization is fixed to SCARED 8/9 test split")
+    eval_config = dict(config.get("da3_small_baseline_vda_evaluation", {}))
+    rgb_root = eval_config.get("rgb_root")
+    if not rgb_root:
+        raise ValueError("da3_small_baseline_vda_evaluation.rgb_root is required")
+    dataset_config["root"] = str(rgb_root)
+    dataset_config["legacy_scared_root"] = str(rgb_root)
+    dataset_config["canonical_root"] = None
+    dataset_config["frame_source"] = str(eval_config.get("frame_source", "auto"))
+    dataset_config["drop_incomplete_clip"] = False
+    dataset = make_scared_rgb_dataset(dataset_config, split)
+    _require_scared_8_9(
+        {str(sequence["sequence_id"]): sequence for sequence in dataset.sequences}
+    )
+    return dataset
+
+
 def _load_teacher_points(
     config: Dict[str, Any],
     dataset: Any,
@@ -160,14 +207,13 @@ def export_crossclip_visualization(
     point_stride: int = 4,
 ) -> Path:
     """Export depth, local PLYs, camera poses and one merged global DA3 PLY."""
-    if source not in {"student", "teacher"}:
-        raise ValueError("source must be student or teacher")
+    if source not in {"student", "teacher", OFFICIAL_DA3_SMALL_SOURCE}:
+        raise ValueError("source must be student, teacher, or official_da3_small")
     if point_stride <= 0:
         raise ValueError("point_stride must be positive")
     config = load_config(config_path)
-    dataset_config = dict(config["dataset"])
-    dataset_config["highlight"] = {"enabled": False}
-    dataset = make_teacher_cache_rgb_dataset(dataset_config, split)
+    da3_source = source in {"student", OFFICIAL_DA3_SMALL_SOURCE}
+    dataset = _visualization_dataset(config, split, source)
     if not 0 <= clip_index < len(dataset):
         raise IndexError("clip_index={} is outside [0,{})".format(clip_index, len(dataset)))
     sample = dataset[clip_index]
@@ -181,6 +227,12 @@ def export_crossclip_visualization(
         prediction = _load_student_prediction(checkpoint_path, config, sample["images"])
         points = prediction["xyz_local"]
         global_points = prediction["xyz_global"]
+    elif source == OFFICIAL_DA3_SMALL_SOURCE:
+        if checkpoint_path is not None:
+            raise ValueError("Official DA3-Small visualization does not accept a checkpoint")
+        prediction = _load_official_da3_small_prediction(config, sample["images"])
+        points = prediction["xyz_local"]
+        global_points = prediction["xyz_global"]
     else:
         points, teacher_cache, cache_stage = _load_teacher_points(
             config, dataset, clip_index, split
@@ -188,11 +240,15 @@ def export_crossclip_visualization(
         global_points = None
     depth = points[..., 2]
     valid = np.isfinite(points).all(axis=-1) & np.isfinite(depth) & (depth > 0.0)
+    visual_config = config.get(
+        "da3_small_baseline_visualization"
+        if source == OFFICIAL_DA3_SMALL_SOURCE
+        else "visualization",
+        {},
+    )
     adaptive = tuple(
         float(value)
-        for value in config.get("visualization", {}).get(
-            "adaptive_percentiles", [5.0, 95.0]
-        )
+        for value in visual_config.get("adaptive_percentiles", [5.0, 95.0])
     )
     if len(adaptive) != 2:
         raise ValueError("visualization.adaptive_percentiles must contain two values")
@@ -234,7 +290,7 @@ def export_crossclip_visualization(
             points[offset][point_mask].astype(np.float32),
             rgb[offset][point_mask],
         )
-    if source == "student":
+    if da3_source:
         global_valid = np.isfinite(global_points).all(axis=-1) & valid
         sampled = np.zeros(global_valid.shape[-2:], dtype=bool)
         sampled[::point_stride, ::point_stride] = True
@@ -252,7 +308,11 @@ def export_crossclip_visualization(
         )
     record: Dict[str, Any] = {
         "source": source,
-        "checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
+        "checkpoint": (
+            str(config["student"]["checkpoint"])
+            if source == OFFICIAL_DA3_SMALL_SOURCE
+            else str(checkpoint_path) if checkpoint_path is not None else None
+        ),
         "teacher_cache": str(teacher_cache) if teacher_cache is not None else None,
         "teacher_cache_stage": cache_stage,
         "split": split,
@@ -263,7 +323,7 @@ def export_crossclip_visualization(
         "frame_names": metadata["frame_names"],
         "coordinate_system": (
             "DA3 local points plus merged global points; extrinsics are WORLD_TO_CAMERA"
-            if source == "student" else "teacher camera-local coordinates"
+            if da3_source else "teacher camera-local coordinates"
         ),
         "fixed_depth_range": [min_depth, max_depth],
         "adaptive_percentiles": list(adaptive),

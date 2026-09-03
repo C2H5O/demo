@@ -180,6 +180,13 @@ da3_small_baseline_endo3r_evaluation:
   amp: true
   output: ./outputs/da3_small_baseline/evaluation_scared_8_9_endo3r.json
 
+da3_small_baseline_visualization:
+  output_dir: ./outputs/da3_small_baseline/visualization
+  min_depth: 0.1
+  max_depth: 10.0
+  adaptive_percentiles: [5.0, 95.0]
+  point_stride: 4
+
 visualization:
   output_dir: ./outputs/vggtoda3_direct/visualization
   min_depth: 0.1
