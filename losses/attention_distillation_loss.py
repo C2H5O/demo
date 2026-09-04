@@ -15,6 +15,9 @@ from torch.utils.checkpoint import checkpoint
 @dataclass(frozen=True)
 class AttentionDistillationConfig:
     enabled: bool
+    teacher_source: str
+    online_teacher_batch_size: int
+    teacher_output_dtype: str
     teacher_layers: Tuple[int, ...]
     student_layers: Tuple[int, ...]
     attention_type: str
@@ -33,6 +36,9 @@ class AttentionDistillationConfig:
     def from_mapping(cls, config: Mapping[str, Any]) -> "AttentionDistillationConfig":
         required = {
             "enabled",
+            "teacher_source",
+            "online_teacher_batch_size",
+            "teacher_output_dtype",
             "teacher_layers",
             "student_layers",
             "attention_type",
@@ -54,6 +60,9 @@ class AttentionDistillationConfig:
             )
         result = cls(
             enabled=bool(config["enabled"]),
+            teacher_source=str(config["teacher_source"]),
+            online_teacher_batch_size=int(config["online_teacher_batch_size"]),
+            teacher_output_dtype=str(config["teacher_output_dtype"]),
             teacher_layers=tuple(int(value) for value in config["teacher_layers"]),
             student_layers=tuple(int(value) for value in config["student_layers"]),
             attention_type=str(config["attention_type"]),
@@ -72,6 +81,14 @@ class AttentionDistillationConfig:
         return result
 
     def validate(self) -> None:
+        if self.teacher_source != "online":
+            raise ValueError("attention_distill.teacher_source must be online")
+        if self.online_teacher_batch_size <= 0:
+            raise ValueError("attention_distill.online_teacher_batch_size must be positive")
+        if self.teacher_output_dtype not in {"float16", "float32"}:
+            raise ValueError(
+                "attention_distill.teacher_output_dtype must be float16 or float32"
+            )
         if not self.teacher_layers or len(self.teacher_layers) != len(self.student_layers):
             raise ValueError("attention_distill layer lists must be non-empty and equal length")
         if len(set(self.teacher_layers)) != len(self.teacher_layers):
@@ -396,7 +413,7 @@ class CrossFrameAttentionDistillationLoss(nn.Module):
             self.config.teacher_layers, self.config.student_layers
         ):
             if teacher_layer not in teacher_features:
-                raise KeyError("Teacher attention cache lacks layer {}".format(teacher_layer))
+                raise KeyError("Teacher attention output lacks layer {}".format(teacher_layer))
             if student_layer not in student_features:
                 raise KeyError("Student forward lacks layer {}".format(student_layer))
             layer_loss = self._layer_loss(

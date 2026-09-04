@@ -32,16 +32,18 @@ def _checkpoint_state(path: Path) -> Dict[str, torch.Tensor]:
 
 
 class VGGTOmegaTeacher(nn.Module):
-    """Frozen pretrained teacher used only for offline cache generation."""
+    """Frozen pretrained teacher for offline labels or online attention Q/K."""
 
     def __init__(
         self,
         model: nn.Module,
         attention_capture: Optional[VGGTOmegaAttentionCapture] = None,
+        attention_only: bool = False,
     ) -> None:
         super().__init__()
         self.model = model
         self.attention_capture = attention_capture
+        self.attention_only = bool(attention_only)
 
     @classmethod
     def from_config(
@@ -62,6 +64,13 @@ class VGGTOmegaTeacher(nn.Module):
             raise ValueError("teacher.pretrained_checkpoint must be configured")
         model = _import_vggt_omega_class()()
         model.load_state_dict(_checkpoint_state(Path(checkpoint_value)), strict=True)
+        attention_only = bool(config.get("attention_only", False))
+        if attention_only:
+            # Strict-load the complete released checkpoint first, then discard
+            # unused heads before moving the dedicated online instance to GPU.
+            model.camera_head = None
+            model.dense_head = None
+            model.text_alignment_head = None
         save_attention = bool(config.get("save_attention", False))
         attention_capture = None
         if save_attention:
@@ -73,18 +82,52 @@ class VGGTOmegaTeacher(nn.Module):
             if layers is None:
                 raise ValueError("teacher.attention_layers must be configured when save_attention=true")
             attention_capture = VGGTOmegaAttentionCapture(
-                model, layers, cache_dtype=dtypes[dtype_name]
+                model,
+                layers,
+                output_dtype=dtypes[dtype_name],
+                output_device=str(config.get("attention_output_device", "cpu")),
             )
-        wrapper = cls(model, attention_capture=attention_capture).freeze_for_inference()
+        wrapper = cls(
+            model,
+            attention_capture=attention_capture,
+            attention_only=attention_only,
+        ).freeze_for_inference()
         return wrapper.to(device) if device is not None else wrapper
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if self.attention_only:
+            raise RuntimeError("Attention-only Teacher cannot run prediction heads")
         if self.attention_capture is None:
             return self.model(images)
         self.attention_capture.begin(images)
         output = dict(self.model(images))
         output["attention"] = self.attention_capture.take()
         return output
+
+    def forward_attention(self, images: torch.Tensor) -> Dict[int, Dict[str, Any]]:
+        """Run only the aggregator and return detached patch Q/K.
+
+        Depth and camera heads are intentionally skipped: their supervision is
+        read from the existing baseline cache during online-attention training.
+        The caller must wrap this method in ``torch.no_grad``.
+        """
+        if self.attention_capture is None:
+            raise RuntimeError("VGGT-Omega attention capture is not configured")
+        if torch.is_grad_enabled():
+            raise RuntimeError("Online Teacher attention must run with gradients disabled")
+        aggregator = self.model.aggregator
+        if not hasattr(aggregator, "cached_layer_indices"):
+            raise RuntimeError("VGGT-Omega aggregator has no cached_layer_indices")
+        cached_layer_indices = aggregator.cached_layer_indices
+        self.attention_capture.begin(images)
+        try:
+            # These concatenated frame/inter-frame tensors exist only for the
+            # prediction heads, which online attention distillation skips.
+            aggregator.cached_layer_indices = set()
+            aggregator(images)
+            return self.attention_capture.take()
+        finally:
+            aggregator.cached_layer_indices = cached_layer_indices
 
     def freeze_for_inference(self) -> "VGGTOmegaTeacher":
         self.eval()

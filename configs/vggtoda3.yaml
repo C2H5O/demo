@@ -105,6 +105,9 @@ loss:
 
 attention_distill:
   enabled: false
+  teacher_source: online
+  online_teacher_batch_size: 1
+  teacher_output_dtype: float16
   teacher_layers: [4, 11, 17, 23]
   student_layers: [5, 7, 9, 11]
   attention_type: cross_frame_global

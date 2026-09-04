@@ -303,14 +303,19 @@ class TeacherClipInputDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rgb_dataset)
 
-    def __getitem__(self, index: int) -> Dict[str, Any]:
-        student = self.rgb_dataset[index]
+    def load_images(self, index: int) -> tuple[torch.Tensor, list[str]]:
+        """Decode only native Teacher RGB without re-decoding Student inputs."""
         record = self.rgb_dataset.clips[index]
         sequence = record.sequence
         teacher_paths = sequence.get("teacher_frame_paths", sequence["frame_paths"])
         paths = [str(teacher_paths[item]) for item in record.frame_indices]
+        return torch.stack([load_teacher_rgb_tensor(path) for path in paths]), paths
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        student = self.rgb_dataset[index]
+        images, paths = self.load_images(index)
         result = dict(student)
-        result["images"] = torch.stack([load_teacher_rgb_tensor(path) for path in paths])
+        result["images"] = images
         result["teacher_frame_paths"] = paths
         return result
 

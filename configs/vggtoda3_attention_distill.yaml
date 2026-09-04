@@ -1,5 +1,5 @@
-# Experiment B inherits every baseline setting and overrides only the attention
-# cache/run destinations plus the attention-distillation switch and weight.
+# Experiment B keeps baseline pseudo-label cache supervision and obtains only
+# the frozen Teacher attention Q/K online during each training step.
 base_config: vggtoda3.yaml
 
 experiment:
@@ -9,16 +9,18 @@ experiment:
     attention-relation distillation improves DA3-Small endoscopic geometry.
 
 teacher:
-  raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtoda3/data
-  save_attention: true
+  raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560
+  save_attention: false
 
 attention_distill:
   enabled: true
+  teacher_source: online
+  online_teacher_batch_size: 1
+  teacher_output_dtype: float16
   weight: 0.1
 
-# Native Teacher Q/K are 1.25 GiB per clip. Disable worker prefetch so only
-# the current scientific batch is resident in host memory; batch size is
-# intentionally identical to Experiment A.
+# Native 1024x1280 Teacher RGB is decoded online. Avoid worker prefetch while
+# preserving the Experiment A scientific batch size.
 dataloader:
   num_workers: 0
   pin_memory: false

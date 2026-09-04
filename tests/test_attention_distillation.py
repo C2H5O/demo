@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import numpy as np
 import pytest
 import torch
@@ -16,7 +18,13 @@ from losses.attention_distillation_loss import (
     SpatialTokenAligner,
     patch_overlap_matrix,
 )
+from trainers.direct_teacher_distillation_trainer import (
+    _check_resume_contract,
+    _compute_online_teacher_attention_loss,
+)
+from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
 from utils.config import load_config
+from utils.checkpoint import DIRECT_TEACHER_DISTILLATION_PROTOCOL
 
 
 LAYERS = ((4, 5), (11, 7), (17, 9), (23, 11))
@@ -25,6 +33,9 @@ LAYERS = ((4, 5), (11, 7), (17, 9), (23, 11))
 def _config(enabled: bool = True) -> dict:
     return {
         "enabled": enabled,
+        "teacher_source": "online",
+        "online_teacher_batch_size": 1,
+        "teacher_output_dtype": "float16",
         "teacher_layers": [item[0] for item in LAYERS],
         "student_layers": [item[1] for item in LAYERS],
         "attention_type": "cross_frame_global",
@@ -48,9 +59,11 @@ def _feature(
     head_dim: int,
     *,
     requires_grad: bool,
+    batch_size: int = 1,
+    num_frames: int = 3,
 ) -> dict:
     generator = torch.Generator().manual_seed(layer)
-    shape = (1, 3, heads, grid[0] * grid[1], head_dim)
+    shape = (batch_size, num_frames, heads, grid[0] * grid[1], head_dim)
     q = torch.randn(shape, generator=generator, requires_grad=requires_grad)
     k = torch.randn(shape, generator=generator, requires_grad=requires_grad)
     return {
@@ -58,7 +71,7 @@ def _feature(
         "k": k,
         "metadata": {
             "layer_index": layer,
-            "num_frames": 3,
+            "num_frames": num_frames,
             "patch_grid_h": grid[0],
             "patch_grid_w": grid[1],
             "patch_size": 1,
@@ -77,13 +90,36 @@ def test_experiment_b_inherits_baseline_and_changes_attention_paths() -> None:
     assert baseline["attention_distill"]["weight"] == 0.0
     assert attention["attention_distill"]["enabled"] is True
     assert attention["attention_distill"]["weight"] == pytest.approx(0.1)
-    assert attention["teacher"]["save_attention"] is True
-    assert attention["teacher"]["raw_cache_root"] != baseline["teacher"]["raw_cache_root"]
+    assert attention["teacher"]["save_attention"] is False
+    assert attention["teacher"]["raw_cache_root"] == baseline["teacher"]["raw_cache_root"]
+    assert attention["attention_distill"]["teacher_source"] == "online"
+    assert attention["attention_distill"]["online_teacher_batch_size"] == 1
     for section in ("dataset", "student", "loss"):
         assert attention[section] == baseline[section]
     assert attention["dataloader"]["batch_size"] == baseline["dataloader"]["batch_size"]
     assert attention["dataloader"]["drop_last"] == baseline["dataloader"]["drop_last"]
     assert attention["dataloader"]["num_workers"] == 0
+
+
+def test_legacy_disabled_attention_checkpoint_remains_resumable() -> None:
+    baseline = load_config("configs/vggtoda3.yaml")
+    legacy_config = deepcopy(baseline)
+    legacy_config.pop("attention_distill")
+    checkpoint = {
+        "objective_protocol": DIRECT_TEACHER_DISTILLATION_PROTOCOL,
+        "config": legacy_config,
+    }
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.checked = False
+
+        def assert_trainability_contract(self) -> None:
+            self.checked = True
+
+    model = FakeModel()
+    _check_resume_contract(checkpoint, baseline, model)
+    assert model.checked
 
 
 def test_patch_overlap_alignment_uses_area_and_only_changes_tokens() -> None:
@@ -136,6 +172,116 @@ def test_four_layer_js_loss_is_finite_positive_and_backpropagates_only_student()
         assert feature["k"].grad is not None
         assert feature["q"].grad.abs().sum() > 0
         assert feature["k"].grad.abs().sum() > 0
+
+
+def test_online_teacher_attention_is_chunked_detached_and_backpropagates_student() -> None:
+    config = AttentionDistillationConfig.from_mapping(_config())
+    student = {
+        student_layer: _feature(
+            student_layer,
+            (1, 2),
+            2,
+            3,
+            requires_grad=True,
+            batch_size=2,
+            num_frames=16,
+        )
+        for _, student_layer in LAYERS
+    }
+
+    class FakeTeacher:
+        def __init__(self) -> None:
+            self.batch_sizes = []
+            self.requires_grad_flags = []
+
+        def forward_attention(self, images: torch.Tensor) -> dict:
+            batch_size = int(images.shape[0])
+            self.batch_sizes.append(batch_size)
+            features = {
+                teacher_layer: _feature(
+                    teacher_layer,
+                    (2, 4),
+                    3,
+                    4,
+                    requires_grad=False,
+                    batch_size=batch_size,
+                    num_frames=16,
+                )
+                for teacher_layer, _ in LAYERS
+            }
+            self.requires_grad_flags.extend(
+                value[name].requires_grad
+                for value in features.values()
+                for name in ("q", "k")
+            )
+            return features
+
+    teacher = FakeTeacher()
+    teacher_images = torch.zeros(1).expand(2, 16, 3, 1024, 1280)
+    loss, logs = _compute_online_teacher_attention_loss(
+        teacher,
+        teacher_images,
+        student,
+        CrossFrameAttentionDistillationLoss(config),
+        config,
+        torch.device("cpu"),
+        False,
+        torch.float32,
+    )
+    assert torch.isfinite(loss) and loss.item() > 0.0
+    assert teacher.batch_sizes == [1, 1]
+    assert not any(teacher.requires_grad_flags)
+    assert logs["stats/online_teacher_chunks"] == 2.0
+    loss.backward()
+    assert all(
+        feature[name].grad is not None and feature[name].grad.abs().sum() > 0
+        for feature in student.values()
+        for name in ("q", "k")
+    )
+
+
+def test_teacher_attention_forward_skips_prediction_heads_and_requires_no_grad() -> None:
+    class FakeAggregator(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.cached_layer_indices = {4, 11, 17, 23}
+            self.observed_cached_layers = []
+
+        def forward(self, images: torch.Tensor):
+            self.calls += 1
+            self.observed_cached_layers.append(set(self.cached_layer_indices))
+            return [images.mean()], 0
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.aggregator = FakeAggregator()
+
+        def forward(self, images: torch.Tensor):
+            raise AssertionError("full Teacher heads must not execute")
+
+    class FakeCapture:
+        def begin(self, images: torch.Tensor) -> None:
+            self.batch = int(images.shape[0])
+
+        def take(self) -> dict:
+            return {4: {"batch": self.batch}}
+
+    model = FakeModel()
+    teacher = VGGTOmegaTeacher(
+        model, attention_capture=FakeCapture(), attention_only=True
+    ).freeze_for_inference()
+    with pytest.raises(RuntimeError, match="cannot run prediction heads"):
+        teacher(torch.zeros(1, 2, 3, 4, 4))
+    with pytest.raises(RuntimeError, match="gradients disabled"):
+        teacher.forward_attention(torch.zeros(1, 2, 3, 4, 4))
+    with torch.no_grad():
+        output = teacher.forward_attention(torch.zeros(1, 2, 3, 4, 4))
+    assert output == {4: {"batch": 1}}
+    assert model.aggregator.calls == 1
+    assert model.aggregator.observed_cached_layers == [set()]
+    assert model.aggregator.cached_layer_indices == {4, 11, 17, 23}
 
 
 def test_attention_cache_schema_validates_shapes_dtype_and_finiteness(tmp_path) -> None:

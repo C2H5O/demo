@@ -26,6 +26,7 @@ from losses.attention_distillation_loss import (
     CrossFrameAttentionDistillationLoss,
 )
 from models.student.da3_small_student import DA3SmallStudent
+from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
 from utils.checkpoint import (
     DIRECT_TEACHER_DISTILLATION_PROTOCOL,
     atomic_torch_save,
@@ -73,7 +74,9 @@ def _build_dataset(
         rgb,
         cache_root,
         expected_base_checkpoint=str(teacher["pretrained_checkpoint"]),
-        attention_config=config.get("attention_distill"),
+        online_teacher_attention=bool(
+            config.get("attention_distill", {}).get("enabled", False)
+        ),
     )
     print(
         "same-clip cache sampling: matched={} skipped_without_cache={} root={}".format(
@@ -205,6 +208,99 @@ def _amp_settings(
     return enabled, dtype, enabled and dtype == torch.float16
 
 
+def _teacher_amp_settings(
+    teacher_config: Mapping[str, Any], device: torch.device
+) -> Tuple[bool, torch.dtype]:
+    enabled = bool(teacher_config.get("amp", True)) and device.type == "cuda"
+    requested = str(teacher_config.get("amp_dtype", "auto")).lower()
+    if requested == "auto":
+        requested = (
+            "bfloat16"
+            if device.type == "cuda" and torch.cuda.is_bf16_supported()
+            else "float16"
+        )
+    dtypes = {
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+    }
+    if requested not in dtypes:
+        raise ValueError("teacher.amp_dtype must be auto, bfloat16, or float16")
+    if enabled and requested in {"bfloat16", "bf16"} and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("teacher.amp_dtype=bfloat16 but CUDA does not support BF16")
+    return enabled, dtypes[requested]
+
+
+def _slice_attention_features(
+    features: Mapping[int, Mapping[str, Any]], start: int, stop: int
+) -> Dict[int, Dict[str, Any]]:
+    return {
+        int(layer): {
+            "q": feature["q"][start:stop],
+            "k": feature["k"][start:stop],
+            "metadata": dict(feature["metadata"]),
+        }
+        for layer, feature in features.items()
+    }
+
+
+def _compute_online_teacher_attention_loss(
+    teacher_model: VGGTOmegaTeacher,
+    teacher_images: torch.Tensor,
+    student_features: Mapping[int, Mapping[str, Any]],
+    loss_function: CrossFrameAttentionDistillationLoss,
+    config: AttentionDistillationConfig,
+    device: torch.device,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+) -> tuple[torch.Tensor, Dict[str, float]]:
+    """Run frozen Teacher Q/K and relation loss chunk-by-chunk without caching."""
+    if tuple(teacher_images.shape[1:]) != (16, 3, 1024, 1280):
+        raise RuntimeError(
+            "Online Teacher batch must have shape [B,16,3,1024,1280]; got {}"
+            .format(tuple(teacher_images.shape))
+        )
+    batch_size = int(teacher_images.shape[0])
+    if batch_size <= 0:
+        raise RuntimeError("Online Teacher batch is empty")
+    first_student = next(iter(student_features.values()))["q"]
+    if int(first_student.shape[0]) != batch_size:
+        raise RuntimeError("Online Teacher RGB and Student attention batch sizes differ")
+
+    total = first_student.new_zeros((), dtype=torch.float32)
+    logs: Dict[str, float] = {}
+    chunks = 0
+    started = time.perf_counter()
+    for start in range(0, batch_size, config.online_teacher_batch_size):
+        stop = min(batch_size, start + config.online_teacher_batch_size)
+        images = teacher_images[start:stop].to(device, non_blocking=True)
+        with torch.no_grad(), torch.autocast(
+            device_type=device.type,
+            enabled=amp_enabled,
+            dtype=amp_dtype,
+        ):
+            teacher_features = teacher_model.forward_attention(images)
+        if any(
+            feature[name].requires_grad
+            for feature in teacher_features.values()
+            for name in ("q", "k")
+        ):
+            raise RuntimeError("Online Teacher Q/K unexpectedly require gradients")
+        student_chunk = _slice_attention_features(student_features, start, stop)
+        chunk_loss, chunk_logs = loss_function(teacher_features, student_chunk)
+        weight = float(stop - start) / float(batch_size)
+        total = total + weight * chunk_loss
+        for name, value in chunk_logs.items():
+            logs[name] = logs.get(name, 0.0) + weight * float(value)
+        chunks += 1
+        del images, teacher_features, student_chunk, chunk_loss
+    logs["loss/attention"] = float(total.detach().cpu())
+    logs["stats/online_teacher_chunks"] = float(chunks)
+    logs["timing/online_teacher_attention_seconds"] = time.perf_counter() - started
+    return total, logs
+
+
 def _move_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
     moved = dict(batch)
     for key in (
@@ -217,18 +313,6 @@ def _move_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
         "absolute_frame_ids", "clip_start",
     ):
         teacher[key] = batch["teacher"][key].detach().to(device, non_blocking=True)
-    if "attention" in batch["teacher"]:
-        # Keep the very large native-grid Teacher Q/K batch in host memory.
-        # The attention loss transfers one mapped layer at a time instead of
-        # placing all four native layers on the GPU simultaneously.
-        teacher["attention"] = {
-            layer: {
-                "q": feature["q"].detach(),
-                "k": feature["k"].detach(),
-                "metadata": dict(feature["metadata"]),
-            }
-            for layer, feature in batch["teacher"]["attention"].items()
-        }
     moved["teacher"] = teacher
     return moved
 
@@ -303,17 +387,27 @@ def _check_resume_contract(
         )
     checkpoint_attention = checkpoint_config.get("attention_distill", {})
     current_attention = config.get("attention_distill", {})
+    checkpoint_attention_enabled = bool(checkpoint_attention.get("enabled", False))
+    current_attention_enabled = bool(current_attention.get("enabled", False))
     attention_fields = (
-        "enabled", "teacher_layers", "student_layers", "attention_type",
+        "enabled", "teacher_source", "teacher_output_dtype",
+        "teacher_layers", "student_layers", "attention_type",
         "spatial_alignment", "common_grid", "head_aggregation", "divergence",
         "temperature_teacher", "temperature_student", "weight", "frame_offsets",
         "query_chunk_size", "eps",
     )
-    attention_mismatches = {
-        field: (checkpoint_attention.get(field), current_attention.get(field))
-        for field in attention_fields
-        if checkpoint_attention.get(field) != current_attention.get(field)
-    }
+    attention_mismatches = {}
+    if checkpoint_attention_enabled != current_attention_enabled:
+        attention_mismatches["enabled"] = (
+            checkpoint_attention_enabled,
+            current_attention_enabled,
+        )
+    elif current_attention_enabled:
+        attention_mismatches = {
+            field: (checkpoint_attention.get(field), current_attention.get(field))
+            for field in attention_fields
+            if checkpoint_attention.get(field) != current_attention.get(field)
+        }
     if attention_mismatches:
         raise ValueError(
             "Checkpoint attention-distillation settings differ from current config: {}. "
@@ -345,9 +439,9 @@ def train_direct_teacher_distillation(
         config.get("attention_distill", {})
     )
     if attention_config.enabled:
-        if not bool(teacher.get("save_attention", False)):
+        if bool(teacher.get("save_attention", False)):
             raise ValueError(
-                "attention_distill.enabled=true requires teacher.save_attention=true"
+                "Online attention distillation requires teacher.save_attention=false"
             )
         configured_teacher_layers = tuple(
             int(value) for value in teacher.get("attention_layers", ())
@@ -381,6 +475,27 @@ def train_direct_teacher_distillation(
         attention_config=config["attention_distill"],
     )
     model.train()
+    online_teacher: Optional[VGGTOmegaTeacher] = None
+    teacher_amp_enabled = False
+    teacher_amp_dtype = torch.float16
+    if attention_config.enabled:
+        online_teacher_config = dict(teacher)
+        online_teacher_config.update(
+            {
+                "save_attention": True,
+                "attention_layers": list(attention_config.teacher_layers),
+                "attention_cache_dtype": attention_config.teacher_output_dtype,
+                "attention_output_device": "source",
+                "attention_only": True,
+            }
+        )
+        online_teacher = VGGTOmegaTeacher.from_config(
+            online_teacher_config, device=device
+        )
+        online_teacher.eval()
+        if any(parameter.requires_grad for parameter in online_teacher.parameters()):
+            raise RuntimeError("Online VGGT-Omega Teacher is not fully frozen")
+        teacher_amp_enabled, teacher_amp_dtype = _teacher_amp_settings(teacher, device)
     loss_function = DirectTeacherDistillationLoss(config["loss"]).to(device)
     attention_loss_function = (
         CrossFrameAttentionDistillationLoss(attention_config).to(device)
@@ -448,13 +563,16 @@ def train_direct_teacher_distillation(
         "cache_sampling_stride=8 trainable={:,} backbone_trainable={:,} "
         "backbone_lora_trainable={:,} lora_modules={} depth_trainable={:,} "
         "camera_encoder_trainable={:,} camera_decoder_trainable={:,} "
-        "ray_trainable={:,} attention_distill={} attention_weight={}".format(
+        "ray_trainable={:,} attention_distill={} attention_source={} "
+        "online_teacher_batch={} attention_weight={}".format(
             len(dataset), config["dataloader"]["batch_size"], stats["trainable"],
             stats["backbone_trainable"], stats["backbone_lora_trainable"],
             stats["lora_modules"], stats["depth_head_trainable"],
             stats["camera_encoder_trainable"], stats["camera_decoder_trainable"],
             stats["ray_trainable"],
             attention_config.enabled,
+            attention_config.teacher_source,
+            attention_config.online_teacher_batch_size,
             attention_config.weight,
         )
     )
@@ -531,8 +649,17 @@ def train_direct_teacher_distillation(
                 baseline_loss, last_logs = loss_function(prediction, batch)
                 attention_loss = baseline_loss.new_zeros(())
                 if attention_loss_function is not None:
-                    attention_loss, attention_logs = attention_loss_function(
-                        batch["teacher"]["attention"], prediction["attention"]
+                    if online_teacher is None or "teacher_images" not in batch:
+                        raise RuntimeError("Online Teacher attention inputs are unavailable")
+                    attention_loss, attention_logs = _compute_online_teacher_attention_loss(
+                        online_teacher,
+                        batch["teacher_images"],
+                        prediction["attention"],
+                        attention_loss_function,
+                        attention_config,
+                        device,
+                        teacher_amp_enabled,
+                        teacher_amp_dtype,
                     )
                     last_logs.update(attention_logs)
                 if dry_run and attention_loss_function is not None:

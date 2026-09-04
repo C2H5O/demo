@@ -37,14 +37,18 @@ class VGGTOmegaAttentionCapture:
         self,
         model: nn.Module,
         layer_indices: Iterable[int],
-        cache_dtype: torch.dtype = torch.float16,
+        output_dtype: torch.dtype = torch.float16,
+        output_device: str = "cpu",
     ) -> None:
         aggregator = getattr(model, "aggregator", None)
         if aggregator is None:
             raise RuntimeError("VGGT-Omega model has no aggregator")
         self.aggregator = aggregator
         self.layer_indices = tuple(int(value) for value in layer_indices)
-        self.cache_dtype = cache_dtype
+        self.output_dtype = output_dtype
+        self.output_device = str(output_device)
+        if self.output_device not in {"cpu", "source"}:
+            raise ValueError("Teacher attention output_device must be cpu or source")
         self.patch_token_start = int(getattr(aggregator, "patch_token_start"))
         self.patch_size = int(getattr(aggregator, "patch_size"))
         attention_types = list(getattr(aggregator, "inter_frame_attention_types"))
@@ -113,9 +117,15 @@ class VGGTOmegaAttentionCapture:
                 )
                 value = value[:, :, :, self.patch_token_start :, :]
                 value = value.permute(0, 2, 1, 3, 4).contiguous()
-                # Teacher features are frozen and are transferred immediately so
-                # four native-grid layers do not remain resident on the GPU.
-                return value.detach().to(dtype=self.cache_dtype, device="cpu")
+                value = value.detach().to(dtype=self.output_dtype)
+                # Offline cache generation stages Q/K on CPU. Online training
+                # keeps each small Teacher chunk on its source GPU and consumes
+                # it immediately, avoiding a GPU->CPU->GPU round trip.
+                return (
+                    value.to(device="cpu")
+                    if self.output_device == "cpu"
+                    else value
+                )
 
             self._features[layer] = {
                 "q": patch_only(q),

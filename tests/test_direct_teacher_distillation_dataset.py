@@ -137,6 +137,24 @@ def test_same_clip_dataset_loads_all_16_matching_teacher_frames(tmp_path) -> Non
     assert sample["teacher"]["cache_path"] == str(path)
 
 
+def test_online_attention_loads_native_teacher_rgb_but_not_attention_cache(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 16)])
+    _write_cache(tmp_path, rgb, 0)
+    dataset = DirectTeacherDistillationDataset(
+        rgb, tmp_path, BASE_CHECKPOINT, online_teacher_attention=True
+    )
+
+    class FakeTeacherRGB:
+        def load_images(self, index):
+            del index
+            return torch.zeros(1).expand(16, 3, 1024, 1280), ["teacher.png"] * 16
+
+    dataset.teacher_rgb_dataset = FakeTeacherRGB()
+    sample = dataset[0]
+    assert sample["teacher_images"].shape == (16, 3, 1024, 1280)
+    assert "attention" not in sample["teacher"]
+
+
 def test_dataset_filters_legal_rgb_clips_without_matching_cache(tmp_path) -> None:
     rgb = _FakeRGBDataset([_sequence("sequence_a", 40)])
     _write_cache(tmp_path, rgb, 2)
