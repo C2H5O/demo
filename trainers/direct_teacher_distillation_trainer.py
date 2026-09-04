@@ -7,7 +7,7 @@ import math
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -21,6 +21,10 @@ from datasets.direct_teacher_distillation_dataset import (
     build_direct_teacher_distillation_dataloader,
 )
 from losses.direct_teacher_distillation_loss import DirectTeacherDistillationLoss
+from losses.attention_distillation_loss import (
+    AttentionDistillationConfig,
+    CrossFrameAttentionDistillationLoss,
+)
 from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import (
     DIRECT_TEACHER_DISTILLATION_PROTOCOL,
@@ -69,6 +73,7 @@ def _build_dataset(
         rgb,
         cache_root,
         expected_base_checkpoint=str(teacher["pretrained_checkpoint"]),
+        attention_config=config.get("attention_distill"),
     )
     print(
         "same-clip cache sampling: matched={} skipped_without_cache={} root={}".format(
@@ -212,14 +217,31 @@ def _move_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
         "absolute_frame_ids", "clip_start",
     ):
         teacher[key] = batch["teacher"][key].detach().to(device, non_blocking=True)
+    if "attention" in batch["teacher"]:
+        # Keep the very large native-grid Teacher Q/K batch in host memory.
+        # The attention loss transfers one mapped layer at a time instead of
+        # placing all four native layers on the GPU simultaneously.
+        teacher["attention"] = {
+            layer: {
+                "q": feature["q"].detach(),
+                "k": feature["k"].detach(),
+                "metadata": dict(feature["metadata"]),
+            }
+            for layer, feature in batch["teacher"]["attention"].items()
+        }
     moved["teacher"] = teacher
     return moved
 
 
-def _prediction_is_finite(prediction: Dict[str, torch.Tensor]) -> bool:
-    return bool(prediction) and all(
-        bool(torch.isfinite(value).all()) for value in prediction.values()
-    )
+def _prediction_is_finite(prediction: Dict[str, Any]) -> bool:
+    def finite(value: Any) -> bool:
+        if isinstance(value, torch.Tensor):
+            return bool(torch.isfinite(value).all())
+        if isinstance(value, Mapping):
+            return all(finite(item) for item in value.values())
+        return True
+
+    return bool(prediction) and finite(prediction)
 
 
 def _forward_with_fp32_retry(
@@ -279,6 +301,24 @@ def _check_resume_contract(
             "Checkpoint DA3/LoRA trainability does not match current config: {}. "
             "Start a new run.".format(mismatches)
         )
+    checkpoint_attention = checkpoint_config.get("attention_distill", {})
+    current_attention = config.get("attention_distill", {})
+    attention_fields = (
+        "enabled", "teacher_layers", "student_layers", "attention_type",
+        "spatial_alignment", "common_grid", "head_aggregation", "divergence",
+        "temperature_teacher", "temperature_student", "weight", "frame_offsets",
+        "query_chunk_size", "eps",
+    )
+    attention_mismatches = {
+        field: (checkpoint_attention.get(field), current_attention.get(field))
+        for field in attention_fields
+        if checkpoint_attention.get(field) != current_attention.get(field)
+    }
+    if attention_mismatches:
+        raise ValueError(
+            "Checkpoint attention-distillation settings differ from current config: {}. "
+            "Start a new run.".format(attention_mismatches)
+        )
     model.assert_trainability_contract()
 
 
@@ -301,6 +341,21 @@ def train_direct_teacher_distillation(
         raise ValueError("teacher.cache_protocol must remain crossclip_local_v1")
     if str(teacher.get("variant")) != "base" or not bool(teacher.get("frozen", True)):
         raise ValueError("Direct distillation requires the frozen base teacher cache")
+    attention_config = AttentionDistillationConfig.from_mapping(
+        config.get("attention_distill", {})
+    )
+    if attention_config.enabled:
+        if not bool(teacher.get("save_attention", False)):
+            raise ValueError(
+                "attention_distill.enabled=true requires teacher.save_attention=true"
+            )
+        configured_teacher_layers = tuple(
+            int(value) for value in teacher.get("attention_layers", ())
+        )
+        if configured_teacher_layers != attention_config.teacher_layers:
+            raise ValueError(
+                "teacher.attention_layers must match attention_distill.teacher_layers"
+            )
     dataset_config = config.get("dataset", {})
     if (
         int(dataset_config.get("clip_length", -1)),
@@ -320,9 +375,19 @@ def train_direct_teacher_distillation(
     loader = build_direct_teacher_distillation_dataloader(
         dataset, config["dataloader"], int(config.get("seed", 42)), shuffle=True
     )
-    model = DA3SmallStudent(config["student"], device=device)
+    model = DA3SmallStudent(
+        config["student"],
+        device=device,
+        attention_config=config["attention_distill"],
+    )
     model.train()
     loss_function = DirectTeacherDistillationLoss(config["loss"]).to(device)
+    attention_loss_function = (
+        CrossFrameAttentionDistillationLoss(attention_config).to(device)
+        if attention_config.enabled
+        else None
+    )
+    model.retain_attention_gradients(dry_run and attention_config.enabled)
     training_config = config["training"]
     timing_config = dict(training_config.get("timing", {}))
     timing_enabled = bool(timing_config.get("enabled", False))
@@ -383,12 +448,14 @@ def train_direct_teacher_distillation(
         "cache_sampling_stride=8 trainable={:,} backbone_trainable={:,} "
         "backbone_lora_trainable={:,} lora_modules={} depth_trainable={:,} "
         "camera_encoder_trainable={:,} camera_decoder_trainable={:,} "
-        "ray_trainable={:,}".format(
+        "ray_trainable={:,} attention_distill={} attention_weight={}".format(
             len(dataset), config["dataloader"]["batch_size"], stats["trainable"],
             stats["backbone_trainable"], stats["backbone_lora_trainable"],
             stats["lora_modules"], stats["depth_head_trainable"],
             stats["camera_encoder_trainable"], stats["camera_decoder_trainable"],
             stats["ray_trainable"],
+            attention_config.enabled,
+            attention_config.weight,
         )
     )
     optimizer.zero_grad(set_to_none=True)
@@ -461,7 +528,49 @@ def train_direct_teacher_distillation(
                 )
             timing_events["loss_start"] = _record_cuda_event(timing_enabled)
             with torch.cuda.amp.autocast(enabled=amp_enabled and not retried, dtype=amp_dtype):
-                loss, last_logs = loss_function(prediction, batch)
+                baseline_loss, last_logs = loss_function(prediction, batch)
+                attention_loss = baseline_loss.new_zeros(())
+                if attention_loss_function is not None:
+                    attention_loss, attention_logs = attention_loss_function(
+                        batch["teacher"]["attention"], prediction["attention"]
+                    )
+                    last_logs.update(attention_logs)
+                if dry_run and attention_loss_function is not None:
+                    attention_parameters = [
+                        (name, parameter)
+                        for name, parameter in model.backbone.named_parameters()
+                        if parameter.requires_grad
+                    ]
+                    attention_only_gradients = torch.autograd.grad(
+                        attention_loss,
+                        [parameter for _, parameter in attention_parameters],
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    attention_only_nonzero = [
+                        name
+                        for (name, _), gradient in zip(
+                            attention_parameters, attention_only_gradients
+                        )
+                        if gradient is not None
+                        and bool(torch.isfinite(gradient).all())
+                        and bool((gradient.abs() > 0).any())
+                    ]
+                    if not attention_only_nonzero:
+                        raise RuntimeError(
+                            "L_attention did not produce a finite non-zero gradient on any "
+                            "trainable DA3 backbone parameter"
+                        )
+                    last_logs["stats/attention_only_parameter_grad_tensors"] = float(
+                        len(attention_only_nonzero)
+                    )
+                loss = baseline_loss + attention_config.weight * attention_loss
+                last_logs["loss/baseline"] = float(baseline_loss.detach().cpu())
+                last_logs["loss/attention"] = float(attention_loss.detach().cpu())
+                last_logs["loss/attention_weighted"] = float(
+                    (attention_config.weight * attention_loss).detach().cpu()
+                )
+                last_logs["loss/total"] = float(loss.detach().cpu())
             timing_events["loss_end"] = _record_cuda_event(timing_enabled)
             last_logs["stats/amp_fp32_retry"] = float(retried)
             if not torch.isfinite(loss):
@@ -498,7 +607,36 @@ def train_direct_teacher_distillation(
                     )
                 if group_gradients.get("camera_encoder", False):
                     raise RuntimeError("Inactive camera encoder unexpectedly received gradients")
-                shapes = {key: list(value.shape) for key, value in prediction.items()}
+                if attention_config.enabled:
+                    for layer in attention_config.student_layers:
+                        feature = prediction["attention"][layer]
+                        for name in ("q", "k"):
+                            gradient = feature[name].grad
+                            if gradient is None or not bool(torch.isfinite(gradient).all()):
+                                raise RuntimeError(
+                                    "Student attention {} at layer {} did not receive a finite gradient"
+                                    .format(name.upper(), layer)
+                                )
+                            if not bool((gradient.abs() > 0).any()):
+                                raise RuntimeError(
+                                    "Student attention {} at layer {} received only zero gradient"
+                                    .format(name.upper(), layer)
+                                )
+                shapes = {
+                    key: (
+                        {
+                            layer: {
+                                name: list(value.shape)
+                                for name, value in feature.items()
+                                if isinstance(value, torch.Tensor)
+                            }
+                            for layer, feature in value.items()
+                        }
+                        if key == "attention"
+                        else list(value.shape)
+                    )
+                    for key, value in prediction.items()
+                }
                 print(
                     "VGGT-DA3 direct dry run passed: shapes={} gradients={} "
                     "ray_forward_count={}".format(

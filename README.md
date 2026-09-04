@@ -34,6 +34,102 @@ frozen. CameraEnc is retained for strict checkpoint compatibility but excluded
 from the optimizer because the real forward uses `cam_token=None`; CameraDec
 executes and is supervised by the camera loss.
 
+## Experiment B: cross-frame attention distillation
+
+Experiment B inherits every Experiment A setting from `configs/vggtoda3.yaml`
+and adds only frozen-Teacher attention features and their loss.  The executable
+config is `configs/vggtoda3_attention_distill.yaml`.
+
+The exact attention paths in the pinned architectures are:
+
+- VGGT-Omega aggregator blocks `4, 11, 17, 23`: all four are inter-frame
+  `global` blocks (the register-only blocks are `2, 6, 9, 14, 20`).  Q/K are
+  captured after `q_norm`/`k_norm`; this global path receives no RoPE.  Camera
+  and register tokens are removed, leaving FP16 tensors with shape
+  `[16, 16, 5120, 64]` per Q or K and layer (64x80 patch grid).
+- DA3-Small DINOv2 blocks `5, 7, 9, 11`: `alt_start=4` makes these the four
+  odd-indexed global blocks.  Q/K are captured after Q/K norm and the actual
+  global RoPE, the reference-view permutation is restored, and the camera/CLS
+  token is removed.  The runtime shape is `[B, 16, 6, 1280, 64]` per Q or K
+  and layer (32x40 patch grid).
+
+Teacher patch Q/K are projected from 64x80 to the Student 32x40 grid using
+normalized patch-overlap area on the common resized image extent.  No special
+tokens are aligned and no NxN matrix is cached.  For every valid directed
+adjacent-frame pair (`t -> t-1`, `t -> t+1`), the loss computes each head's
+`softmax(QK^T / sqrt(d) / temperature)`, averages probabilities over heads,
+and compares Teacher and Student with Jensen-Shannon divergence.  Query tokens
+are chunked and checkpoint-recomputed during backward rather than materializing
+the complete clip relation matrix.
+
+The implemented objective is:
+
+```text
+L_total = L_baseline + 0.1 * mean(L_4_5, L_11_7, L_17_9, L_23_11)
+```
+
+The uncompressed native Teacher Q/K payload is 1.25 GiB per clip in FP16
+(4 layers x Q/K x 16 frames x 5120 tokens x 16 heads x 64 dimensions).  The
+attention cache therefore uses a separate directory and is never written over
+the Experiment A cache.
+Experiment B keeps the same scientific batch size (`16`) but sets DataLoader
+workers/prefetch to zero so multiple 20 GiB Q/K batches are not queued in host
+memory.  Collating one such batch can transiently approach 40 GiB of host
+memory because the per-sample tensors and the stacked batch coexist.  One
+Teacher layer is transferred to the GPU at a time (5 GiB of Q+K at batch 16),
+while all captured Student layers and their autograd graph also remain live;
+the native-grid dry run therefore requires a high-memory training GPU and was
+not run on the repository-validation machine's 8 GiB GPU.
+
+The NPZ attention extension is flat to remain compatible with the existing
+cache format:
+
+```text
+attention_schema_version = cross_frame_qk_v1
+attention_num_frames = 16
+attention_patch_grid_h = 64
+attention_patch_grid_w = 80
+attention_patch_size = 16
+attention_image_height = 1024
+attention_image_width = 1280
+attention_dtype = float16
+attention_qk_stage = post_qk_norm_no_rope
+attention_layer_{4,11,17,23}_{q,k} = [16,16,5120,64]
+attention_layer_{4,11,17,23}_{layer_index,num_heads,head_dim}
+```
+
+Generate and fully audit the independent Experiment B cache, then run the
+one-batch gradient sanity check or training:
+
+```bash
+python generate_crossclip_teacher_cache.py \
+  --config configs/vggtoda3_attention_distill.yaml \
+  --split train
+
+python audit_vggtoda3.py \
+  --config configs/vggtoda3_attention_distill.yaml \
+  --split train \
+  --limit 0
+
+python train_direct_teacher_distillation.py \
+  --config configs/vggtoda3_attention_distill.yaml \
+  --dry-run
+
+python train_direct_teacher_distillation.py \
+  --config configs/vggtoda3_attention_distill.yaml
+```
+
+The dry run additionally requires finite, non-zero gradients on every captured
+Student Q and K and directly checks that `L_attention` alone reaches at least
+one trainable DA3 backbone parameter.  A cache without all four Teacher Q/K
+pairs fails immediately with an instruction to regenerate it.  Experiment A
+remains unchanged and is reproduced with:
+
+```bash
+python train_direct_teacher_distillation.py \
+  --config configs/vggtoda3.yaml
+```
+
 ## Required assets
 
 ```text

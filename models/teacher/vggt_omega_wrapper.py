@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from models.attention_capture import VGGTOmegaAttentionCapture
+
 
 def _import_vggt_omega_class() -> type:
     try:
@@ -32,9 +34,14 @@ def _checkpoint_state(path: Path) -> Dict[str, torch.Tensor]:
 class VGGTOmegaTeacher(nn.Module):
     """Frozen pretrained teacher used only for offline cache generation."""
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        attention_capture: Optional[VGGTOmegaAttentionCapture] = None,
+    ) -> None:
         super().__init__()
         self.model = model
+        self.attention_capture = attention_capture
 
     @classmethod
     def from_config(
@@ -55,11 +62,29 @@ class VGGTOmegaTeacher(nn.Module):
             raise ValueError("teacher.pretrained_checkpoint must be configured")
         model = _import_vggt_omega_class()()
         model.load_state_dict(_checkpoint_state(Path(checkpoint_value)), strict=True)
-        wrapper = cls(model).freeze_for_inference()
+        save_attention = bool(config.get("save_attention", False))
+        attention_capture = None
+        if save_attention:
+            dtype_name = str(config.get("attention_cache_dtype", "float16")).lower()
+            dtypes = {"float16": torch.float16, "fp16": torch.float16, "float32": torch.float32}
+            if dtype_name not in dtypes:
+                raise ValueError("teacher.attention_cache_dtype must be float16 or float32")
+            layers = config.get("attention_layers")
+            if layers is None:
+                raise ValueError("teacher.attention_layers must be configured when save_attention=true")
+            attention_capture = VGGTOmegaAttentionCapture(
+                model, layers, cache_dtype=dtypes[dtype_name]
+            )
+        wrapper = cls(model, attention_capture=attention_capture).freeze_for_inference()
         return wrapper.to(device) if device is not None else wrapper
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
-        return self.model(images)
+        if self.attention_capture is None:
+            return self.model(images)
+        self.attention_capture.begin(images)
+        output = dict(self.model(images))
+        output["attention"] = self.attention_capture.take()
+        return output
 
     def freeze_for_inference(self) -> "VGGTOmegaTeacher":
         self.eval()

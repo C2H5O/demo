@@ -11,8 +11,10 @@ from typing import Any
 import numpy as np
 
 from datasets.crossclip_teacher_dataset import (
+    attention_cache_key,
     crossclip_teacher_cache_path,
     make_teacher_cache_rgb_dataset,
+    validate_attention_teacher_cache,
     validate_crossclip_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
@@ -73,6 +75,10 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
     count = len(dataset) if limit is None or limit == 0 else min(limit, len(dataset))
     print("split={} sequences={} cache_stride8_samples={} auditing={}".format(split, len(dataset.sequences), len(dataset), count))
     expected_shape = (448, 560)
+    attention_enabled = bool(config.get("attention_distill", {}).get("enabled", False))
+    attention_layers = tuple(
+        int(value) for value in config.get("attention_distill", {}).get("teacher_layers", ())
+    )
     for index in range(count):
         metadata = clip_metadata(dataset, index)
         start = int(metadata["clip_start"])
@@ -103,6 +109,22 @@ def audit(config_path: Path, split: str, limit: int | None, dataset_only: bool) 
                     cache, metadata, expected_shape,
                     str(teacher["pretrained_checkpoint"]), "raw",
                 )
+                if attention_enabled:
+                    validate_attention_teacher_cache(cache, attention_layers)
+                    if index == 0:
+                        print(
+                            "attention sample {}: {}".format(
+                                cache_path,
+                                {
+                                    "layer_{}".format(layer): {
+                                        "q": list(cache[attention_cache_key(layer, "q")].shape),
+                                        "k": list(cache[attention_cache_key(layer, "k")].shape),
+                                        "dtype": str(cache[attention_cache_key(layer, "q")].dtype),
+                                    }
+                                    for layer in attention_layers
+                                },
+                            )
+                        )
                 native = (
                     (int(cache["teacher_input_height"]), int(cache["teacher_input_width"]))
                     if "teacher_input_height" in cache else "not-recorded-v1"

@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.student.lora import LoRALinear, inject_da3_mlp_lora
+from models.attention_capture import DA3AttentionCapture
 from utils.da3_geometry import depth_intrinsics_to_local_points, local_to_global_points
 
 
@@ -168,6 +169,7 @@ class DA3SmallStudent(nn.Module):
         config: Mapping[str, Any] | DA3SmallConfig,
         device: Optional[torch.device] = None,
         network: Optional[nn.Module] = None,
+        attention_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.config = DA3SmallConfig(**dict(config)) if isinstance(config, Mapping) else config
@@ -204,6 +206,13 @@ class DA3SmallStudent(nn.Module):
         self._ray_hooks = []
         self._timing_enabled = False
         self._last_forward_timing_events: Dict[str, torch.cuda.Event] = {}
+        self.attention_capture: Optional[DA3AttentionCapture] = None
+        if attention_config is not None and bool(attention_config.get("enabled", False)):
+            self.attention_capture = DA3AttentionCapture(
+                self.backbone,
+                attention_config.get("student_layers", ()),
+                ref_view_strategy=self.config.ref_view_strategy,
+            )
         self._install_ray_execution_audit()
         self._configure_trainability()
         self.to(device or torch.device("cpu"))
@@ -321,6 +330,10 @@ class DA3SmallStudent(nn.Module):
     def enable_cuda_timing(self, enabled: bool) -> None:
         self._timing_enabled = bool(enabled)
 
+    def retain_attention_gradients(self, enabled: bool) -> None:
+        if self.attention_capture is not None:
+            self.attention_capture.retain_gradients(enabled)
+
     def _record_cuda_timing(self, name: str, device: torch.device) -> None:
         if not self._timing_enabled or device.type != "cuda":
             return
@@ -409,6 +422,8 @@ class DA3SmallStudent(nn.Module):
         normalized = (images - self.imagenet_mean) / self.imagenet_std
         self._ray_forward_count = 0
         self._record_cuda_timing("backbone_start", images.device)
+        if self.attention_capture is not None:
+            self.attention_capture.begin(images)
         feats, _ = self.backbone(
             normalized,
             cam_token=None,
@@ -463,6 +478,8 @@ class DA3SmallStudent(nn.Module):
         }
         if xyz_global is not None:
             output["xyz_global"] = xyz_global
+        if self.attention_capture is not None:
+            output["attention"] = self.attention_capture.take()
         return output
 
 

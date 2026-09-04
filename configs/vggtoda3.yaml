@@ -44,6 +44,9 @@ teacher:
   pretrained_checkpoint: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
   raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560
   cache_dtype: float32
+  save_attention: false
+  attention_layers: [4, 11, 17, 23]
+  attention_cache_dtype: float16
   inference_batch_size: 4
   amp: true
   amp_dtype: bfloat16
@@ -99,6 +102,22 @@ loss:
   lambda_smooth: 0.1
   eps: 1.0e-6
   use_confidence_weight: true
+
+attention_distill:
+  enabled: false
+  teacher_layers: [4, 11, 17, 23]
+  student_layers: [5, 7, 9, 11]
+  attention_type: cross_frame_global
+  spatial_alignment: patch_overlap
+  common_grid: student
+  head_aggregation: mean
+  divergence: js
+  temperature_teacher: 1.0
+  temperature_student: 1.0
+  weight: 0.0
+  frame_offsets: [-1, 1]
+  query_chunk_size: 128
+  eps: 1.0e-6
 
 dataloader:
   batch_size: 16

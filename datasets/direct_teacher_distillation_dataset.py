@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
 import torch
@@ -11,7 +11,10 @@ from torch.utils.data import DataLoader, Dataset
 
 from datasets.crossclip_teacher_dataset import (
     WORLD_TO_CAMERA_POSE_CONVENTION,
+    attention_cache_key,
+    attention_cache_required_keys,
     crossclip_teacher_cache_path,
+    validate_attention_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
 from datasets.scared_dataset import seed_worker
@@ -35,6 +38,7 @@ def _load_same_clip_teacher(
     student_absolute_ids: torch.Tensor,
     spatial_shape: tuple[int, int],
     expected_base_checkpoint: str,
+    attention_config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Load only fields consumed by direct distillation and fail on any mismatch."""
     if not path.is_file():
@@ -114,6 +118,48 @@ def _load_same_clip_teacher(
             "sequence_id": str(cache["sequence_id"].item()),
             "cache_path": str(path),
         }
+        if attention_config is not None and bool(attention_config.get("enabled", False)):
+            layers = tuple(int(value) for value in attention_config["teacher_layers"])
+            # Validate metadata/shapes first, then check each already-loaded array
+            # below so a compressed 1.25 GiB cache is not decompressed twice.
+            validate_attention_teacher_cache(cache, layers, check_finite=False)
+            grid_h = int(cache["attention_patch_grid_h"].item())
+            grid_w = int(cache["attention_patch_grid_w"].item())
+            frames = int(cache["attention_num_frames"].item())
+            patch_size = int(cache["attention_patch_size"].item())
+            attention_image_height = int(cache["attention_image_height"].item())
+            attention_image_width = int(cache["attention_image_width"].item())
+            attention: Dict[int, Dict[str, Any]] = {}
+            for layer in layers:
+                q_array = cache[attention_cache_key(layer, "q")]
+                k_array = cache[attention_cache_key(layer, "k")]
+                if not np.isfinite(q_array).all() or not np.isfinite(k_array).all():
+                    raise RuntimeError(
+                        "Teacher attention layer {} contains NaN or Inf".format(layer)
+                    )
+                q = tensor_from_numpy_buffer(q_array)
+                k = tensor_from_numpy_buffer(k_array)
+                attention[layer] = {
+                    "q": q.detach(),
+                    "k": k.detach(),
+                    "metadata": {
+                        "layer_index": layer,
+                        "num_frames": frames,
+                        "patch_grid_h": grid_h,
+                        "patch_grid_w": grid_w,
+                        "patch_size": patch_size,
+                        "image_height": attention_image_height,
+                        "image_width": attention_image_width,
+                        "num_heads": int(
+                            cache[attention_cache_key(layer, "num_heads")].item()
+                        ),
+                        "head_dim": int(
+                            cache[attention_cache_key(layer, "head_dim")].item()
+                        ),
+                        "qk_stage": str(cache["attention_qk_stage"].item()),
+                    },
+                }
+            teacher["attention"] = attention
     return teacher
 
 
@@ -125,10 +171,12 @@ class DirectTeacherDistillationDataset(Dataset):
         rgb_dataset: Any,
         cache_root: Union[str, Path],
         expected_base_checkpoint: str,
+        attention_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.rgb_dataset = rgb_dataset
         self.cache_root = Path(cache_root)
         self.expected_base_checkpoint = expected_base_checkpoint
+        self.attention_config = dict(attention_config or {})
         if int(rgb_dataset.clip_length) != 16 or int(rgb_dataset.sample_stride) != 1:
             raise ValueError("Direct distillation requires consecutive 16-frame RGB clips")
         if int(rgb_dataset.window_stride) != 8:
@@ -148,6 +196,17 @@ class DirectTeacherDistillationDataset(Dataset):
                 )
             )
         self.skipped_without_cache = len(rgb_dataset) - len(self.rgb_indices)
+        if bool(self.attention_config.get("enabled", False)):
+            layers = tuple(int(value) for value in self.attention_config["teacher_layers"])
+            required = attention_cache_required_keys(layers)
+            for path in self.cache_paths:
+                with np.load(str(path), allow_pickle=False) as cache:
+                    if not required.issubset(cache.files):
+                        raise RuntimeError(
+                            "Attention distillation is enabled, but teacher cache does not "
+                            "contain attention features. Regenerate teacher cache with "
+                            "attention caching enabled. Cache: {}".format(path)
+                        )
 
     def __len__(self) -> int:
         return len(self.rgb_indices)
@@ -169,6 +228,7 @@ class DirectTeacherDistillationDataset(Dataset):
             absolute_ids,
             tuple(int(value) for value in images.shape[-2:]),
             self.expected_base_checkpoint,
+            self.attention_config,
         )
         highlight = sample.get(
             "highlight_masks",
@@ -197,6 +257,22 @@ def direct_teacher_distillation_collate(
     }
     teacher["sequence_id"] = [sample["teacher"]["sequence_id"] for sample in samples]
     teacher["cache_path"] = [sample["teacher"]["cache_path"] for sample in samples]
+    if "attention" in samples[0]["teacher"]:
+        layer_sets = [set(sample["teacher"]["attention"]) for sample in samples]
+        if any(layers != layer_sets[0] for layers in layer_sets[1:]):
+            raise RuntimeError("Teacher attention layers differ within a batch")
+        teacher["attention"] = {
+            layer: {
+                "q": torch.stack(
+                    [sample["teacher"]["attention"][layer]["q"] for sample in samples]
+                ),
+                "k": torch.stack(
+                    [sample["teacher"]["attention"][layer]["k"] for sample in samples]
+                ),
+                "metadata": dict(samples[0]["teacher"]["attention"][layer]["metadata"]),
+            }
+            for layer in sorted(layer_sets[0])
+        }
     return {
         "images": torch.stack([sample["images"] for sample in samples]),
         "clean_images": torch.stack([sample["clean_images"] for sample in samples]),

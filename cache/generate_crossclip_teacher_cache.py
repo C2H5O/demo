@@ -20,13 +20,17 @@ import torch.nn.functional as F
 from torch.utils.data import Subset
 
 from datasets.crossclip_teacher_dataset import (
+    ATTENTION_CACHE_SCHEMA_VERSION,
+    CROSSCLIP_ATTENTION_CACHE_FORMAT_VERSION,
     CROSSCLIP_CACHE_FORMAT_VERSION,
     CROSSCLIP_CACHE_PROTOCOL,
     LOCAL_CAMERA_COORDINATE_SYSTEM,
     WORLD_TO_CAMERA_POSE_CONVENTION,
+    attention_cache_key,
     crossclip_teacher_cache_path,
     make_teacher_cache_rgb_dataset,
     validate_crossclip_teacher_cache,
+    validate_attention_teacher_cache,
 )
 from datasets.scared_clip_dataset import clip_metadata
 from datasets.scared_dataset import build_scared_dataloader
@@ -38,6 +42,17 @@ from utils.config import load_config
 
 TEACHER_SHAPE = (1024, 1280)
 SUPERVISION_SHAPE = (448, 560)
+
+
+def attention_cache_bytes_per_clip(
+    layers: int,
+    frames: int,
+    tokens: int,
+    heads: int,
+    head_dim: int,
+    bytes_per_element: int,
+) -> int:
+    return layers * 2 * frames * tokens * heads * head_dim * bytes_per_element
 
 
 def canonicalize_teacher_outputs(adapted: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -201,6 +216,13 @@ def generate_crossclip_teacher_cache(
         raise ValueError("Cross-clip teacher must be frozen")
     if str(teacher_config.get("cache_dtype", "float32")).lower() != "float32":
         raise ValueError("Cross-clip teacher caches require FP32 storage")
+    save_attention = bool(teacher_config.get("save_attention", False))
+    attention_layers = tuple(
+        int(value) for value in teacher_config.get("attention_layers", (4, 11, 17, 23))
+    )
+    attention_dtype = str(teacher_config.get("attention_cache_dtype", "float16")).lower()
+    if save_attention and attention_dtype not in {"float16", "fp16", "float32"}:
+        raise ValueError("teacher.attention_cache_dtype must be float16 or float32")
     if int(dataset_config.get("clip_length", 16)) != 16:
         raise ValueError("dataset.clip_length must be 16")
     raw_root = (
@@ -250,6 +272,17 @@ def generate_crossclip_teacher_cache(
             compressed,
         )
     )
+    if save_attention:
+        bytes_per_element = 2 if attention_dtype in {"float16", "fp16"} else 4
+        estimated = attention_cache_bytes_per_clip(
+            len(attention_layers), 16, 64 * 80, 16, 64, bytes_per_element
+        )
+        print(
+            "Teacher attention cache: layers={} Q/K grid=64x80 heads=16 head_dim=64 "
+            "dtype={} uncompressed_per_clip={:.3f} GiB".format(
+                list(attention_layers), attention_dtype, estimated / float(1024 ** 3)
+            )
+        )
 
     first_index = _resolve_start_index(
         dataset,
@@ -292,6 +325,10 @@ def generate_crossclip_teacher_cache(
                     base_checkpoint,
                     "raw",
                 )
+                if save_attention:
+                    validate_attention_teacher_cache(
+                        existing, attention_layers, check_finite=True
+                    )
             skipped += 1
             continue
         pending_items.append((index, metadata, path))
@@ -318,6 +355,7 @@ def generate_crossclip_teacher_cache(
     )
 
     written = 0
+    printed_attention_sample = False
     cursor = 0
     outstanding: List[Future[None]] = []
     max_outstanding = max(write_workers * 2, inference_batch_size)
@@ -470,6 +508,24 @@ def generate_crossclip_teacher_cache(
                     "valid_depth_max": float(valid_depth.max()),
                     "valid_confidence_mean": float(valid_confidence.mean()),
                 }
+                if save_attention:
+                    captured = raw.get("attention")
+                    if not isinstance(captured, dict):
+                        raise RuntimeError("VGGT-Omega forward did not return attention Q/K")
+                    metadata_record["attention"] = {
+                        "schema_version": ATTENTION_CACHE_SCHEMA_VERSION,
+                        "layers": list(attention_layers),
+                        "dtype": (
+                            "float16" if attention_dtype in {"float16", "fp16"} else "float32"
+                        ),
+                        "num_frames": int(captured[attention_layers[0]]["metadata"]["num_frames"]),
+                        "patch_grid_h": int(captured[attention_layers[0]]["metadata"]["patch_grid_h"]),
+                        "patch_grid_w": int(captured[attention_layers[0]]["metadata"]["patch_grid_w"]),
+                        "patch_size": int(captured[attention_layers[0]]["metadata"]["patch_size"]),
+                        "image_height": int(captured[attention_layers[0]]["metadata"]["image_height"]),
+                        "image_width": int(captured[attention_layers[0]]["metadata"]["image_width"]),
+                        "qk_stage": str(captured[attention_layers[0]]["metadata"]["qk_stage"]),
+                    }
                 arrays = {
                     "dataset_name": np.asarray(metadata["dataset_name"], dtype=np.str_),
                     "sequence_id": np.asarray(
@@ -515,13 +571,85 @@ def generate_crossclip_teacher_cache(
                     "cache_stage": np.asarray("raw", dtype=np.str_),
                     "alignment_scale": np.asarray(1.0, dtype=np.float32),
                     "cache_format_version": np.asarray(
-                        CROSSCLIP_CACHE_FORMAT_VERSION, dtype=np.str_
+                        (
+                            CROSSCLIP_ATTENTION_CACHE_FORMAT_VERSION
+                            if save_attention
+                            else CROSSCLIP_CACHE_FORMAT_VERSION
+                        ),
+                        dtype=np.str_,
                     ),
                     "metadata_json": np.asarray(
                         json.dumps(metadata_record, ensure_ascii=False),
                         dtype=np.str_,
                     ),
                 }
+                if save_attention:
+                    first_feature = captured[attention_layers[0]]
+                    common_metadata = first_feature["metadata"]
+                    arrays.update(
+                        {
+                            "attention_schema_version": np.asarray(
+                                ATTENTION_CACHE_SCHEMA_VERSION, dtype=np.str_
+                            ),
+                            "attention_num_frames": np.asarray(
+                                common_metadata["num_frames"], dtype=np.int64
+                            ),
+                            "attention_patch_grid_h": np.asarray(
+                                common_metadata["patch_grid_h"], dtype=np.int64
+                            ),
+                            "attention_patch_grid_w": np.asarray(
+                                common_metadata["patch_grid_w"], dtype=np.int64
+                            ),
+                            "attention_patch_size": np.asarray(
+                                common_metadata["patch_size"], dtype=np.int64
+                            ),
+                            "attention_image_height": np.asarray(
+                                common_metadata["image_height"], dtype=np.int64
+                            ),
+                            "attention_image_width": np.asarray(
+                                common_metadata["image_width"], dtype=np.int64
+                            ),
+                            "attention_dtype": np.asarray(
+                                "float16" if attention_dtype in {"float16", "fp16"} else "float32",
+                                dtype=np.str_,
+                            ),
+                            "attention_qk_stage": np.asarray(
+                                common_metadata["qk_stage"], dtype=np.str_
+                            ),
+                        }
+                    )
+                    for layer in attention_layers:
+                        feature = captured[layer]
+                        layer_metadata = feature["metadata"]
+                        arrays[attention_cache_key(layer, "q")] = (
+                            feature["q"][batch_index].numpy()
+                        )
+                        arrays[attention_cache_key(layer, "k")] = (
+                            feature["k"][batch_index].numpy()
+                        )
+                        arrays[attention_cache_key(layer, "layer_index")] = np.asarray(
+                            layer_metadata["layer_index"], dtype=np.int64
+                        )
+                        arrays[attention_cache_key(layer, "num_heads")] = np.asarray(
+                            layer_metadata["num_heads"], dtype=np.int64
+                        )
+                        arrays[attention_cache_key(layer, "head_dim")] = np.asarray(
+                            layer_metadata["head_dim"], dtype=np.int64
+                        )
+                    if not printed_attention_sample:
+                        print(
+                            "Attention cache sample {}: {}".format(
+                                path,
+                                {
+                                    "layer_{}".format(layer): {
+                                        "q": list(arrays[attention_cache_key(layer, "q")].shape),
+                                        "k": list(arrays[attention_cache_key(layer, "k")].shape),
+                                    }
+                                    for layer in attention_layers
+                                },
+                            )
+                        )
+                        printed_attention_sample = True
                 outstanding.append(
                     executor.submit(_atomic_npz, path, arrays, compressed)
                 )
@@ -551,4 +679,4 @@ def generate_crossclip_teacher_cache(
     )
 
 
-__all__ = ["generate_crossclip_teacher_cache"]
+__all__ = ["attention_cache_bytes_per_clip", "generate_crossclip_teacher_cache"]

@@ -22,13 +22,98 @@ from datasets.transforms import (
 
 
 CROSSCLIP_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v1"
+CROSSCLIP_ATTENTION_CACHE_FORMAT_VERSION = "vggtomega-crossclip-local-v3-attention"
+ATTENTION_CACHE_SCHEMA_VERSION = "cross_frame_qk_v1"
 SUPPORTED_CROSSCLIP_CACHE_FORMAT_VERSIONS = {
     "vggtomega-crossclip-local-v1",
     "vggtomega-crossclip-local-v2",
+    CROSSCLIP_ATTENTION_CACHE_FORMAT_VERSION,
 }
 CROSSCLIP_CACHE_PROTOCOL = "crossclip_local_v1"
 LOCAL_CAMERA_COORDINATE_SYSTEM = "local_camera"
 WORLD_TO_CAMERA_POSE_CONVENTION = "world_to_camera: X_camera = R @ X_world + t"
+
+
+def attention_cache_key(layer: int, field: str) -> str:
+    return "attention_layer_{}_{}".format(int(layer), field)
+
+
+def attention_cache_required_keys(layers: Tuple[int, ...]) -> set[str]:
+    keys = {
+        "attention_schema_version",
+        "attention_num_frames",
+        "attention_patch_grid_h",
+        "attention_patch_grid_w",
+        "attention_patch_size",
+        "attention_image_height",
+        "attention_image_width",
+        "attention_dtype",
+        "attention_qk_stage",
+    }
+    for layer in layers:
+        keys.update(
+            attention_cache_key(layer, field)
+            for field in ("q", "k", "layer_index", "num_heads", "head_dim")
+        )
+    return keys
+
+
+def validate_attention_teacher_cache(
+    cache: "np.lib.npyio.NpzFile",
+    layers: Tuple[int, ...] = (4, 11, 17, 23),
+    *,
+    check_finite: bool = True,
+) -> None:
+    layers = tuple(int(value) for value in layers)
+    missing = sorted(attention_cache_required_keys(layers) - set(cache.files))
+    if missing:
+        raise RuntimeError(
+            "Attention distillation is enabled, but teacher cache does not contain "
+            "attention features. Regenerate teacher cache with attention caching enabled. "
+            "Missing keys: {}".format(missing)
+        )
+    if str(cache["attention_schema_version"].item()) != ATTENTION_CACHE_SCHEMA_VERSION:
+        raise RuntimeError("Teacher attention cache schema version is incompatible")
+    frames = int(cache["attention_num_frames"].item())
+    grid_h = int(cache["attention_patch_grid_h"].item())
+    grid_w = int(cache["attention_patch_grid_w"].item())
+    patch_size = int(cache["attention_patch_size"].item())
+    image_height = int(cache["attention_image_height"].item())
+    image_width = int(cache["attention_image_width"].item())
+    dtype_name = str(cache["attention_dtype"].item())
+    if frames != 16 or min(grid_h, grid_w, patch_size) <= 0:
+        raise RuntimeError("Teacher attention metadata has invalid frame/grid/patch values")
+    if (grid_h * patch_size, grid_w * patch_size) != (image_height, image_width):
+        raise RuntimeError("Teacher attention grid does not cover its declared image extent")
+    if str(cache["attention_qk_stage"].item()) != "post_qk_norm_no_rope":
+        raise RuntimeError("Teacher attention Q/K are not from the real inter-frame logits stage")
+    expected_dtype = {"float16": np.float16, "float32": np.float32}.get(dtype_name)
+    if expected_dtype is None:
+        raise RuntimeError("Teacher attention dtype {!r} is unsupported".format(dtype_name))
+    tokens = grid_h * grid_w
+    for layer in layers:
+        if int(cache[attention_cache_key(layer, "layer_index")].item()) != layer:
+            raise RuntimeError("Teacher attention layer metadata mismatch for {}".format(layer))
+        heads = int(cache[attention_cache_key(layer, "num_heads")].item())
+        head_dim = int(cache[attention_cache_key(layer, "head_dim")].item())
+        expected_shape = (frames, heads, tokens, head_dim)
+        for field in ("q", "k"):
+            key = attention_cache_key(layer, field)
+            value = cache[key]
+            if tuple(value.shape) != expected_shape:
+                raise RuntimeError(
+                    "Teacher attention {} shape {} != {}".format(
+                        key, tuple(value.shape), expected_shape
+                    )
+                )
+            if value.dtype != expected_dtype:
+                raise RuntimeError(
+                    "Teacher attention {} dtype {} != {}".format(
+                        key, value.dtype, np.dtype(expected_dtype)
+                    )
+                )
+            if check_finite and not np.isfinite(value).all():
+                raise RuntimeError("Teacher attention {} contains NaN or Inf".format(key))
 
 
 def _safe_name(value: str) -> str:
@@ -437,12 +522,17 @@ def validate_crossclip_teacher_cache(
 
 
 __all__ = [
+    "ATTENTION_CACHE_SCHEMA_VERSION",
+    "CROSSCLIP_ATTENTION_CACHE_FORMAT_VERSION",
     "CROSSCLIP_CACHE_FORMAT_VERSION",
     "CROSSCLIP_CACHE_PROTOCOL",
     "LOCAL_CAMERA_COORDINATE_SYSTEM",
     "REQUIRED_CROSSCLIP_CACHE_KEYS",
     "WORLD_TO_CAMERA_POSE_CONVENTION",
+    "attention_cache_key",
+    "attention_cache_required_keys",
     "crossclip_teacher_cache_path",
     "make_teacher_cache_rgb_dataset",
     "validate_crossclip_teacher_cache",
+    "validate_attention_teacher_cache",
 ]

@@ -19,6 +19,7 @@ _NUMPY_TO_TORCH_DTYPE = {
     np.dtype(np.uint8): torch.uint8,
     np.dtype(np.int32): torch.int32,
     np.dtype(np.int64): torch.int64,
+    np.dtype(np.float16): torch.float16,
     np.dtype(np.float32): torch.float32,
     np.dtype(np.float64): torch.float64,
 }
