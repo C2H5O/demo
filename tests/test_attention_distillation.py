@@ -205,6 +205,20 @@ def test_near_equal_js_is_non_negative_after_epsilon_stabilization() -> None:
     assert k.grad is not None and torch.isfinite(k.grad).all() and k.grad.abs().sum() > 0
 
 
+def test_js_epsilon_smoothing_preserves_gradient_for_disjoint_sharp_support() -> None:
+    student_logits = torch.tensor([[20.0, 0.0, -1.0]], requires_grad=True)
+    teacher_logits = torch.tensor([[0.0, 20.0, -1.0]])
+    student_probability = student_logits.softmax(dim=-1)
+    teacher_probability = teacher_logits.softmax(dim=-1)
+    divergence = _probability_divergence(
+        teacher_probability, student_probability, "js", 1.0e-6
+    ).sum()
+    gradient = torch.autograd.grad(divergence, student_logits)[0]
+    assert torch.isfinite(divergence) and divergence > 0.0
+    assert torch.isfinite(gradient).all()
+    assert gradient.abs().max() > 1.0e-9
+
+
 def test_online_teacher_attention_is_chunked_detached_and_backpropagates_student() -> None:
     config = AttentionDistillationConfig.from_mapping(_config())
     student = {

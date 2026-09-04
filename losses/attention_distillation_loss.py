@@ -268,17 +268,18 @@ def _probability_divergence(
     kind: str,
     eps: float,
 ) -> torch.Tensor:
-    teacher = teacher.detach().float().clamp_min(eps)
-    student = student.float().clamp_min(eps)
-    # Clamping adds probability mass. Renormalize before KL/JS so both inputs
-    # remain valid distributions and near-equal relations cannot yield a small
-    # negative value solely from the epsilon stabilization.
+    # Additive epsilon smoothing keeps every probability in the differentiable
+    # path. A hard clamp creates a zero-gradient region below eps; for sharp,
+    # disjoint Teacher/Student relations that can leave a positive JS value but
+    # exactly zero gradient with respect to every Student Q/K tensor.
+    teacher = teacher.detach().float() + eps
+    student = student.float() + eps
     teacher = teacher / teacher.sum(dim=-1, keepdim=True)
     student = student / student.sum(dim=-1, keepdim=True)
     if kind == "kl":
         divergence = (teacher * (teacher.log() - student.log())).sum(dim=-1)
         return divergence.clamp_min(0.0)
-    midpoint = (0.5 * (teacher + student)).clamp_min(eps)
+    midpoint = 0.5 * (teacher + student)
     divergence = 0.5 * (
         (teacher * (teacher.log() - midpoint.log())).sum(dim=-1)
         + (student * (student.log() - midpoint.log())).sum(dim=-1)
