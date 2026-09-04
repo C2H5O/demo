@@ -119,7 +119,10 @@ python train_direct_teacher_distillation.py \
 
 The dry run additionally requires finite, non-zero gradients on every captured
 Student Q and K and directly checks that `L_attention` alone reaches at least
-one trainable DA3 backbone parameter. It also checks that every online Teacher
+one trainable DA3 backbone parameter. This audit uses the same scaled
+`backward()` path as training (rather than `torch.autograd.grad` across
+checkpointed regions), clears the audit gradients, and then performs the normal
+total-loss backward. It also checks that every online Teacher
 Q/K tensor is detached. Experiment A remains unchanged and is reproduced with:
 
 ```bash

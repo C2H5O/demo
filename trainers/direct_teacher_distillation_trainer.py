@@ -305,6 +305,122 @@ def _compute_online_teacher_attention_loss(
     return total, logs
 
 
+def _audit_attention_backward(
+    attention_loss: torch.Tensor,
+    model: DA3SmallStudent,
+    student_features: Mapping[int, Mapping[str, Any]],
+    student_layers: tuple[int, ...],
+    scaler: torch.cuda.amp.GradScaler,
+) -> int:
+    """Audit the same backward API used by training, then clear audit gradients.
+
+    ``torch.autograd.grad`` does not execute exactly the same autograd nodes as
+    ``backward`` and is a poor probe for retained non-leaf Q/K tensors behind
+    many non-reentrant checkpoint regions.  The dry run therefore performs an
+    attention-only scaled backward, inspects the gradients that training would
+    actually accumulate, clears them, and leaves the retained graph available
+    for the subsequent total-loss backward.
+    """
+    attention_parameters = [
+        (name, parameter)
+        for name, parameter in model.backbone.named_parameters()
+        if parameter.requires_grad
+    ]
+    attention_tensors = [
+        (
+            "layer_{}_{}".format(layer, name),
+            student_features[layer][name],
+        )
+        for layer in student_layers
+        for name in ("q", "k")
+    ]
+    scaler.scale(attention_loss).backward(retain_graph=True)
+
+    parameter_nonzero = [
+        name
+        for name, parameter in attention_parameters
+        if parameter.grad is not None
+        and bool(torch.isfinite(parameter.grad).all())
+        and bool((parameter.grad.abs() > 0).any())
+    ]
+    qk_nonzero = [
+        name
+        for name, value in attention_tensors
+        if value.grad is not None
+        and bool(torch.isfinite(value.grad).all())
+        and bool((value.grad.abs() > 0).any())
+    ]
+    parameter_none = sum(parameter.grad is None for _, parameter in attention_parameters)
+    parameter_nonfinite = sum(
+        parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all())
+        for _, parameter in attention_parameters
+    )
+    parameter_zero = sum(
+        parameter.grad is not None
+        and bool(torch.isfinite(parameter.grad).all())
+        and not bool((parameter.grad.abs() > 0).any())
+        for _, parameter in attention_parameters
+    )
+    qk_none = sum(value.grad is None for _, value in attention_tensors)
+    qk_nonfinite = sum(
+        value.grad is not None and not bool(torch.isfinite(value.grad).all())
+        for _, value in attention_tensors
+    )
+    qk_zero = sum(
+        value.grad is not None
+        and bool(torch.isfinite(value.grad).all())
+        and not bool((value.grad.abs() > 0).any())
+        for _, value in attention_tensors
+    )
+    if not parameter_nonzero or len(qk_nonzero) != len(attention_tensors):
+        relation_stats: Dict[str, Dict[str, float]] = {}
+        with torch.no_grad(), torch.autocast(
+            device_type=attention_loss.device.type, enabled=False
+        ):
+            for layer in student_layers:
+                feature = student_features[layer]
+                q = feature["q"][:, 0, :, :16].float()
+                k = feature["k"][:, 1].float()
+                logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
+                    float(q.shape[-1])
+                )
+                probability = torch.softmax(logits, dim=-1)
+                relation_stats[str(layer)] = {
+                    "logit_min": float(logits.min().cpu()),
+                    "logit_max": float(logits.max().cpu()),
+                    "probability_min": float(probability.min().cpu()),
+                    "probability_max": float(probability.max().cpu()),
+                    "probability_zero_fraction": float(
+                        (probability == 0).float().mean().cpu()
+                    ),
+                }
+        raise RuntimeError(
+            "L_attention backward audit failed: loss={:.9g} scale={:.9g} "
+            "qk_nonzero={}/{} qk_none={} qk_zero={} qk_nonfinite={} "
+            "parameter_nonzero={}/{} parameter_none={} parameter_zero={} "
+            "parameter_nonfinite={} student_relation_stats={}".format(
+                float(attention_loss.detach().cpu()),
+                float(scaler.get_scale()),
+                len(qk_nonzero),
+                len(attention_tensors),
+                qk_none,
+                qk_zero,
+                qk_nonfinite,
+                len(parameter_nonzero),
+                len(attention_parameters),
+                parameter_none,
+                parameter_zero,
+                parameter_nonfinite,
+                json.dumps(relation_stats, sort_keys=True),
+            )
+        )
+
+    model.zero_grad(set_to_none=True)
+    for _, value in attention_tensors:
+        value.grad = None
+    return len(parameter_nonzero)
+
+
 def _move_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
     moved = dict(batch)
     for key in (
@@ -666,81 +782,6 @@ def train_direct_teacher_distillation(
                         teacher_amp_dtype,
                     )
                     last_logs.update(attention_logs)
-                if dry_run and attention_loss_function is not None:
-                    attention_parameters = [
-                        (name, parameter)
-                        for name, parameter in model.backbone.named_parameters()
-                        if parameter.requires_grad
-                    ]
-                    attention_only_gradients = torch.autograd.grad(
-                        attention_loss,
-                        [parameter for _, parameter in attention_parameters],
-                        retain_graph=True,
-                        allow_unused=True,
-                    )
-                    attention_only_nonzero = [
-                        name
-                        for (name, _), gradient in zip(
-                            attention_parameters, attention_only_gradients
-                        )
-                        if gradient is not None
-                        and bool(torch.isfinite(gradient).all())
-                        and bool((gradient.abs() > 0).any())
-                    ]
-                    if not attention_only_nonzero:
-                        attention_tensors = [
-                            (
-                                "layer_{}_{}".format(layer, name),
-                                prediction["attention"][layer][name],
-                            )
-                            for layer in attention_config.student_layers
-                            for name in ("q", "k")
-                        ]
-                        attention_tensor_gradients = torch.autograd.grad(
-                            attention_loss,
-                            [value for _, value in attention_tensors],
-                            retain_graph=True,
-                            allow_unused=True,
-                        )
-                        qk_nonzero = [
-                            name
-                            for (name, _), gradient in zip(
-                                attention_tensors, attention_tensor_gradients
-                            )
-                            if gradient is not None
-                            and bool(torch.isfinite(gradient).all())
-                            and bool((gradient.abs() > 0).any())
-                        ]
-                        parameter_none = sum(
-                            gradient is None for gradient in attention_only_gradients
-                        )
-                        parameter_nonfinite = sum(
-                            gradient is not None
-                            and not bool(torch.isfinite(gradient).all())
-                            for gradient in attention_only_gradients
-                        )
-                        parameter_zero = sum(
-                            gradient is not None
-                            and bool(torch.isfinite(gradient).all())
-                            and not bool((gradient.abs() > 0).any())
-                            for gradient in attention_only_gradients
-                        )
-                        raise RuntimeError(
-                            "L_attention did not produce a finite non-zero gradient on any "
-                            "trainable DA3 backbone parameter: loss={:.9g} "
-                            "qk_nonzero={}/{} parameter_none={} parameter_zero={} "
-                            "parameter_nonfinite={}".format(
-                                float(attention_loss.detach().cpu()),
-                                len(qk_nonzero),
-                                len(attention_tensors),
-                                parameter_none,
-                                parameter_zero,
-                                parameter_nonfinite,
-                            )
-                        )
-                    last_logs["stats/attention_only_parameter_grad_tensors"] = float(
-                        len(attention_only_nonzero)
-                    )
                 loss = baseline_loss + attention_config.weight * attention_loss
                 last_logs["loss/baseline"] = float(baseline_loss.detach().cpu())
                 last_logs["loss/attention"] = float(attention_loss.detach().cpu())
@@ -752,6 +793,17 @@ def train_direct_teacher_distillation(
             last_logs["stats/amp_fp32_retry"] = float(retried)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite direct distillation loss: {}".format(last_logs))
+            if dry_run and attention_loss_function is not None:
+                attention_gradient_tensors = _audit_attention_backward(
+                    attention_loss,
+                    model,
+                    prediction["attention"],
+                    attention_config.student_layers,
+                    scaler,
+                )
+                last_logs["stats/attention_only_parameter_grad_tensors"] = float(
+                    attention_gradient_tensors
+                )
             window_start = (batch_index // accumulation) * accumulation
             window_size = 1 if dry_run else min(accumulation, len(loader) - window_start)
             timing_events["backward_start"] = _record_cuda_event(timing_enabled)

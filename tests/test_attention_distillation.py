@@ -21,6 +21,7 @@ from losses.attention_distillation_loss import (
     patch_overlap_matrix,
 )
 from trainers.direct_teacher_distillation_trainer import (
+    _audit_attention_backward,
     _check_resume_contract,
     _compute_online_teacher_attention_loss,
 )
@@ -283,6 +284,51 @@ def test_online_teacher_attention_is_chunked_detached_and_backpropagates_student
         for feature in student.values()
         for name in ("q", "k")
     )
+
+
+def test_attention_backward_audit_uses_checkpoint_graph_and_clears_gradients() -> None:
+    class TinyStudent(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backbone = torch.nn.Linear(3, 3, bias=False)
+
+    model = TinyStudent()
+    inputs = torch.randn(2, 3)
+    hidden = model.backbone(inputs)
+    q = hidden.square()
+    k = hidden.sin()
+    q.retain_grad()
+    k.retain_grad()
+
+    def relation(q_value: torch.Tensor, k_value: torch.Tensor) -> torch.Tensor:
+        return (q_value * k_value).square().mean()
+
+    loss = torch.utils.checkpoint.checkpoint(
+        relation, q, k, use_reentrant=False
+    )
+
+    class IdentityScaler:
+        def scale(self, value: torch.Tensor) -> torch.Tensor:
+            return value
+
+        def get_scale(self) -> float:
+            return 1.0
+
+    count = _audit_attention_backward(
+        loss,
+        model,
+        {5: {"q": q, "k": k}},
+        (5,),
+        IdentityScaler(),
+    )
+    assert count == 1
+    assert model.backbone.weight.grad is None
+    assert q.grad is None and k.grad is None
+    (loss + hidden.square().mean()).backward()
+    assert model.backbone.weight.grad is not None
+    assert torch.isfinite(model.backbone.weight.grad).all()
+    assert q.grad is not None and q.grad.abs().sum() > 0
+    assert k.grad is not None and k.grad.abs().sum() > 0
 
 
 def test_teacher_attention_forward_skips_prediction_heads_and_requires_no_grad() -> None:
