@@ -9,7 +9,7 @@ experiment:
     attention-relation distillation improves DA3-Small endoscopic geometry.
 
 teacher:
-  raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_attention_distill_448x560
+  raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtoda3/data
   save_attention: true
 
 attention_distill:
