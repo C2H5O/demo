@@ -288,7 +288,11 @@ def _compute_online_teacher_attention_loss(
         ):
             raise RuntimeError("Online Teacher Q/K unexpectedly require gradients")
         student_chunk = _slice_attention_features(student_features, start, stop)
-        chunk_loss, chunk_logs = loss_function(teacher_features, student_chunk)
+        # Keep QK^T, softmax, and JS outside the enclosing training autocast.
+        # Teacher/Student forward activations remain mixed precision; only the
+        # numerically sensitive relation objective is evaluated in FP32.
+        with torch.autocast(device_type=device.type, enabled=False):
+            chunk_loss, chunk_logs = loss_function(teacher_features, student_chunk)
         weight = float(stop - start) / float(batch_size)
         total = total + weight * chunk_loss
         for name, value in chunk_logs.items():
@@ -684,9 +688,55 @@ def train_direct_teacher_distillation(
                         and bool((gradient.abs() > 0).any())
                     ]
                     if not attention_only_nonzero:
+                        attention_tensors = [
+                            (
+                                "layer_{}_{}".format(layer, name),
+                                prediction["attention"][layer][name],
+                            )
+                            for layer in attention_config.student_layers
+                            for name in ("q", "k")
+                        ]
+                        attention_tensor_gradients = torch.autograd.grad(
+                            attention_loss,
+                            [value for _, value in attention_tensors],
+                            retain_graph=True,
+                            allow_unused=True,
+                        )
+                        qk_nonzero = [
+                            name
+                            for (name, _), gradient in zip(
+                                attention_tensors, attention_tensor_gradients
+                            )
+                            if gradient is not None
+                            and bool(torch.isfinite(gradient).all())
+                            and bool((gradient.abs() > 0).any())
+                        ]
+                        parameter_none = sum(
+                            gradient is None for gradient in attention_only_gradients
+                        )
+                        parameter_nonfinite = sum(
+                            gradient is not None
+                            and not bool(torch.isfinite(gradient).all())
+                            for gradient in attention_only_gradients
+                        )
+                        parameter_zero = sum(
+                            gradient is not None
+                            and bool(torch.isfinite(gradient).all())
+                            and not bool((gradient.abs() > 0).any())
+                            for gradient in attention_only_gradients
+                        )
                         raise RuntimeError(
                             "L_attention did not produce a finite non-zero gradient on any "
-                            "trainable DA3 backbone parameter"
+                            "trainable DA3 backbone parameter: loss={:.9g} "
+                            "qk_nonzero={}/{} parameter_none={} parameter_zero={} "
+                            "parameter_nonfinite={}".format(
+                                float(attention_loss.detach().cpu()),
+                                len(qk_nonzero),
+                                len(attention_tensors),
+                                parameter_none,
+                                parameter_zero,
+                                parameter_nonfinite,
+                            )
                         )
                     last_logs["stats/attention_only_parameter_grad_tensors"] = float(
                         len(attention_only_nonzero)

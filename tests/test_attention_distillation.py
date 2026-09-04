@@ -16,6 +16,8 @@ from losses.attention_distillation_loss import (
     AttentionDistillationConfig,
     CrossFrameAttentionDistillationLoss,
     SpatialTokenAligner,
+    _head_mean_attention,
+    _probability_divergence,
     patch_overlap_matrix,
 )
 from trainers.direct_teacher_distillation_trainer import (
@@ -173,6 +175,34 @@ def test_four_layer_js_loss_is_finite_positive_and_backpropagates_only_student()
         assert feature["k"].grad is not None
         assert feature["q"].grad.abs().sum() > 0
         assert feature["k"].grad.abs().sum() > 0
+
+
+def test_attention_probabilities_stay_fp32_inside_autocast() -> None:
+    q = torch.randn(1, 2, 4, 3, requires_grad=True)
+    k = torch.randn(1, 2, 4, 3, requires_grad=True)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        probability = _head_mean_attention(q, k, temperature=1.0)
+    assert probability.dtype == torch.float32
+    probability.square().sum().backward()
+    assert q.grad is not None and torch.isfinite(q.grad).all() and q.grad.abs().sum() > 0
+    assert k.grad is not None and torch.isfinite(k.grad).all() and k.grad.abs().sum() > 0
+
+
+def test_near_equal_js_is_non_negative_after_epsilon_stabilization() -> None:
+    q = torch.randn(1, 2, 4, 3, requires_grad=True)
+    k = torch.randn(1, 2, 4, 3, requires_grad=True)
+    teacher_q = q.detach() + 1.0e-3
+    teacher_k = k.detach() - 1.0e-3
+    teacher_probability = _head_mean_attention(teacher_q, teacher_k, temperature=1.0)
+    student_probability = _head_mean_attention(q, k, temperature=1.0)
+    divergence = _probability_divergence(
+        teacher_probability, student_probability, "js", 1.0e-6
+    )
+    assert torch.isfinite(divergence).all()
+    assert bool((divergence >= 0.0).all())
+    divergence.sum().backward()
+    assert q.grad is not None and torch.isfinite(q.grad).all() and q.grad.abs().sum() > 0
+    assert k.grad is not None and torch.isfinite(k.grad).all() and k.grad.abs().sum() > 0
 
 
 def test_online_teacher_attention_is_chunked_detached_and_backpropagates_student() -> None:

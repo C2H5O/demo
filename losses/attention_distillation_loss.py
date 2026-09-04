@@ -252,9 +252,14 @@ def _head_mean_attention(
         raise ValueError("Frame Q/K must have shape [B,H,N,D]")
     if q.shape[:2] != k.shape[:2] or q.shape[-1] != k.shape[-1]:
         raise ValueError("Frame Q/K heads or dimensions do not match")
-    logits = torch.matmul(q.float(), k.float().transpose(-2, -1))
-    logits = logits / (math.sqrt(float(q.shape[-1])) * float(temperature))
-    return torch.softmax(logits, dim=-1).mean(dim=1)
+    # The surrounding training step uses AMP, but relation probabilities and
+    # divergences must remain FP32.  In particular, two pretrained attention
+    # distributions can be close enough that BF16/FP16 rounds their JS signal
+    # away before it reaches the Student LoRA parameters.
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        logits = torch.matmul(q.float(), k.float().transpose(-2, -1))
+        logits = logits / (math.sqrt(float(q.shape[-1])) * float(temperature))
+        return torch.softmax(logits, dim=-1).mean(dim=1)
 
 
 def _probability_divergence(
@@ -263,15 +268,22 @@ def _probability_divergence(
     kind: str,
     eps: float,
 ) -> torch.Tensor:
-    teacher = teacher.detach().clamp_min(eps)
-    student = student.clamp_min(eps)
+    teacher = teacher.detach().float().clamp_min(eps)
+    student = student.float().clamp_min(eps)
+    # Clamping adds probability mass. Renormalize before KL/JS so both inputs
+    # remain valid distributions and near-equal relations cannot yield a small
+    # negative value solely from the epsilon stabilization.
+    teacher = teacher / teacher.sum(dim=-1, keepdim=True)
+    student = student / student.sum(dim=-1, keepdim=True)
     if kind == "kl":
-        return (teacher * (teacher.log() - student.log())).sum(dim=-1)
+        divergence = (teacher * (teacher.log() - student.log())).sum(dim=-1)
+        return divergence.clamp_min(0.0)
     midpoint = (0.5 * (teacher + student)).clamp_min(eps)
-    return 0.5 * (
+    divergence = 0.5 * (
         (teacher * (teacher.log() - midpoint.log())).sum(dim=-1)
         + (student * (student.log() - midpoint.log())).sum(dim=-1)
     )
+    return divergence.clamp_min(0.0)
 
 
 def _metadata_grid(feature: Mapping[str, Any]) -> Tuple[int, int]:

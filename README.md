@@ -83,7 +83,9 @@ Training reads `depth`, `confidence`, `valid_mask`, `intrinsics`, `extrinsics`
 and clip identity from those files. `online_teacher_batch_size: 1` bounds live
 Teacher Q/K to one clip; each chunk is consumed immediately by the relation
 loss and released. Online Q/K remain detached FP16 tensors on the Teacher GPU,
-so there is no hidden GPU-to-CPU-to-GPU round trip. The aggregator's prediction-
+while QK logits, softmax probabilities, and JS divergence are evaluated in
+FP32 outside training autocast to preserve the small relation gradient. There
+is no hidden GPU-to-CPU-to-GPU round trip. The aggregator's prediction-
 head feature cache is disabled only during this attention-only forward and then
 restored; the dedicated online Teacher also unloads its camera/depth/text heads
 after strict checkpoint loading and before GPU transfer. DataLoader
