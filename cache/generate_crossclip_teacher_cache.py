@@ -472,7 +472,7 @@ def generate_crossclip_teacher_cache(
                 depth_array = dense_fp32("depth")
                 local_array = dense_fp32("xyz_local")
                 global_array = dense_fp32("xyz_global")
-                confidence_array = dense_fp32("conf_local")
+                confidence_array = dense_fp32("confidence")
                 intrinsics_array = camera_fp32("intrinsics")
                 extrinsics_array = camera_fp32("extrinsics")
                 valid_depth = depth_array[valid_array]

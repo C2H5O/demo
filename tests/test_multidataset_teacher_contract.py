@@ -79,6 +79,9 @@ def test_native_teacher_canonicalization_scales_k_and_preserves_z_depth() -> Non
     })
     assert result["depth"].shape == (1, 1, 448, 560)
     assert result["xyz_local"].shape == (1, 1, 448, 560, 3)
+    assert result["confidence"].shape == (1, 1, 448, 560)
+    assert torch.equal(result["confidence"], torch.ones_like(result["confidence"]))
+    assert "conf_local" not in result
     assert result["valid_mask"].dtype is torch.bool
     assert torch.equal(result["depth"], result["xyz_local"][..., 2])
     assert result["intrinsics"][0, 0, 0, 0].item() == pytest.approx(437.5)
