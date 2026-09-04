@@ -96,7 +96,8 @@ def test_experiment_b_inherits_baseline_and_changes_attention_paths() -> None:
     assert attention["attention_distill"]["online_teacher_batch_size"] == 1
     for section in ("dataset", "student", "loss"):
         assert attention[section] == baseline[section]
-    assert attention["dataloader"]["batch_size"] == baseline["dataloader"]["batch_size"]
+    assert baseline["dataloader"]["batch_size"] == 16
+    assert attention["dataloader"]["batch_size"] == 4
     assert attention["dataloader"]["drop_last"] == baseline["dataloader"]["drop_last"]
     assert attention["dataloader"]["num_workers"] == 0
 

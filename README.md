@@ -88,11 +88,11 @@ head feature cache is disabled only during this attention-only forward and then
 restored; the dedicated online Teacher also unloads its camera/depth/text heads
 after strict checkpoint loading and before GPU transfer. DataLoader
 workers/prefetch remain disabled because native Teacher RGB is decoded in
-addition to Student RGB. At scientific batch size 16, native
-float32 Teacher RGB itself is 3.75 GiB; collation can transiently require roughly
+addition to Student RGB. At Experiment B batch size 4, native
+float32 Teacher RGB itself is about 0.94 GiB; collation can transiently require roughly
 twice that host memory while per-sample and stacked tensors coexist. Autograd
 checkpointing retains the smaller 32x40-aligned frozen Teacher Q/K until
-backward (about 320 MiB per clip, or about 5 GiB at batch 16), in addition to
+backward (about 320 MiB per clip, or about 1.25 GiB at batch 4), in addition to
 Student activations and the resident frozen Teacher/Student weights. Run
 `--dry-run` on the target training GPU before starting epochs.
 

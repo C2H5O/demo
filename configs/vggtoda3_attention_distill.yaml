@@ -19,9 +19,10 @@ attention_distill:
   teacher_output_dtype: float16
   weight: 0.1
 
-# Native 1024x1280 Teacher RGB is decoded online. Avoid worker prefetch while
-# preserving the Experiment A scientific batch size.
+# Native 1024x1280 Teacher RGB is decoded online. Use batch 4 and avoid worker
+# prefetch to bound host/GPU memory.
 dataloader:
+  batch_size: 4
   num_workers: 0
   pin_memory: false
   persistent_workers: false
