@@ -28,6 +28,7 @@ from losses.attention_distillation_loss import (
 )
 from models.student.da3_small_student import DA3SmallStudent
 from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
+from models.flash_attention import configure_flash_attention
 from utils.checkpoint import (
     DIRECT_TEACHER_DISTILLATION_PROTOCOL,
     atomic_torch_save,
@@ -596,6 +597,13 @@ def train_direct_teacher_distillation(
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     device = torch.device(requested_device)
+    if dry_run and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    flash_config = config.get("flash_attention", {})
+    print("FlashAttention enabled: {}".format(bool(flash_config.get("enabled", False))))
+    if attention_config.enabled:
+        print("Attention distillation mode: query_chunked")
+        print("Attention distillation query_chunk_size: {}".format(attention_config.query_chunk_size))
     dataset = _build_dataset(config, "train")
     _print_same_clip_examples(dataset)
     loader = build_direct_teacher_distillation_dataloader(
@@ -607,6 +615,7 @@ def train_direct_teacher_distillation(
         attention_config=config["attention_distill"],
     )
     model.train()
+    configure_flash_attention(model.backbone, flash_config, "Student")
     online_teacher: Optional[VGGTOmegaTeacher] = None
     teacher_amp_enabled = False
     teacher_amp_dtype = torch.float16
@@ -625,6 +634,7 @@ def train_direct_teacher_distillation(
             online_teacher_config, device=device
         )
         online_teacher.eval()
+        configure_flash_attention(online_teacher.model.aggregator, flash_config, "Teacher")
         if any(parameter.requires_grad for parameter in online_teacher.parameters()):
             raise RuntimeError("Online VGGT-Omega Teacher is not fully frozen")
         teacher_amp_enabled, teacher_amp_dtype = _teacher_amp_settings(teacher, device)
@@ -897,6 +907,12 @@ def train_direct_teacher_distillation(
                     data_wait_seconds=data_wait_seconds, iteration_start=iteration_start,
                     optimizer_step=False, retried=retried,
                 )
+                if device.type == "cuda":
+                    last_logs["memory/max_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
+                    last_logs["memory/max_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
+                    print("Dry-run CUDA peak: allocated={} reserved={} bytes".format(
+                        last_logs["memory/max_allocated_bytes"], last_logs["memory/max_reserved_bytes"]
+                    ))
                 return {
                     "status": "passed", "output_shapes": shapes,
                     "gradient_components": group_gradients, **last_logs,

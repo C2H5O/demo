@@ -116,7 +116,7 @@ class VGGTOmegaAttentionCapture:
                     head_dim,
                 )
                 value = value[:, :, :, self.patch_token_start :, :]
-                value = value.permute(0, 2, 1, 3, 4).contiguous()
+                value = value.permute(0, 2, 1, 3, 4)
                 value = value.detach().to(dtype=self.output_dtype)
                 # Offline cache generation stages Q/K on CPU. Online training
                 # keeps each small Teacher chunk on its source GPU and consumes
@@ -289,7 +289,7 @@ class DA3AttentionCapture:
                     expected_per_frame,
                     head_dim,
                 ).permute(0, 2, 1, 3, 4)
-                value = value[:, :, :, self.patch_token_start :, :].contiguous()
+                value = value[:, :, :, self.patch_token_start :, :]
                 value = _restore_original_frame_order(value, self._reference_indices)
                 if self._retain_gradients and value.requires_grad:
                     value.retain_grad()

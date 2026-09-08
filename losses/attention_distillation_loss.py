@@ -294,6 +294,33 @@ def _metadata_grid(feature: Mapping[str, Any]) -> Tuple[int, int]:
     return int(metadata["patch_grid_h"]), int(metadata["patch_grid_w"])
 
 
+def query_chunk_divergence_sum(
+    teacher_q: torch.Tensor,
+    teacher_k: torch.Tensor,
+    student_q: torch.Tensor,
+    student_k: torch.Tensor,
+    config: AttentionDistillationConfig,
+) -> torch.Tensor:
+    """Sum a query slice against ALL keys of the existing target frame.
+
+    Called inside non-reentrant checkpoint so backward recomputes probabilities
+    instead of retaining every slice. Head mean precedes divergence, as before.
+    The caller normalizes by the actual batch/query count across frame pairs.
+    """
+    with torch.no_grad():
+        teacher_probability = _head_mean_attention(
+            teacher_q, teacher_k, config.temperature_teacher
+        )
+    student_probability = _head_mean_attention(
+        student_q, student_k, config.temperature_student
+    )
+    if teacher_probability.shape != student_probability.shape:
+        raise ValueError("Aligned Teacher/Student query and key counts must match")
+    return _probability_divergence(
+        teacher_probability, student_probability, config.divergence, config.eps
+    ).sum()
+
+
 def _metadata_image_extent(feature: Mapping[str, Any]) -> Tuple[int, int]:
     metadata = feature["metadata"]
     grid = _metadata_grid(feature)
@@ -374,18 +401,7 @@ class CrossFrameAttentionDistillationLoss(nn.Module):
                         sq: torch.Tensor,
                         sk: torch.Tensor,
                     ) -> torch.Tensor:
-                        teacher_probability = _head_mean_attention(
-                            tq, tk, self.config.temperature_teacher
-                        )
-                        student_probability = _head_mean_attention(
-                            sq, sk, self.config.temperature_student
-                        )
-                        return _probability_divergence(
-                            teacher_probability,
-                            student_probability,
-                            self.config.divergence,
-                            self.config.eps,
-                        ).sum()
+                        return query_chunk_divergence_sum(tq, tk, sq, sk, self.config)
 
                     if torch.is_grad_enabled() and (
                         student_q_chunk.requires_grad or student_k_frame.requires_grad
@@ -440,10 +456,10 @@ class CrossFrameAttentionDistillationLoss(nn.Module):
                 )
             layer_losses.append(layer_loss)
             logs["loss/attn_t{}_s{}".format(teacher_layer, student_layer)] = float(
-                layer_loss.detach().cpu()
+                layer_loss.detach()
             )
         total = torch.stack(layer_losses).mean()
-        logs["loss/attention"] = float(total.detach().cpu())
+        logs["loss/attention"] = float(total.detach())
         return total, logs
 
 

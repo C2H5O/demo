@@ -1,4 +1,6 @@
 base_config: _4090_common.yaml
+flash_attention:
+  enabled: true
 experiment:
   name: baseline_E_attention-soft-highlight
   baseline_id: E
