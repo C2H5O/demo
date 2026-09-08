@@ -22,5 +22,10 @@ training:
   resume: null
 attention_distill:
   online_teacher_batch_size: 1
+  query_chunk_size: 128
+flash_attention:
+  enabled: false
+  backend: auto
+  allow_math_fallback: true
 inference:
   acceleration: none
