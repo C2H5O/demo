@@ -7,7 +7,6 @@ teacher:
   raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560
   inference_batch_size: 1
 student:
-  attention_backend: auto
   checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/checkpoints/da3-small/model.safetensors
   config_path: /public/home/2024141520249/Documents/Projects/vggtoda3/checkpoints/da3-small/config.json
   head_chunk_size: 1
