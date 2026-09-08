@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from models.student.lora import LoRALinear, inject_da3_mlp_lora
 from models.attention_capture import DA3AttentionCapture
+from models.attention_backend import BACKENDS, configure_da3_attention
 from utils.da3_geometry import depth_intrinsics_to_local_points, local_to_global_points
 
 
@@ -43,8 +44,11 @@ class DA3SmallConfig:
     freeze_camera_decoder: bool = False
     head_chunk_size: int = 8
     ref_view_strategy: str = "saddle_balanced"
+    attention_backend: str = "auto"
 
     def validate(self) -> None:
+        if self.attention_backend not in BACKENDS:
+            raise ValueError("attention_backend must be auto, flash, sdpa, or eager")
         if self.architecture != "da3_small" or self.model_name != "da3-small":
             raise ValueError("student must select the official da3-small architecture")
         if (self.image_height, self.image_width) != (448, 560):
@@ -176,6 +180,9 @@ class DA3SmallStudent(nn.Module):
         self.config.validate()
         self.network, self.load_audit = (
             _load_full_pretrained(self.config) if network is None else (network, {})
+        )
+        self.attention_backend = configure_da3_attention(
+            self.network, self.config.attention_backend, required=network is None
         )
         for name in ("backbone", "head", "cam_enc", "cam_dec"):
             if not isinstance(getattr(self.network, name, None), nn.Module):
