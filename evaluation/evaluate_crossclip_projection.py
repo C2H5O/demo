@@ -51,9 +51,7 @@ def _load_model(
     if not isinstance(checkpoint, dict):
         raise ValueError("Cross-clip checkpoint must contain model and config")
     require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
-    model_config = dict(checkpoint.get("config", {}).get("student", config["student"]))
-    # Runtime kernel policy must be switchable even for older saved checkpoints.
-    model_config["attention_backend"] = config["student"].get("attention_backend", "auto")
+    model_config = checkpoint.get("config", {}).get("student", config["student"])
     state = checkpoint.get("model")
     if not isinstance(state, dict):
         raise ValueError("Cross-clip checkpoint has no model state")
