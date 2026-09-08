@@ -1,0 +1,21 @@
+base_config: _4090_common.yaml
+experiment:
+  name: baseline_E_attention-soft-highlight
+  baseline_id: E
+  training_required: true
+  implementation_status: ready_for_server_dry_run
+attention_distill:
+  enabled: true
+  weight: 0.1
+loss:
+  highlight_mode: angular_soft_margin
+  highlight_cone_full_angle_degrees: 10.0
+  highlight_softness: 0.0005
+training:
+  output_dir: ./outputs/baseline_E
+  resume: null
+vda_evaluation:
+  checkpoint: ./outputs/baseline_E/last.pt
+  output: ./outputs/baseline_E/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_E/visualization

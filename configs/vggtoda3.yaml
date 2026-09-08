@@ -142,6 +142,7 @@ training:
   amp: true
   amp_dtype: auto
   log_every: 10
+  regularizer_diagnostics_every: 100
   save_every: 1
   timing:
     enabled: true
@@ -162,21 +163,14 @@ vda_evaluation:
   gt_relative_directory: data/depth
   gt_depth_channel: 0
   require_all_gt: true
+  tae:
+    enabled: true
+    require_all_pairs: true
+    frame_data_relative_directory: data/frame_data
+    pose_translation_scale: 0.001
+    frame_id_step: 1
   amp: true
   output: ./outputs/vggtoda3_direct/evaluation_test_vda.json
-
-endo3r_evaluation:
-  checkpoint: ./outputs/vggtoda3_direct/last.pt
-  split: test
-  protocol: endo3r
-  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
-  frame_source: auto
-  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
-  gt_relative_directory: data/depth
-  gt_depth_channel: 0
-  require_all_gt: true
-  amp: true
-  output: ./outputs/vggtoda3_direct/evaluation_test_endo3r.json
 
 da3_small_baseline_vda_evaluation:
   split: test
@@ -187,20 +181,14 @@ da3_small_baseline_vda_evaluation:
   gt_relative_directory: data/depth
   gt_depth_channel: 0
   require_all_gt: true
+  tae:
+    enabled: true
+    require_all_pairs: true
+    frame_data_relative_directory: data/frame_data
+    pose_translation_scale: 0.001
+    frame_id_step: 1
   amp: true
   output: ./outputs/da3_small_baseline/evaluation_scared_8_9_vda.json
-
-da3_small_baseline_endo3r_evaluation:
-  split: test
-  protocol: endo3r
-  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
-  frame_source: auto
-  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
-  gt_relative_directory: data/depth
-  gt_depth_channel: 0
-  require_all_gt: true
-  amp: true
-  output: ./outputs/da3_small_baseline/evaluation_scared_8_9_endo3r.json
 
 da3_small_baseline_visualization:
   output_dir: ./outputs/da3_small_baseline/visualization

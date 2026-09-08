@@ -8,13 +8,14 @@ from visualization.crossclip_projection import export_crossclip_visualization
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Visualize a 16-frame cross-clip student prediction or teacher cache"
+        description="Visualize a complete student sequence or a 16-frame teacher cache"
     )
     parser.add_argument("--config", default="configs/vggtoda3.yaml")
     parser.add_argument("--source", choices=("student", "teacher"), default="student")
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--split", choices=("train", "test"), default="test")
-    parser.add_argument("--clip-index", type=int, default=0)
+    parser.add_argument("--sequence-index", type=int, default=0, help="Complete student sequence index")
+    parser.add_argument("--clip-index", type=int, default=0, help="Teacher cache only")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--min-depth", type=float, default=None)
     parser.add_argument("--max-depth", type=float, default=None)
@@ -35,6 +36,7 @@ def main() -> None:
         args.min_depth if args.min_depth is not None else float(visual.get("min_depth", 0.1)),
         args.max_depth if args.max_depth is not None else float(visual.get("max_depth", 10.0)),
         args.point_stride if args.point_stride is not None else int(visual.get("point_stride", 4)),
+        sequence_index=args.sequence_index,
     )
 
 

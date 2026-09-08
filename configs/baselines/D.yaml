@@ -1,0 +1,21 @@
+base_config: _4090_common.yaml
+experiment:
+  name: baseline_D_pseudo-soft-highlight
+  baseline_id: D
+  training_required: true
+  implementation_status: ready_for_server_dry_run
+attention_distill:
+  enabled: false
+  weight: 0.0
+loss:
+  highlight_mode: angular_soft_margin
+  highlight_cone_full_angle_degrees: 10.0
+  highlight_softness: 0.0005
+training:
+  output_dir: ./outputs/baseline_D
+  resume: null
+vda_evaluation:
+  checkpoint: ./outputs/baseline_D/last.pt
+  output: ./outputs/baseline_D/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_D/visualization

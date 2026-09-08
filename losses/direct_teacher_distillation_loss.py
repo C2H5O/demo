@@ -34,6 +34,9 @@ class DirectTeacherDistillationLossConfig:
     lambda_smooth: float = 0.1
     eps: float = 1e-6
     use_confidence_weight: bool = True
+    highlight_mode: str = "legacy"
+    highlight_cone_full_angle_degrees: float = 10.0
+    highlight_softness: float = 0.0005
 
     @classmethod
     def from_mapping(
@@ -68,6 +71,12 @@ class DirectTeacherDistillationLossConfig:
             if float(getattr(self, name)) < 0.0:
                 raise ValueError("loss.{} cannot be negative".format(name))
         self.camera.validate()
+        if self.highlight_mode not in {"legacy", "angular_soft_margin"}:
+            raise ValueError("Unsupported highlight_mode")
+        if not math.isfinite(self.highlight_cone_full_angle_degrees) or not 0 <= self.highlight_cone_full_angle_degrees < 180:
+            raise ValueError("highlight_cone_full_angle_degrees must be in [0,180)")
+        if not math.isfinite(self.highlight_softness) or self.highlight_softness <= 0:
+            raise ValueError("highlight_softness must be positive and finite")
         if self.eps <= 0.0:
             raise ValueError("loss.eps must be positive")
 
@@ -269,8 +278,14 @@ def compute_highlight_surface_loss(
     student_points: torch.Tensor,
     highlight_mask: torch.Tensor,
     eps: float = 1e-6,
+    *, mode: str = "legacy", margin_degrees: float = 5.0, softness: float = 0.0005,
 ) -> torch.Tensor:
-    """Unchanged PC-Depth-inspired camera-facing normal loss."""
+    """PC-Depth-inspired soft camera-facing prior: mean((1 - cos(theta))**2).
+
+    Normals are encouraged to align with the point-to-camera direction, not
+    perpendicular to it. This is a finite soft penalty, not a hard angle bound.
+    Reduction uses valid highlighted pixels only, not the full image area.
+    """
     if student_points.ndim != 5 or highlight_mask.ndim != 5:
         raise ValueError("Expected point [B,T,H,W,3] and highlight [B,T,1,H,W]")
     batch, frames, height, width, _ = student_points.shape
@@ -280,7 +295,17 @@ def compute_highlight_surface_loss(
     normals = surface_normals(points)
     viewing = F.normalize(-points, dim=1, eps=eps)
     cosine = (viewing * normals).sum(dim=1, keepdim=True).clamp(-1.0, 1.0)
-    loss_map = (1.0 - cosine).square()
+    if mode == "legacy":
+        loss_map = (1.0 - cosine).square()
+    elif mode == "angular_soft_margin":
+        if not math.isfinite(margin_degrees) or not 0 <= margin_degrees < 90:
+            raise ValueError("margin_degrees must be in [0,90)")
+        if not math.isfinite(softness) or softness <= 0:
+            raise ValueError("softness must be positive and finite")
+        threshold = math.cos(math.radians(margin_degrees))
+        loss_map = (softness * F.softplus((threshold - cosine) / softness)).square()
+    else:
+        raise ValueError("Unknown highlight loss mode: {}".format(mode))
     valid = finite.reshape(batch * frames, 1, height, width)
     neighbor_valid = torch.zeros_like(valid)
     neighbor_valid[:, :, 1:-1, 1:-1] = (
@@ -391,7 +416,10 @@ class DirectTeacherDistillationLoss(nn.Module):
             eps=self.config.eps,
         )
         highlight = compute_highlight_surface_loss(
-            points, batch["highlight_masks"].bool(), self.config.eps
+            points, batch["highlight_masks"].bool(), self.config.eps,
+            mode=self.config.highlight_mode,
+            margin_degrees=self.config.highlight_cone_full_angle_degrees / 2.0,
+            softness=self.config.highlight_softness,
         )
         smooth = compute_highlight_aware_smoothness_loss(
             points,

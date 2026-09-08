@@ -415,8 +415,11 @@ class DA3SmallStudent(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         self._last_forward_timing_events = {}
         self._record_cuda_timing("start", images.device)
-        if tuple(images.shape[1:]) != (16, 3, 448, 560):
-            raise ValueError("DA3 student requires [B,16,3,448,560], got {}".format(tuple(images.shape)))
+        if images.ndim != 5 or images.shape[1] < 1 or tuple(images.shape[2:]) != (3, 448, 560):
+            raise ValueError("DA3 student requires [B,T,3,448,560], got {}".format(tuple(images.shape)))
+        frames = images.shape[1]
+        if (self.training or self.attention_capture is not None) and frames != 16:
+            raise ValueError("DA3 training/attention capture requires [B,16,3,448,560]")
         if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
             raise ValueError("DA3 dataset RGB must be finite in [0,1]")
         normalized = (images - self.imagenet_mean) / self.imagenet_std
@@ -450,13 +453,13 @@ class DA3SmallStudent(nn.Module):
             )
             self._record_cuda_timing("geometry_end", images.device)
         expected = {
-            "depth": (images.shape[0], 16, 448, 560),
-            "intrinsics": (images.shape[0], 16, 3, 3),
-            "extrinsics": (images.shape[0], 16, 3, 4),
-            "xyz_local": (images.shape[0], 16, 448, 560, 3),
+            "depth": (images.shape[0], frames, 448, 560),
+            "intrinsics": (images.shape[0], frames, 3, 3),
+            "extrinsics": (images.shape[0], frames, 3, 4),
+            "xyz_local": (images.shape[0], frames, 448, 560, 3),
         }
         if include_global_points:
-            expected["xyz_global"] = (images.shape[0], 16, 448, 560, 3)
+            expected["xyz_global"] = (images.shape[0], frames, 448, 560, 3)
         actual = {
             "depth": tuple(depth.shape), "intrinsics": tuple(intrinsics.shape),
             "extrinsics": tuple(extrinsics.shape), "xyz_local": tuple(xyz_local.shape),

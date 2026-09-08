@@ -1,0 +1,26 @@
+base_config: ../vggtoda3.yaml
+dataset:
+  root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/processed/SCARED
+teacher:
+  pretrained_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/checkpoints/vggt_omega/vggt_omega_1b_512.pt
+  cache_checkpoint_identity: ./checkpoints/vggt_omega/vggt_omega_1b_512.pt
+  raw_cache_root: /public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560
+  inference_batch_size: 1
+student:
+  checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/checkpoints/da3-small/model.safetensors
+  config_path: /public/home/2024141520249/Documents/Projects/vggtoda3/checkpoints/da3-small/config.json
+  head_chunk_size: 1
+dataloader:
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  drop_last: false
+training:
+  gradient_accumulation_steps: 4
+  amp_dtype: bfloat16
+  resume: null
+attention_distill:
+  online_teacher_batch_size: 1
+inference:
+  acceleration: none

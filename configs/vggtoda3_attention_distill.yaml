@@ -29,3 +29,10 @@ dataloader:
 
 training:
   output_dir: ./outputs/vggtoda3_attention_distill
+
+vda_evaluation:
+  checkpoint: ./outputs/vggtoda3_attention_distill/last.pt
+  output: ./outputs/vggtoda3_attention_distill/evaluation_test_vda.json
+
+visualization:
+  output_dir: ./outputs/vggtoda3_attention_distill/visualization

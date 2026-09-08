@@ -58,16 +58,16 @@ def test_vggtoda3_config_encodes_fixed_contract() -> None:
     assert config["training"]["min_learning_rate"] == 1.0e-6
 
 
-def test_vda_is_default_and_endo3r_is_retained() -> None:
+def test_vda_is_the_only_evaluation_protocol() -> None:
     config = load_config(CONFIG_PATH)
     assert select_protocol(config) == "vda"
-    assert select_protocol(config, "endo3r") == "endo3r"
+    import pytest
+    with pytest.raises(ValueError):
+        select_protocol(config, "removed-protocol")
     raw_scared = "/public/home/2024141520249/Documents/datasets/vggtodistilldata/scared"
     assert config["vda_evaluation"]["rgb_root"] == raw_scared
     assert config["vda_evaluation"]["gt_root"] == raw_scared
-    assert config["endo3r_evaluation"]["rgb_root"] == raw_scared
-    assert config["endo3r_evaluation"]["gt_root"] == raw_scared
-    for protocol in ("vda", "endo3r"):
+    for protocol in ("vda",):
         baseline = config["da3_small_baseline_{}_evaluation".format(protocol)]
         assert baseline["split"] == "test"
         assert baseline["rgb_root"] == raw_scared

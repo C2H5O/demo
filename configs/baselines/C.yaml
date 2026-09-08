@@ -1,0 +1,21 @@
+base_config: _4090_common.yaml
+experiment:
+  name: baseline_C_attention-distill
+  baseline_id: C
+  training_required: true
+  implementation_status: ready_for_server_dry_run
+attention_distill:
+  enabled: true
+  weight: 0.1
+loss:
+  highlight_mode: legacy
+  highlight_cone_full_angle_degrees: 10.0
+  highlight_softness: 0.0005
+training:
+  output_dir: ./outputs/baseline_C
+  resume: null
+vda_evaluation:
+  checkpoint: ./outputs/baseline_C/last.pt
+  output: ./outputs/baseline_C/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_C/visualization

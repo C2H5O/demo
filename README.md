@@ -174,42 +174,87 @@ optimizer or scheduler state is loaded.
 
 ## Evaluate and visualize
 
+All Student inference entrypoints, including the untouched official DA3-Small
+baseline, accept complete sequences. The shared pipeline uses VDA-style
+32-frame windows, 10 reference frames (2 anchors plus 8 recent frames), a stride
+of 22, anchor-based disparity scale/shift alignment, and 8-frame linear blending.
+It decodes RGB lazily, pads short/tail windows by repeating the last frame, and
+emits each real frame exactly once. Training and Teacher caches still use
+16-frame clips with stride 8.
+
 ```bash
+# Pseudo-label distilled Student (A).
 python evaluate_crossclip_projection.py \
   --config configs/vggtoda3.yaml \
-  --checkpoint outputs/vggtoda3_direct/last.pt \
-  --protocol vda
+  --checkpoint outputs/vggtoda3_direct/last.pt
 
+# Attention-distilled Student (B).
 python evaluate_crossclip_projection.py \
-  --config configs/vggtoda3.yaml \
-  --checkpoint outputs/vggtoda3_direct/last.pt \
-  --protocol endo3r
+  --config configs/vggtoda3_attention_distill.yaml \
+  --checkpoint outputs/vggtoda3_attention_distill/last.pt
 
-# Untouched official DA3-Small baseline on raw SCARED datasets 8 and 9.
-python evaluate_da3_small_baseline.py \
-  --config configs/vggtoda3.yaml \
-  --protocol vda
+# Untouched official DA3-Small on raw SCARED datasets 8 and 9.
+python evaluate_da3_small_baseline.py --config configs/vggtoda3.yaml
 
-python evaluate_da3_small_baseline.py \
-  --config configs/vggtoda3.yaml \
-  --protocol endo3r
+# Complete-sequence depth maps, panels, camera-local PLYs and native window poses.
+python visualize_crossclip_projection.py \
+  --config configs/vggtoda3_attention_distill.yaml \
+  --source student \
+  --checkpoint outputs/vggtoda3_attention_distill/last.pt \
+  --split test --sequence-index 0
 
 python visualize_da3_small_baseline.py \
-  --config configs/vggtoda3.yaml \
-  --clip-index 0
+  --config configs/vggtoda3.yaml --sequence-index 0
 
+# Teacher visualization still reads a single existing cache clip.
 python visualize_crossclip_projection.py \
-  --config configs/vggtoda3.yaml \
-  --source student \
-  --checkpoint outputs/vggtoda3_direct/last.pt \
-  --split test \
-  --clip-index 0
+  --config configs/vggtoda3.yaml --source teacher --split test --clip-index 0
 ```
 
-Evaluation names are retained for CLI compatibility; neither evaluation path
-implements the removed training projection objective.
+`--protocol vda` is optional and is the only evaluation protocol.
+`--limit-windows 1` limits a debug run; `--limit-clips` is a legacy alias for the
+same window budget. Omit both for complete evaluation. New results must not be
+mixed with old 16-frame/stride-8 overlap-average results: rerun all comparison
+models with the same new inference protocol.
+
+Evaluation JSON includes `abs_relative_difference`, `rmse_linear`, `delta1_acc`
+and `tae` (percent, lower is better). `mean_frame_inference_ms` and
+`inference_fps` divide synchronized model-forward time by the number of unique
+output frames. The time includes repeated anchor/padding computation and the
+first forward; it excludes model loading, RGB I/O, transfer, fusion and GT
+scoring. Per-sequence `inference` also records pipeline time and its exact scope.
+
+TAE needs original SCARED `data/frame_data/frame_data%06d.json` files with
+`camera-calibration.KL` and `camera-pose`, in addition to RGB and depth GT.
+The evaluator reads real world-to-camera poses, converts their translation
+from millimetres to metres, and resizes intrinsics with full-FOV RGB.
+It never uses Teacher caches or Student-predicted camera poses for TAE.
+Missing camera files fail preflight by default. For a deliberately spatial-only
+run, set `tae.enabled: false` in the relevant evaluation config section; the JSON
+then records `tae: null`. Explicit `tae.require_all_pairs: false` permits partial
+TAE with skipped-pair counts. Neither case claims full temporal coverage.
+
+Sequence visualization saves fused depth and camera-local point clouds under
+`full_sequence/`; original window camera predictions are in `camera_windows/`.
+There is no global merged PLY for fused sequences: affine disparity correction
+cannot be applied to camera poses as a rigid/similarity transform. See
+[the evaluation protocol](docs/video_evaluation.md) for exact metric definitions,
+source links, and differences from upstream implementations.
 
 ## Diagnostics
+
+`audit_training_losses.py --metrics /path/to/metrics.jsonl --output-dir outputs/loss_audit --plots`
+audits resume duplicates, weighted-loss conservation and small regularizer
+shares. Training now records `stats/loss_share_*` against the final total
+including attention. `training.regularizer_diagnostics_every` (default 100
+micro-batches, 0 disables) reports highlight coverage, short normals and valid
+smoothness edges; dry-run always records these diagnostics. The loss formulas
+and original A/B coefficients are unchanged.
+
+`configs/vggtoda3_attention_highlight_x3.yaml` is an **unvalidated weight ablation**
+that changes only highlight weight from 0.01 to 0.03. It uses separate output
+paths. Resume rejects changed loss settings to avoid mixing ablations. See
+[the loss audit](docs/loss_audit_20260908.md) for evidence and interpretation.
 
 `metrics.jsonl` records raw and weighted depth/camera/regularization terms,
 depth validity and ranges, Teacher confidence, relative camera errors and

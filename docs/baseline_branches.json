@@ -1,0 +1,51 @@
+[
+  {
+    "id": "A",
+    "branch": "codex/baseline-a-official-da3",
+    "config": "configs/baselines/A.yaml",
+    "training_required": false,
+    "implemented": true
+  },
+  {
+    "id": "B",
+    "branch": "codex/baseline-b-pseudo-distill",
+    "config": "configs/baselines/B.yaml",
+    "training_required": true,
+    "implemented": true
+  },
+  {
+    "id": "C",
+    "branch": "codex/baseline-c-attention-distill",
+    "config": "configs/baselines/C.yaml",
+    "training_required": true,
+    "implemented": true
+  },
+  {
+    "id": "D",
+    "branch": "codex/baseline-d-pseudo-soft-highlight",
+    "config": "configs/baselines/D.yaml",
+    "training_required": true,
+    "implemented": true
+  },
+  {
+    "id": "E",
+    "branch": "codex/baseline-e-attention-soft-highlight",
+    "config": "configs/baselines/E.yaml",
+    "training_required": true,
+    "implemented": true
+  },
+  {
+    "id": "F",
+    "branch": "codex/baseline-f-spark3r-reference",
+    "config": "configs/baselines/F.yaml",
+    "training_required": false,
+    "implemented": false
+  },
+  {
+    "id": "G",
+    "branch": "codex/baseline-g-spark3r-proposed",
+    "config": "configs/baselines/G.yaml",
+    "training_required": false,
+    "implemented": false
+  }
+]

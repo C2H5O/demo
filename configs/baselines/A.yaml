@@ -1,0 +1,23 @@
+base_config: _4090_common.yaml
+experiment:
+  name: baseline_A_official-da3
+  baseline_id: A
+  training_required: false
+  implementation_status: ready_for_server_dry_run
+attention_distill:
+  enabled: false
+  weight: 0.0
+loss:
+  highlight_mode: legacy
+  highlight_cone_full_angle_degrees: 10.0
+  highlight_softness: 0.0005
+training:
+  output_dir: ./outputs/baseline_A
+  resume: null
+vda_evaluation:
+  checkpoint: ./outputs/baseline_A/last.pt
+  output: ./outputs/baseline_A/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_A/visualization
+da3_small_baseline_vda_evaluation:
+  output: ./outputs/baseline_A/evaluation_test.json

@@ -1,0 +1,25 @@
+base_config: _4090_common.yaml
+experiment:
+  name: baseline_G_spark3r-proposed
+  baseline_id: G
+  training_required: false
+  implementation_status: planned_acceleration_not_implemented
+attention_distill:
+  enabled: true
+  weight: 0.1
+loss:
+  highlight_mode: angular_soft_margin
+  highlight_cone_full_angle_degrees: 10.0
+  highlight_softness: 0.0005
+training:
+  output_dir: ./outputs/baseline_G
+  resume: null
+vda_evaluation:
+  checkpoint: ./outputs/baseline_E/last.pt
+  output: ./outputs/baseline_G/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_G/visualization
+inference:
+  acceleration: spark3r_specular_aware_proposed
+  implementation_status: planned
+  source_checkpoint: ./outputs/baseline_E/last.pt

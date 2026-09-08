@@ -1,0 +1,26 @@
+# Unvalidated, single-variable weight ablation; start a separate run.
+# The original A/B configs and the highlight loss formula are unchanged.
+# Epoch 10 logged raw highlight ~=0.03599: weight 0.03 would contribute
+# about 1.12% of the recomputed scalar total on those SAME predictions.
+# This is a scale calibration, not evidence of an accuracy or gradient benefit.
+base_config: vggtoda3_attention_distill.yaml
+
+experiment:
+  name: vggtoda3_attention_highlight_x3
+  hypothesis: >-
+    Increasing only the existing soft highlight prior weight may improve
+    highlight-region geometry; validate against the unchanged attention baseline.
+
+loss:
+  lambda_highlight: 0.03
+
+training:
+  output_dir: ./outputs/vggtoda3_attention_highlight_x3
+  resume: null
+
+vda_evaluation:
+  checkpoint: ./outputs/vggtoda3_attention_highlight_x3/last.pt
+  output: ./outputs/vggtoda3_attention_highlight_x3/evaluation_test_vda.json
+
+visualization:
+  output_dir: ./outputs/vggtoda3_attention_highlight_x3/visualization

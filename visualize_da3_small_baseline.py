@@ -13,7 +13,7 @@ from visualization.crossclip_projection import export_crossclip_visualization
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/vggtoda3.yaml")
-    parser.add_argument("--clip-index", type=int, default=0)
+    parser.add_argument("--sequence-index", type=int, default=0, help="Complete student sequence index")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--min-depth", type=float, default=None)
     parser.add_argument("--max-depth", type=float, default=None)
@@ -25,7 +25,7 @@ def main() -> None:
     export_crossclip_visualization(
         Path(args.config),
         "test",
-        args.clip_index,
+        0,
         args.output_dir
         or Path(str(visual.get("output_dir", "outputs/da3_small_baseline/visualization"))),
         OFFICIAL_DA3_SMALL_SOURCE,
@@ -35,6 +35,7 @@ def main() -> None:
         args.point_stride
         if args.point_stride is not None
         else int(visual.get("point_stride", 4)),
+        sequence_index=args.sequence_index,
     )
 
 

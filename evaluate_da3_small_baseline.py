@@ -11,9 +11,9 @@ from evaluation.evaluate_crossclip_projection import evaluate_official_da3_small
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/vggtoda3.yaml")
-    parser.add_argument("--protocol", choices=("vda", "endo3r"), default="vda")
+    parser.add_argument("--protocol", choices=("vda",), default="vda")
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--limit-clips", type=int, default=None)
+    parser.add_argument("--limit-windows", "--limit-clips", dest="limit_clips", type=int, default=None, help="Debug window budget; --limit-clips is a legacy alias. Omit for full evaluation.")
     args = parser.parse_args()
     evaluate_official_da3_small(
         Path(args.config),

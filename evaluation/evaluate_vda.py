@@ -13,12 +13,12 @@ import numpy as np
 import torch
 
 from datasets.scared_discovery import KEYFRAME_PATTERN, extract_dataset_id
-from evaluation.evaluate_depth import (
-    ENDO3R_GT_DIRECTORY,
-    ENDO3R_MAX_DEPTH,
+from evaluation.scared_gt import (
+    SCARED_GT_DIRECTORY,
+    SCARED_MAX_DEPTH,
     _find_gt_depths,
     _keyframe_directory,
-    _load_endo3r_gt_depth,
+    load_scared_gt_depth,
     extract_frame_id,
 )
 
@@ -180,7 +180,7 @@ class _SequencePredictionSpool:
 def _resized_gt(path: Path, channel: int, height: int, width: int) -> np.ndarray:
     cv2 = _opencv()
     return cv2.resize(
-        _load_endo3r_gt_depth(path, channel),
+        load_scared_gt_depth(path, channel),
         (width, height),
         interpolation=cv2.INTER_NEAREST,
     )
@@ -227,7 +227,7 @@ def _streaming_scale_shift(
     for _, frame_index, gt_path in pairs:
         gt = _resized_gt(gt_path, gt_channel, spool.height, spool.width)
         prediction = np.clip(spool.prediction(frame_index), 1e-3, None)
-        valid = (gt > 1e-3) & (gt < ENDO3R_MAX_DEPTH)
+        valid = (gt > 1e-3) & (gt < SCARED_MAX_DEPTH)
         if not np.any(valid):
             continue
         target = 1.0 / (gt[valid].reshape(-1, 1).astype(np.float64) + 1e-8)
@@ -260,12 +260,12 @@ def _streaming_metrics(
     functions = (abs_relative_difference, rmse_linear, delta1_acc)
     for _, frame_index, gt_path in pairs:
         gt = _resized_gt(gt_path, gt_channel, spool.height, spool.width)
-        valid = (gt > 1e-3) & (gt < ENDO3R_MAX_DEPTH)
+        valid = (gt > 1e-3) & (gt < SCARED_MAX_DEPTH)
         if not np.any(valid):
             continue
         disparity = np.clip(spool.prediction(frame_index), 1e-3, None)
         aligned = np.clip(scale * disparity + shift, 1e-3, None)
-        prediction = np.clip(depth_to_disparity(aligned), 1e-3, ENDO3R_MAX_DEPTH)
+        prediction = np.clip(depth_to_disparity(aligned), 1e-3, SCARED_MAX_DEPTH)
         pred_tensor = torch.from_numpy(prediction[None])
         gt_tensor = torch.from_numpy(gt[None])
         valid_tensor = torch.from_numpy(valid[None])
@@ -331,7 +331,7 @@ def _find_sequence_gt_depths(
         if value:
             candidates.append(Path(str(value)))
     if not candidates:
-        candidates.append(Path(ENDO3R_GT_DIRECTORY))
+        candidates.append(Path(SCARED_GT_DIRECTORY))
     checked: List[str] = []
     for keyframe_directory in keyframe_directories:
         for candidate in candidates:

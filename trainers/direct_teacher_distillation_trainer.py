@@ -21,6 +21,7 @@ from datasets.direct_teacher_distillation_dataset import (
     build_direct_teacher_distillation_dataloader,
 )
 from losses.direct_teacher_distillation_loss import DirectTeacherDistillationLoss
+from losses.regularizer_diagnostics import loss_share_logs, regularizer_diagnostics
 from losses.attention_distillation_loss import (
     AttentionDistillationConfig,
     CrossFrameAttentionDistillationLoss,
@@ -73,7 +74,7 @@ def _build_dataset(
     dataset = DirectTeacherDistillationDataset(
         rgb,
         cache_root,
-        expected_base_checkpoint=str(teacher["pretrained_checkpoint"]),
+        expected_base_checkpoint=str(teacher.get("cache_checkpoint_identity", teacher["pretrained_checkpoint"])),
         online_teacher_attention=bool(
             config.get("attention_distill", {}).get("enabled", False)
         ),
@@ -486,6 +487,15 @@ def _check_resume_contract(
         raise ValueError("Resume checkpoint config has an incompatible objective protocol")
     if checkpoint_config.get("loss", {}).get("mode") != "direct_teacher_distillation":
         raise ValueError("Resume checkpoint does not use direct_teacher_distillation loss")
+    loss_fields = ("lambda_depth", "lambda_camera", "lambda_highlight", "lambda_smooth", "camera", "eps", "use_confidence_weight")
+    loss_mismatches = {key: (checkpoint_config.get("loss", {}).get(key), config["loss"].get(key))
+                       for key in loss_fields
+                       if checkpoint_config.get("loss", {}).get(key) != config["loss"].get(key)}
+    if loss_mismatches:
+        raise ValueError("Checkpoint loss settings differ from current config: {}. Start a new run for a loss ablation.".format(loss_mismatches))
+    for key, default in (("highlight_mode", "legacy"), ("highlight_cone_full_angle_degrees", 10.0), ("highlight_softness", 0.0005)):
+        if checkpoint_config.get("loss", {}).get(key, default) != config["loss"].get(key, default):
+            raise ValueError("Checkpoint highlight loss settings differ: {}. Start a new run.".format(key))
     checkpoint_student = checkpoint_config.get("student", {})
     if checkpoint_student.get("architecture") != "da3_small":
         raise ValueError("Resume checkpoint is not a DA3-Small experiment")
@@ -543,6 +553,8 @@ def train_direct_teacher_distillation(
     max_steps: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
+    if config.get("experiment", {}).get("training_required") is False:
+        raise ValueError("This baseline is inference-only; use its documented existing checkpoint")
     objective = config.get("experiment", {}).get("objective_protocol")
     if objective != DIRECT_TEACHER_DISTILLATION_PROTOCOL:
         raise ValueError(
@@ -624,6 +636,9 @@ def train_direct_teacher_distillation(
     )
     model.retain_attention_gradients(dry_run and attention_config.enabled)
     training_config = config["training"]
+    diagnostics_every = int(training_config.get("regularizer_diagnostics_every", 100))
+    if diagnostics_every < 0:
+        raise ValueError("regularizer_diagnostics_every cannot be negative")
     timing_config = dict(training_config.get("timing", {}))
     timing_enabled = bool(timing_config.get("enabled", False))
     timing_log_every = int(timing_config.get("log_every_micro_batches", 1))
@@ -789,6 +804,11 @@ def train_direct_teacher_distillation(
                     (attention_config.weight * attention_loss).detach().cpu()
                 )
                 last_logs["loss/total"] = float(loss.detach().cpu())
+            last_logs.update(loss_share_logs(last_logs))
+            if dry_run or (diagnostics_every and batch_index % diagnostics_every == 0):
+                last_logs.update(regularizer_diagnostics(
+                    prediction["xyz_local"], batch["highlight_masks"], batch["clean_images"],
+                    eps=loss_function.config.eps))
             timing_events["loss_end"] = _record_cuda_event(timing_enabled)
             last_logs["stats/amp_fp32_retry"] = float(retried)
             if not torch.isfinite(loss):

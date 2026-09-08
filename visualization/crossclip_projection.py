@@ -1,4 +1,4 @@
-"""Visualize one 16-frame cross-clip student prediction or teacher cache."""
+"""Visualize a complete student sequence or a 16-frame teacher cache."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import torch
 from PIL import Image
 
 from datasets.crossclip_teacher_dataset import (
-    CROSSCLIP_CACHE_PROTOCOL,
     crossclip_teacher_cache_path,
     make_teacher_cache_rgb_dataset,
     validate_crossclip_teacher_cache,
@@ -23,10 +22,7 @@ from datasets.transforms import unnormalize_image
 from evaluation.evaluate_crossclip_projection import (
     OFFICIAL_DA3_SMALL_SOURCE,
     _require_scared_8_9,
-    load_official_da3_small,
 )
-from models.student.da3_small_student import DA3SmallStudent
-from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
 
@@ -101,70 +97,31 @@ def _adaptive_range(
     return float(low), float(high)
 
 
-def _load_student_prediction(
-    checkpoint_path: Path,
-    config: Dict[str, Any],
-    images: torch.Tensor,
-) -> Dict[str, np.ndarray]:
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError("Student checkpoint not found: {}".format(checkpoint_path))
-    checkpoint = torch.load(
-        str(checkpoint_path), map_location="cpu", weights_only=False
-    )
-    require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
-    device = torch.device(str(config.get("device", "cuda")))
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA visualization requested but unavailable")
-    model_config = checkpoint.get("config", {}).get("student", config["student"])
-    model = DA3SmallStudent(model_config, device=device)
-    model.load_state_dict(checkpoint["model"], strict=True)
-    model.eval()
-    with torch.inference_mode(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
-        prediction = model(images.unsqueeze(0).to(device))
-    return {
-        key: prediction[key][0].float().cpu().numpy()
-        for key in ("depth", "intrinsics", "extrinsics", "xyz_local", "xyz_global")
-    }
-
-
-def _load_official_da3_small_prediction(
-    config: Dict[str, Any], images: torch.Tensor
-) -> Dict[str, np.ndarray]:
-    """Run untouched official DA3-Small without LoRA or a training checkpoint."""
-    device = torch.device(str(config.get("device", "cuda")))
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA visualization requested but unavailable")
-    model = load_official_da3_small(config, device)
-    with torch.inference_mode(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
-        prediction = model(images.unsqueeze(0).to(device))
-    return {
-        key: prediction[key][0].float().cpu().numpy()
-        for key in ("depth", "intrinsics", "extrinsics", "xyz_local", "xyz_global")
-    }
-
-
 def _visualization_dataset(
     config: Dict[str, Any], split: str, source: str
 ) -> Any:
     dataset_config = dict(config["dataset"])
     dataset_config["highlight"] = {"enabled": False}
-    if source != OFFICIAL_DA3_SMALL_SOURCE:
+    if source == "teacher":
         return make_teacher_cache_rgb_dataset(dataset_config, split)
-    if split != "test":
+    if source == OFFICIAL_DA3_SMALL_SOURCE and split != "test":
         raise ValueError("Official DA3-Small visualization is fixed to SCARED 8/9 test split")
-    eval_config = dict(config.get("da3_small_baseline_vda_evaluation", {}))
+    section = "da3_small_baseline_vda_evaluation" if source == OFFICIAL_DA3_SMALL_SOURCE else "vda_evaluation"
+    eval_config = dict(config.get(section, {}))
     rgb_root = eval_config.get("rgb_root")
     if not rgb_root:
-        raise ValueError("da3_small_baseline_vda_evaluation.rgb_root is required")
+        raise ValueError(section + ".rgb_root is required")
     dataset_config["root"] = str(rgb_root)
     dataset_config["legacy_scared_root"] = str(rgb_root)
     dataset_config["canonical_root"] = None
     dataset_config["frame_source"] = str(eval_config.get("frame_source", "auto"))
+    dataset_config.update(clip_length=1, sample_stride=1, window_stride=1)
     dataset_config["drop_incomplete_clip"] = False
     dataset = make_scared_rgb_dataset(dataset_config, split)
-    _require_scared_8_9(
-        {str(sequence["sequence_id"]): sequence for sequence in dataset.sequences}
-    )
+    if source == OFFICIAL_DA3_SMALL_SOURCE:
+        _require_scared_8_9(
+            {str(sequence["sequence_id"]): sequence for sequence in dataset.sequences}
+        )
     return dataset
 
 
@@ -188,7 +145,7 @@ def _load_teacher_points(
             cache,
             metadata,
             shape,
-            str(teacher["pretrained_checkpoint"]),
+            str(teacher.get("cache_checkpoint_identity", teacher["pretrained_checkpoint"])),
             stage,
         )
         points = cache["xyz_local"].astype(np.float32, copy=True)
@@ -205,15 +162,24 @@ def export_crossclip_visualization(
     min_depth: float = 0.1,
     max_depth: float = 10.0,
     point_stride: int = 4,
+    sequence_index: int = 0,
 ) -> Path:
-    """Export depth, local PLYs, camera poses and one merged global DA3 PLY."""
+    """Export a complete student sequence, or one cached Teacher clip."""
     if source not in {"student", "teacher", OFFICIAL_DA3_SMALL_SOURCE}:
         raise ValueError("source must be student, teacher, or official_da3_small")
     if point_stride <= 0:
         raise ValueError("point_stride must be positive")
     config = load_config(config_path)
+    if source != "teacher" and config.get("inference", {}).get("acceleration", "none") != "none":
+        raise NotImplementedError("Spark3R variants are planned; accelerated student inference is not implemented")
     da3_source = source in {"student", OFFICIAL_DA3_SMALL_SOURCE}
     dataset = _visualization_dataset(config, split, source)
+    if da3_source:
+        if clip_index != 0:
+            raise ValueError("Use --sequence-index for student sequences; --clip-index is teacher-only")
+        from visualization.student_video import export_student_video
+        return export_student_video(config, dataset, sequence_index, output_root, source,
+                                    checkpoint_path, split, min_depth, max_depth, point_stride)
     if not 0 <= clip_index < len(dataset):
         raise IndexError("clip_index={} is outside [0,{})".format(clip_index, len(dataset)))
     sample = dataset[clip_index]
@@ -221,23 +187,7 @@ def export_crossclip_visualization(
     rgb = _rgb(sample["images"], str(dataset.normalize_mode))
     teacher_cache: Optional[Path] = None
     cache_stage: Optional[str] = None
-    if source == "student":
-        if checkpoint_path is None:
-            raise ValueError("--checkpoint is required for source=student")
-        prediction = _load_student_prediction(checkpoint_path, config, sample["images"])
-        points = prediction["xyz_local"]
-        global_points = prediction["xyz_global"]
-    elif source == OFFICIAL_DA3_SMALL_SOURCE:
-        if checkpoint_path is not None:
-            raise ValueError("Official DA3-Small visualization does not accept a checkpoint")
-        prediction = _load_official_da3_small_prediction(config, sample["images"])
-        points = prediction["xyz_local"]
-        global_points = prediction["xyz_global"]
-    else:
-        points, teacher_cache, cache_stage = _load_teacher_points(
-            config, dataset, clip_index, split
-        )
-        global_points = None
+    points, teacher_cache, cache_stage = _load_teacher_points(config, dataset, clip_index, split)
     depth = points[..., 2]
     valid = np.isfinite(points).all(axis=-1) & np.isfinite(depth) & (depth > 0.0)
     visual_config = config.get(
@@ -289,22 +239,6 @@ def export_crossclip_visualization(
             directories["pointcloud_local"] / "{}.ply".format(stem),
             points[offset][point_mask].astype(np.float32),
             rgb[offset][point_mask],
-        )
-    if da3_source:
-        global_valid = np.isfinite(global_points).all(axis=-1) & valid
-        sampled = np.zeros(global_valid.shape[-2:], dtype=bool)
-        sampled[::point_stride, ::point_stride] = True
-        merged_mask = global_valid & sampled[None]
-        merged_colors = np.broadcast_to(rgb, global_points.shape).copy()
-        _write_binary_ply(
-            output / "pointcloud_global_merged.ply",
-            global_points[merged_mask].astype(np.float32),
-            merged_colors[merged_mask],
-        )
-        np.savez(
-            output / "camera_poses.npz",
-            intrinsics=prediction["intrinsics"].astype(np.float32),
-            extrinsics_w2c=prediction["extrinsics"].astype(np.float32),
         )
     record: Dict[str, Any] = {
         "source": source,
