@@ -747,12 +747,6 @@ def train_direct_teacher_distillation(
             "gpu_pipeline_ms": _elapsed_ms(events.get("h2d_start"), final_event),
             **{"forward_{}_ms".format(name): value for name, value in forward_parts.items()},
         }
-        record["clips_per_second"] = (
-            int(batch["images"].shape[0]) * 1000.0
-            / max(record["iteration_wall_ms"] + record["data_wait_ms"], 1e-9)
-        )
-        record["peak_gpu_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
-        record["peak_gpu_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
         _append_jsonl(output_dir / "timing.jsonl", record)
         if (batch_index + 1) % timing_log_every == 0:
             print(
