@@ -1,9 +1,10 @@
-base_config: _4090_common.yaml
+base_config: _kv_sampling.yaml
 experiment:
-  name: baseline_F_spark3r-reference
+  name: baseline_F_spark3r-fixed-stride
   baseline_id: F
   training_required: false
-  implementation_status: planned_acceleration_not_implemented
+  implementation_status: implemented_runtime_validation_pending
+# Same E checkpoint as G; this is a fixed-stride control, not full Spark3R.
 attention_distill:
   enabled: true
   weight: 0.1
@@ -21,5 +22,8 @@ visualization:
   output_dir: ./outputs/baseline_F/visualization
 inference:
   acceleration: spark3r_reference
-  implementation_status: planned
+  implementation_status: implemented_runtime_validation_pending
   source_checkpoint: ./outputs/baseline_E/last.pt
+kv_sampling:
+  enabled: true
+  method: spark3r_fixed_stride

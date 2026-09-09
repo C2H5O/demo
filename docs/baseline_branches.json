@@ -39,13 +39,16 @@
     "branch": "codex/baseline-f-spark3r-reference",
     "config": "configs/baselines/F.yaml",
     "training_required": false,
-    "implemented": false
+    "implemented": false,
+    "fixed_stride_control_available_in_G_worktree": true,
+    "validation_status": "runtime_pending_in_baseline_G_worktree"
   },
   {
     "id": "G",
     "branch": "codex/baseline-g-spark3r-proposed",
     "config": "configs/baselines/G.yaml",
     "training_required": false,
-    "implemented": false
+    "implemented": true,
+    "validation_status": "runtime_pending"
   }
 ]

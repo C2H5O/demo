@@ -1,0 +1,23 @@
+base_config: _4090_common.yaml
+
+# Inference policy only. The checkpoint's training losses are not executed.
+dataset:
+  highlight:
+    enabled: false
+
+kv_sampling:
+  enabled: false
+  method: vda_role
+  retention_ratio: 0.25
+  vda_role:
+    key_frames: 2
+    overlap_frames: 2
+    new_frames: 4
+  first_window:
+    method: uniform
+    num_frames: 8
+  spark3r_fixed_stride:
+    temporal_stride: 4
+  debug: false
+  debug_max_windows: 2
+  profile_attention: false

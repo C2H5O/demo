@@ -1,0 +1,15 @@
+# Inference-only dense control using exactly the same weights/settings as F/G.
+# The original configs/baselines/E.yaml training experiment is unchanged.
+base_config: ../baselines/G.yaml
+experiment:
+  name: baseline_E_dense-inference
+  baseline_id: E
+  training_required: false
+inference:
+  acceleration: none
+kv_sampling:
+  enabled: false
+vda_evaluation:
+  output: ./outputs/baseline_E_dense/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_E_dense/visualization

@@ -170,8 +170,10 @@ def export_crossclip_visualization(
     if point_stride <= 0:
         raise ValueError("point_stride must be positive")
     config = load_config(config_path)
-    if source != "teacher" and config.get("inference", {}).get("acceleration", "none") != "none":
-        raise NotImplementedError("Spark3R variants are planned; accelerated student inference is not implemented")
+    if source != "teacher":
+        from inference.kv_sampling import resolve_kv_sampling
+        from inference.student_video import WINDOW
+        resolve_kv_sampling(config).frame_budget(WINDOW)
     da3_source = source in {"student", OFFICIAL_DA3_SMALL_SOURCE}
     dataset = _visualization_dataset(config, split, source)
     if da3_source:

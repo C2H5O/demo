@@ -14,6 +14,7 @@ from evaluation.evaluate_crossclip_projection import (
 from evaluation.evaluate_vda import _SequencePredictionSpool
 from evaluation.scared_gt import extract_frame_id
 from inference.student_video import infer_student_video, sequence_frames
+from inference.kv_sampling import resolve_kv_sampling
 from utils.config import ensure_dir
 
 
@@ -54,7 +55,8 @@ def export_student_video(config, dataset, sequence_index, output_root, source,
                      coordinate_system="native independent DA3 window; not aligned to fused disparity")
             window_number += 1
         timing = infer_student_video(model, frames, emit, device=device,
-                                     amp=bool(eval_config.get("amp", True)), emit_window=emit_window)
+                                     amp=bool(eval_config.get("amp", True)), emit_window=emit_window,
+                                     kv_sampling=resolve_kv_sampling(config))
         spool.flush()
         del model
         percentiles = tuple(visual.get("adaptive_percentiles", [5.0, 95.0]))

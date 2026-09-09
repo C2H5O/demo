@@ -16,7 +16,8 @@ from datasets.crossclip_teacher_dataset import (
 )
 from datasets.scared_clip_dataset import make_scared_rgb_dataset
 from evaluation.temporal_alignment import camera_index, evaluate_tae
-from inference.student_video import infer_student_video, sequence_frames
+from inference.student_video import WINDOW, infer_student_video, sequence_frames
+from inference.kv_sampling import resolve_kv_sampling
 
 from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import require_student_cache_protocol
@@ -176,8 +177,8 @@ def evaluate_vda(
     limit_clips is retained as a Python compatibility name for a window budget.
     """
     config = load_config(config_path)
-    if config.get("inference", {}).get("acceleration", "none") != "none":
-        raise NotImplementedError("Spark3R variants are planned, not implemented; do not report dense inference as accelerated results")
+    kv_config = resolve_kv_sampling(config)
+    kv_config.frame_budget(WINDOW)
     eval_config = dict(config.get(_evaluation_section("vda", model_source), {}))
     split = split_override or str(eval_config.get("split", "test"))
     if model_source == OFFICIAL_DA3_SMALL_SOURCE and split != "test":
@@ -230,7 +231,7 @@ def evaluate_vda(
             def emit(start, disparities, intrinsics):
                 spool.add(range(start, start + len(disparities)), disparities)
             timing = infer_student_video(model, frames, emit, device=device, amp=amp,
-                                         max_windows=remaining)
+                                         max_windows=remaining, kv_sampling=kv_config)
             spool.flush()
             item = vda_core._evaluate_sequence(
                 sequence, spool, int(eval_config.get("gt_depth_channel", 0)),
@@ -255,6 +256,9 @@ def evaluate_vda(
     metrics["tae"] = float(np.mean(temporal)) if temporal else None
     total_frames = sum(item["inference"]["output_frame_count"] for item in sequence_results)
     total_seconds = sum(item["inference"]["model_forward_seconds"] for item in sequence_results)
+    pipeline_seconds = sum(item["inference"]["sequence_pipeline_seconds"] for item in sequence_results)
+    peak_memory = [item["inference"]["peak_cuda_memory_allocated_bytes"] for item in sequence_results
+                   if item["inference"]["peak_cuda_memory_allocated_bytes"] is not None]
     complete = not skipped and len(sequence_results) == len(sequences) and all(
         item["missing_prediction_count"] == 0 and item["inference"]["output_frame_count"] ==
         len(sequences[item["sequence_id"]]["frame_paths"]) for item in sequence_results)
@@ -276,6 +280,10 @@ def evaluate_vda(
         "mean_frame_inference_seconds": total_seconds / total_frames,
         "mean_frame_inference_ms": 1000 * total_seconds / total_frames,
         "inference_fps": total_frames / total_seconds if total_seconds else None,
+        "kv_sampling": kv_config.as_dict(),
+        "total_sequence_pipeline_seconds": pipeline_seconds,
+        "pipeline_fps": total_frames / pipeline_seconds if pipeline_seconds else None,
+        "peak_cuda_memory_allocated_bytes": max(peak_memory) if peak_memory else None,
         "timing_scope": sequence_results[0]["inference"]["timing_scope"],
         "warmup_excluded": False, "amp": amp, "device": str(device),
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
