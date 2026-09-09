@@ -41,50 +41,51 @@ frames are recorded; incomplete or debug runs never claim a full test set.
 
 ## TAE definition and SCARED adaptation
 
-[Depth Any Video, Eq. 7](https://arxiv.org/html/2410.10815v2) defines temporal
-alignment error using bidirectional reprojection of predicted depths with
-dataset cameras. Its repository does not expose the benchmark evaluator in
-the inspected public root. We use the executable interpretation in
-[VDA's `eval_tae.py`](https://github.com/DepthAnything/Video-Depth-Anything/blob/main/benchmark/eval/eval_tae.py)
-as an additional implementation reference.
+The sole operational reference is
+[Video-Depth-Anything's `benchmark/eval/eval_tae.py`](https://github.com/DepthAnything/Video-Depth-Anything/blob/main/benchmark/eval/eval_tae.py).
+The shared implementation in `evaluation/temporal_alignment.py` intentionally
+preserves its numerical behavior and adds no alternative TAE definition.
 
-For each consecutive source-frame pair, let `E_i` be dataset world-to-camera
-extrinsics and `K_i` its resized intrinsics. Transform backprojected depth from
-frame i to j using `E_j @ inverse(E_i)`, project to the target image, and compute
-`mean(abs(projected_Z - predicted_target_Z) / predicted_target_Z)` on valid
-projected pixels. Repeat in the reverse direction. `tae` is 100 times the mean
-of these directed pair errors. Lower is better; its unit is percent. All frames
-use the same GT disparity alignment as the spatial metrics. No per-frame or
-per-pair rescaling is allowed.
+Before reprojection, all predicted disparities in one sequence receive one
+float64 least-squares scale/shift fit against GT-valid pixels. SCARED GT depth
+is converted from millimetres to metres first, and the existing valid range
+remains `(0.001, 100)` metres. The fit is never per-frame, per-pair, or
+per-inference-window. VDA-style anchor alignment inside 32-frame inference is a
+separate, GT-free stitching step and remains unchanged.
 
-The paper's printed sum bounds and `T-2` denominator are inconsistent with the
-stated adjacent-frame definition. The executable VDA reference uses `2*(T-1)`;
-we use the actual number of valid directed comparisons. Two explicit numerical
-differences from that script are necessary for deterministic and auditable
-evaluation: collisions use a nearest-surface z-buffer instead of unordered
-last-write assignment; empty projections are failures/skips, not zero errors.
-Points behind the target camera are rejected. Source and target intrinsics may
-differ. These choices are recorded as a SCARED adaptation, so resulting scores
-must not be presented as a bit-identical ScanNet/ScanNet++ reproduction.
+For each adjacent pair, `tae_torch` uses integer pixel coordinates beginning at
+zero, backprojects camera Z-depth, applies `R_2_1` and `t_2_1`, rounds projected
+coordinates, and performs `depth_proj[valid_Y, valid_X] = valid_Z`. Duplicate
+indices therefore follow VDA's direct-assignment behavior: there is no minimum-Z
+buffer, scatter reduction, splatting, or fusion. The valid comparison mask is
+exactly `(depth_proj > 0) & (depth2 > 0) & mask`; because SCARED has no matching
+extra benchmark mask, `mask` is all true and is not replaced by the GT-valid
+alignment mask. AbsRel uses target `depth2` as its denominator. An empty
+projection contributes zero, as in the reference.
 
-TAE considers neighboring RGB frames whose numerical IDs differ by
-`tae.frame_id_step` (default 1). It does not bridge missing frames. Sparse GT
-can still supply the one sequence-wide depth alignment; cameras must exist for
-each scored RGB frame. The metric uses valid positive predicted depths and
-in-bounds positive-Z projections, without an additional GT visibility mask,
-optical-flow network, or filtering based on the prediction's error.
+Every pair is evaluated in both directions. The sum is divided by exactly
+`2 * (num_frames - 1)` and multiplied by 100, so TAE is percent and lower is
+better. Empty directions remain in this fixed denominator; they are not skipped.
 
-SCARED `camera-calibration.KL` and `camera-pose` are read from
-`data/frame_data/*.json`; translations are multiplied by 0.001, like depth GT.
-The world-to-camera convention is also used in
-[EndoSurf's SCARED reader](https://github.com/Ruyi-Zha/endosurf/blob/master/data/scared2019/preprocess.py).
-The camera matrices must correspond to the RGB field of view. This reader
-supports full-FOV direct resizing; it does not infer crop, rectification or
-distortion corrections. Cropped/preprocessed RGB or alternative calibration
-formats need an explicit matching camera transformation before evaluation.
-Rigid camera reprojection does not compensate for independently moving or
-deforming tissue; interpret TAE together with spatial accuracy and pair
-coverage rather than as a complete measure of depth quality.
+VDA's dataset extractor copies the
+[ScanNet pose files](https://github.com/DepthAnything/Video-Depth-Anything/blob/main/benchmark/dataset_extract/dataset_extract_scannet.py)
+unchanged, and ScanNet's
+[official exporter writes camera-to-world poses](https://github.com/ScanNet/ScanNet/blob/master/SensReader/python/SensorData.py).
+Therefore VDA's `T_2_1 = inverse(T_2) @ T_1` uses c2w inputs. SCARED
+`camera-pose` is world-to-camera, as also shown by
+[EndoSurf's SCARED reader](https://github.com/Ruyi-Zha/endosurf/blob/master/data/scared2019/preprocess.py),
+which inverts that matrix to obtain `c2w`. The evaluator first scales the raw
+SCARED w2c translation by `0.001`, then inverts it to VDA-compatible c2w and
+uses the same `inverse(T_2) @ T_1` formula. This maps camera-1 coordinates to
+camera 2; identity poses produce an identity relative transform.
+
+Like the official evaluator, both directions of a pair use the first frame's
+single `K`; there is no source-K/target-K variant. Per-sequence JSON records
+whether adjacent resized SCARED intrinsics were exactly equal and their maximum
+absolute difference, rather than silently changing the metric when they differ.
+The camera matrices must correspond to full-FOV RGB; the data adapter only
+rescales K for direct image resizing and does not infer crop, rectification, or
+distortion corrections.
 
 ## Timing and visualization
 

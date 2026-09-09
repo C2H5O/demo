@@ -222,7 +222,8 @@ def _streaming_scale_shift(
     gt_channel: int,
     sequence_id: str,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
-    reduced = None
+    gt_depth_values = []
+    predicted_disparity_values = []
     valid_pixel_count = 0
     for _, frame_index, gt_path in pairs:
         gt = _resized_gt(gt_path, gt_channel, spool.height, spool.width)
@@ -230,20 +231,26 @@ def _streaming_scale_shift(
         valid = (gt > 1e-3) & (gt < SCARED_MAX_DEPTH)
         if not np.any(valid):
             continue
-        target = 1.0 / (gt[valid].reshape(-1, 1).astype(np.float64) + 1e-8)
-        predicted = prediction[valid].reshape(-1, 1).astype(np.float64)
-        augmented = np.concatenate([predicted, np.ones_like(predicted), target], axis=-1)
-        _, frame_reduction = np.linalg.qr(augmented, mode="reduced")
-        if reduced is None:
-            reduced = frame_reduction
-        else:
-            _, reduced = np.linalg.qr(
-                np.concatenate([reduced, frame_reduction], axis=0), mode="reduced"
-            )
+        gt_depth_values.append(gt[valid])
+        predicted_disparity_values.append(prediction[valid])
         valid_pixel_count += int(valid.sum())
-    if reduced is None:
+    if not gt_depth_values:
         raise RuntimeError("No valid GT pixels remain for {}".format(sequence_id))
-    scale, shift = np.linalg.lstsq(reduced[:, :2], reduced[:, 2:3], rcond=None)[0]
+    # Match Video-Depth-Anything eval_tae.py: one global float64 disparity
+    # scale/shift fit over every GT-valid pixel in the complete sequence.
+    gt_disp_masked = 1.0 / (
+        np.concatenate(gt_depth_values).reshape(-1, 1).astype(np.float64)
+        + 1e-8
+    )
+    pred_disp_masked = (
+        np.concatenate(predicted_disparity_values)
+        .reshape(-1, 1)
+        .astype(np.float64)
+    )
+    A = np.concatenate(
+        [pred_disp_masked, np.ones_like(pred_disp_masked)], axis=-1
+    )
+    scale, shift = np.linalg.lstsq(A, gt_disp_masked, rcond=None)[0]
     return scale, shift, valid_pixel_count
 
 
