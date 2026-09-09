@@ -48,6 +48,10 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert result["inference_frame_count"] == 6
     assert result["model_input_frame_count"] == 64
     assert result["metrics"]["tae"] == pytest.approx(0)
+    assert result["tae_reference"] == "DepthAnything/Video-Depth-Anything benchmark/eval/eval_tae.py"
+    assert result["tae_projection_collision"] == "direct_assignment_matching_vda"
+    assert result["tae_empty_projection"] == "zero_error_matching_vda"
+    assert result["tae_alignment"] == "single_sequence_disparity_scale_shift_fit"
     assert result["metrics"]["abs_relative_difference"] == pytest.approx(0, abs=1e-6)
     assert result["mean_frame_inference_seconds"] == result["total_model_inference_seconds"] / 6
     assert json.loads((tmp_path / "result.json").read_text())["sequence_count"] == 2
