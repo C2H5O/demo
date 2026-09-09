@@ -168,7 +168,6 @@ vda_evaluation:
     require_all_pairs: true
     frame_data_relative_directory: data/frame_data
     pose_translation_scale: 0.001
-    frame_id_step: 1
   amp: true
   output: ./outputs/vggtoda3_direct/evaluation_test_vda.json
 
@@ -186,7 +185,6 @@ da3_small_baseline_vda_evaluation:
     require_all_pairs: true
     frame_data_relative_directory: data/frame_data
     pose_translation_scale: 0.001
-    frame_id_step: 1
   amp: true
   output: ./outputs/da3_small_baseline/evaluation_scared_8_9_vda.json
 
