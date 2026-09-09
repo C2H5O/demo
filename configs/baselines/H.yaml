@@ -1,0 +1,23 @@
+# C weights are the feature/attention-distillation run in the server's vggtoda3 project.
+# Use exactly G's inference algorithm; no separate baseline_C training is required.
+base_config: G.yaml
+experiment:
+  name: baseline_H_C-vda-role-kv
+  baseline_id: H
+  source_weights_branch: feature/attention-distillation
+  source_weights_project: vggtoda3
+  training_required: false
+  implementation_status: implemented_runtime_validation_pending
+# Preserve C's historical loss configuration as provenance only; no loss runs.
+loss:
+  highlight_mode: legacy
+training:
+  output_dir: ./outputs/baseline_H
+  resume: null
+vda_evaluation:
+  checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt
+  output: ./outputs/baseline_H/evaluation_test.json
+visualization:
+  output_dir: ./outputs/baseline_H/visualization
+inference:
+  source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt

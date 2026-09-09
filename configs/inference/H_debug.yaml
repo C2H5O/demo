@@ -1,0 +1,7 @@
+base_config: ../baselines/H.yaml
+kv_sampling:
+  debug: true
+  debug_max_windows: 2
+  profile_attention: true
+vda_evaluation:
+  output: ./outputs/baseline_H/evaluation_debug.json

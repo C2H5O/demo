@@ -50,5 +50,17 @@
     "training_required": false,
     "implemented": true,
     "validation_status": "runtime_pending"
+  },
+  {
+    "id": "H",
+    "branch": "baseline-h",
+    "config": "configs/baselines/H.yaml",
+    "training_required": false,
+    "implemented": true,
+    "validation_status": "runtime_pending",
+    "source_baseline": "C",
+    "source_weights_branch": "feature/attention-distillation",
+    "source_weights_project": "vggtoda3",
+    "inference_algorithm": "vda_role_2_key_2_overlap_4_new"
   }
 ]
