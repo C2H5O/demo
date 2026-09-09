@@ -226,13 +226,21 @@ scoring. Per-sequence `inference` also records pipeline time and its exact scope
 
 TAE needs original SCARED `data/frame_data/frame_data%06d.json` files with
 `camera-calibration.KL` and `camera-pose`, in addition to RGB and depth GT.
-The evaluator reads real world-to-camera poses, converts their translation
-from millimetres to metres, and resizes intrinsics with full-FOV RGB.
+The evaluator converts each SCARED world-to-camera pose (translation mm to m)
+to the camera-to-world convention used by Video-Depth-Anything, then applies
+the official `inverse(T_2) @ T_1` relative transform. It uses the first frame's
+single K in both directions, direct projected-depth assignment on collisions,
+zero error for empty projections, and the fixed `2*(T-1)` denominator.
+Predicted disparity receives one GT-based scale/shift fit over the entire
+sequence; the GT-valid mask is not reused as the extra reprojection mask.
 It never uses Teacher caches or Student-predicted camera poses for TAE.
 Missing camera files fail preflight by default. For a deliberately spatial-only
 run, set `tae.enabled: false` in the relevant evaluation config section; the JSON
-then records `tae: null`. Explicit `tae.require_all_pairs: false` permits partial
-TAE with skipped-pair counts. Neither case claims full temporal coverage.
+then records `tae: null`. Explicit `tae.require_all_pairs: false` permits a
+partial data-coverage run after missing frames are recorded; empty projections
+are still zero-valued directions, never skipped. Neither case claims complete
+temporal coverage. The operational metric reference is
+[`Video-Depth-Anything/benchmark/eval/eval_tae.py`](https://github.com/DepthAnything/Video-Depth-Anything/blob/main/benchmark/eval/eval_tae.py).
 
 Sequence visualization saves fused depth and camera-local point clouds under
 `full_sequence/`; original window camera predictions are in `camera_windows/`.
