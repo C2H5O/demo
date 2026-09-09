@@ -1,4 +1,4 @@
-"""Full-sequence DA3 inference with VDA spatial metrics and DAV-style TAE."""
+"""Full-sequence DA3 inference with VDA spatial metrics and VDA TAE."""
 
 from __future__ import annotations
 
@@ -15,7 +15,11 @@ from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_PROTOCOL,
 )
 from datasets.scared_clip_dataset import make_scared_rgb_dataset
-from evaluation.temporal_alignment import camera_index, evaluate_tae
+from evaluation.temporal_alignment import (
+    VDA_TAE_METADATA,
+    camera_index,
+    evaluate_tae,
+)
 from inference.student_video import WINDOW, infer_student_video, sequence_frames
 from inference.kv_sampling import resolve_kv_sampling
 
@@ -263,7 +267,8 @@ def evaluate_vda(
         item["missing_prediction_count"] == 0 and item["inference"]["output_frame_count"] ==
         len(sequences[item["sequence_id"]]["frame_paths"]) for item in sequence_results)
     result = {
-        "protocol": "video-depth-anything-depth+dav-tae-scared-v1",
+        "protocol": "video-depth-anything-depth+video-depth-anything-tae-scared-v2",
+        **VDA_TAE_METADATA,
         "config": str(config_path), "model_source": model_source,
         "checkpoint": str(checkpoint) if checkpoint is not None else str(config["student"]["checkpoint"]),
         "split": split, "metrics": metrics, "metric_aggregation": "macro mean over evaluated sequences",
