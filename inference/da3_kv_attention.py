@@ -16,7 +16,9 @@ import torch
 import torch.nn.functional as F
 from torch.overrides import TorchFunctionMode
 
-from inference.kv_sampling import KVSamplingConfig, WindowFrameMetadata, select_kv_frames
+from inference.kv_sampling import (
+    KVSamplingConfig, WindowFrameMetadata, eligible_frame_slots, select_kv_frames,
+)
 from models.attention_capture import _blocks
 
 
@@ -83,6 +85,11 @@ class DA3KVAttention:
         self.attention_seconds = 0.0
         self.profiled_calls = 0
         self.metadata = None
+        self.highlight_processor = None
+        if config.enabled and config.method == "vda_role_highlight":
+            from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
+            self.highlight_processor = SpecularHighlightProcessor(
+                HighlightDetectionConfig(**config.highlight_detection))
         if self.encoder is None:
             if self.observing:
                 raise RuntimeError("KV sampling requires the real DA3 backbone.pretrained encoder")
@@ -155,7 +162,17 @@ class DA3KVAttention:
     def begin_window(self, metadata: WindowFrameMetadata, images: torch.Tensor):
         """Receive provenance from window construction, never infer roles in attention."""
         self.metadata = metadata
-        self.selected = select_kv_frames(metadata, self.config, self.budget)
+        self.highlight_scores = None
+        if self.highlight_processor is not None:
+            if images.shape[0] != 1:
+                raise ValueError("Highlight window selection requires the sequence inference batch size of one")
+            # begin_window is inside synchronized inference timing. Detection,
+            # device-to-host copies, pixel ratios and ranking are all included.
+            self.highlight_scores = {
+                slot: float(self.highlight_processor.detect_mask_numpy(images[0, slot]).mean())
+                for slot in eligible_frame_slots(metadata) if metadata.frame_roles[slot] == "new"
+            }
+        self.selected = select_kv_frames(metadata, self.config, self.budget, self.highlight_scores)
         self.calls, self.events = [], []
         self.reference_indices = None
         self.token_indices = None
@@ -264,6 +281,10 @@ class DA3KVAttention:
                 "token_retention_ratio": kv_tokens / q_tokens,
                 "token_count_source": "observed_sdpa_inputs" if self.observing else "encoder_layout_dense",
             }
+            if self.highlight_scores is not None:
+                audit["new_highlight_scores"] = self.highlight_scores
+                audit["new_candidate_count"] = len(self.highlight_scores)
+                audit["highlight_score_type"] = "highlight_pixels / all_RGB_pixels"
             if len(self.audit_examples) < 2:
                 self.audit_examples.append(audit)
             if self.config.debug and metadata.window_id < self.config.debug_max_windows:

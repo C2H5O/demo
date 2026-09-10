@@ -1,11 +1,11 @@
-"""Image-independent frame selection for VDA-style inference windows.
+"""Frame selection for VDA-style inference windows.
 
 Window slots, sequence positions, dataset frame IDs, roles and padding are
-separate concepts. This module never reads RGB, features, depth or GT.
+separate concepts. Highlight policies accept pixel ratios, never depth or GT.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from math import ceil, isfinite
 from typing import Mapping, Sequence
 
@@ -50,6 +50,7 @@ class KVSamplingConfig:
     debug: bool = False
     debug_max_windows: int = 2
     profile_attention: bool = False
+    highlight_detection: dict = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -74,8 +75,8 @@ class KVSamplingConfig:
         """Resolve the shared F/G budget once from the real inference window size."""
         if not self.enabled:
             return window_length
-        if self.method not in {"vda_role", "spark3r_fixed_stride"}:
-            raise ValueError("kv_sampling.method must be vda_role or spark3r_fixed_stride")
+        if self.method not in {"vda_role", "vda_role_highlight", "spark3r_fixed_stride"}:
+            raise ValueError("Unknown kv_sampling.method")
         if not isfinite(self.retention_ratio) or not 0 < self.retention_ratio <= 1:
             raise ValueError("retention_ratio must be in (0, 1]")
         counts = (self.key_frames, self.overlap_frames, self.new_frames,
@@ -83,12 +84,18 @@ class KVSamplingConfig:
         if any(type(count) is not int or count < 0 for count in counts):
             raise ValueError("Frame budgets, stride and debug limit must be nonnegative integers")
         target = ceil(window_length * self.retention_ratio)
-        if self.first_window_method != "uniform" or self.first_window_num_frames != target:
-            raise ValueError("First-window uniform budget must equal the shared retention budget")
+        first_method = "highlight" if self.method == "vda_role_highlight" else "uniform"
+        if self.first_window_method != first_method or self.first_window_num_frames != target:
+            raise ValueError("First-window method and budget must match the KV policy")
         if sum((self.key_frames, self.overlap_frames, self.new_frames)) != target:
             raise ValueError("Role quotas must sum to the shared retention budget")
         if self.temporal_stride < 1:
             raise ValueError("temporal_stride must be positive")
+        if self.method == "vda_role_highlight" and (
+            window_length != 32 or target != 16
+            or (self.key_frames, self.overlap_frames, self.new_frames) != (2, 8, 6)
+        ):
+            raise ValueError("Highlight policy requires 32 frames and exactly 2+8+6=16 KV")
         if self.method == "spark3r_fixed_stride" and len(range(0, window_length, self.temporal_stride)) != target:
             raise ValueError("Fixed stride must give the same full-window frame budget as G")
         return target
@@ -161,11 +168,34 @@ def select_vda_role_kv_frames(metadata: WindowFrameMetadata, budget: int,
 
 
 def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
-                     budget: int) -> list[int]:
+                     budget: int, highlight_scores: Mapping[int, float] | None = None) -> list[int]:
     """Dispatch frame selection with an identical unique-frame cap for F and G."""
     if not config.enabled:
         return list(range(len(metadata.frame_positions)))
-    if config.method == "vda_role":
+    if config.method == "vda_role_highlight":
+        config.frame_budget(len(metadata.frame_positions))
+        if budget != 16:
+            raise ValueError("Highlight policy requires a 16-frame budget")
+        candidates = eligible_frame_slots(metadata)
+        new = [slot for slot in candidates if metadata.frame_roles[slot] == "new"]
+        scores = highlight_scores or {}
+        if any(slot not in scores or not isfinite(scores[slot]) or not 0 <= scores[slot] <= 1
+               for slot in new):
+            raise ValueError("Every eligible new frame requires a finite highlight pixel ratio in [0,1]")
+        # First window has no historical roles. Tail padding/duplicates never
+        # become references; retain all feasible history and up to six new.
+        history = [slot for slot in candidates if metadata.frame_roles[slot] != "new"]
+        if not metadata.first_window and (
+            sum(metadata.frame_roles[slot] == "key" for slot in history) > 2
+            or sum(metadata.frame_roles[slot] == "overlap" for slot in history) > 8
+        ):
+            raise ValueError("Highlight policy expects at most 2 key and 8 overlap frames")
+        count = budget if metadata.first_window else config.new_frames
+        selected_new = sorted(new, key=lambda slot: (scores[slot], slot))[:count]
+        selected = sorted(history + selected_new)
+        if len(candidates) == 32 and not metadata.first_window:
+            assert len(history) == 10 and len(selected_new) == 6 and len(selected) == 16
+    elif config.method == "vda_role":
         selected = select_vda_role_kv_frames(metadata, budget, {
             "key": config.key_frames, "overlap": config.overlap_frames, "new": config.new_frames,
         })
@@ -180,8 +210,12 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     else:
         raise ValueError("Unknown KV sampling method: " + config.method)
     expected = min(budget, len(eligible_frame_slots(metadata)))
+    if config.method == "vda_role_highlight" and not metadata.first_window:
+        expected = len(history) + min(config.new_frames, len(new))
     if len(selected) != expected or len(set(selected)) != expected or not selected:
         raise RuntimeError("KV selection must reach the feasible unique-frame budget")
     if any(slot < 0 or slot >= len(metadata.frame_positions) for slot in selected):
         raise RuntimeError("KV frame slot out of bounds")
+    if selected != sorted(selected):
+        raise RuntimeError("KV frames must remain in original window order")
     return selected

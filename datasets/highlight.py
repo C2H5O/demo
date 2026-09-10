@@ -203,6 +203,13 @@ class SpecularHighlightProcessor:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return binary float32 mask and float32 [0,1] inpainted RGB."""
         rgb = self._to_uint8_rgb(image)
+        mask = self.detect_mask_numpy(rgb)
+        inpainted = self._inpaint(mask, rgb) / 255.0
+        return mask, inpainted
+
+    def detect_mask_numpy(self, image: torch.Tensor | np.ndarray) -> np.ndarray:
+        """Run the existing detector without generating an inpainted output."""
+        rgb = self._to_uint8_rgb(image)
         red, green, blue = (rgb[..., index].astype(np.float32) for index in range(3))
         luminance = 0.2989 * red + 0.5870 * green + 0.1140 * blue
         absolute = self._module1(
@@ -219,9 +226,7 @@ class SpecularHighlightProcessor:
             self.config.dilation_radius,
             "dilate",
         )
-        mask = self._classify(dilated)
-        inpainted = self._inpaint(mask, rgb) / 255.0
-        return mask, inpainted
+        return self._classify(dilated)
 
     def __call__(self, image: torch.Tensor | np.ndarray) -> Dict[str, torch.Tensor]:
         mask, inpainted = self.process_numpy(image)
