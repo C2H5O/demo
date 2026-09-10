@@ -8,7 +8,7 @@ from torch.overrides import TorchFunctionMode
 import inference.da3_kv_attention as attention_module
 from inference.da3_kv_attention import DA3KVAttention
 from inference.kv_sampling import (
-    KVSamplingConfig, eligible_frame_slots, select_bucket_highlight_frames,
+    KVSamplingConfig, bucket_keep_count, eligible_frame_slots, select_bucket_highlight_frames,
     select_kv_frames, temporal_buckets,
 )
 from inference.lightweight_highlight import compute_lightweight_highlight_scores
@@ -19,26 +19,32 @@ from test_vda_role_kv import normal_window, tiny_da3
 
 BUCKETS = [[10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20],
            [21, 22, 23], [24, 25, 26, 27], [28, 29, 30, 31]]
-WINNERS = [12, 15, 18, 21, 27, 30]
+KEEP_COUNTS = [1, 2, 2, 1, 2, 2]
+WINNERS = [12, 15, 16, 18, 19, 21, 24, 27, 28, 30]
 
 
 def bucket_config():
     return KVSamplingConfig.from_mapping(load_config("configs/baselines/H.yaml")["kv_sampling"])
 
 
-def test_normal_window_keeps_history_and_one_minimum_per_bucket():
+def test_normal_window_keeps_history_and_ten_new_with_size_dependent_counts():
     config = bucket_config()
-    assert config.method == "vda_role_bucket_highlight" and config.frame_budget(32) == 16
+    assert config.method == "vda_role_bucket_highlight" and config.frame_budget(32) == 20
+    assert config.frame_budget(32, first_window=True) == 16
+    assert config.bucket_highlight == {"num_buckets": 6, "keep_policy": "size_dependent"}
+    assert config.new_frames == 10 and config.first_window_num_buckets == 16
     scores = {**dict.fromkeys(range(10), 1.), **dict(zip(range(10, 32), SCORES))}
     audit = {}
-    selected = select_kv_frames(normal_window(), config, 16, scores, audit)
+    selected = select_kv_frames(normal_window(), config, 20, scores, audit)
     assert selected == [*range(10), *WINNERS]
-    assert len(selected) == len(set(selected)) == 16
+    assert len(selected) == len(set(selected)) == 20
     assert audit["new_temporal_buckets"] == BUCKETS
     assert audit["bucket_selected_slots"] == WINNERS
-    for bucket, winner in zip(BUCKETS, WINNERS):
-        assert len(set(selected).intersection(bucket)) == 1
-        assert scores[winner] == min(scores[slot] for slot in bucket)
+    assert audit["bucket_keep_counts"] == KEEP_COUNTS
+    for bucket, keep in zip(BUCKETS, KEEP_COUNTS):
+        chosen = set(selected).intersection(bucket)
+        assert len(chosen) == keep
+        assert sorted(scores[slot] for slot in chosen) == sorted(scores[slot] for slot in bucket)[:keep]
 
 
 def test_first_window_uses_sixteen_buckets_and_lowest_score_in_each():
@@ -48,18 +54,42 @@ def test_first_window_uses_sixteen_buckets_and_lowest_score_in_each():
     assert selected == list(range(1, 32, 2))
     assert audit["new_temporal_buckets"] == [[i, i + 1] for i in range(0, 32, 2)]
     assert audit["bucket_selected_slots"] == selected
+    assert audit["bucket_keep_counts"] == [1] * 16
 
 
 def test_ties_use_earlier_temporal_candidate_and_scores_can_change_winners():
     scores = dict.fromkeys(range(32), 0.)
-    selected = select_kv_frames(normal_window(), bucket_config(), 16, scores)
-    assert selected == [*range(10), 10, 13, 17, 21, 24, 28]
+    selected = select_kv_frames(normal_window(), bucket_config(), 20, scores)
+    assert selected == [*range(10), 10, 13, 14, 17, 18, 21, 24, 25, 28, 29]
     assert select_kv_frames(normal_window(True), bucket_config(), 16, scores) == list(range(0, 32, 2))
     scores = dict.fromkeys(range(32), 1.)
     for bucket in BUCKETS:
         scores[bucket[-1]] = 0.
-    assert select_kv_frames(normal_window(), bucket_config(), 16, scores) == [
-        *range(10), 12, 16, 20, 23, 27, 31]
+    assert select_kv_frames(normal_window(), bucket_config(), 20, scores) == [
+        *range(10), 12, 13, 16, 17, 20, 23, 24, 27, 28, 31]
+
+
+@pytest.mark.parametrize("size,expected", [(-1, 0), (0, 0), (1, 1), (2, 1),
+                                           (3, 1), (4, 2), (5, 3), (6, 3), (7, 4)])
+def test_bucket_keep_count_general_rule(size, expected):
+    assert bucket_keep_count(size) == expected
+
+
+@pytest.mark.parametrize("scores,expected", [
+    ([.010, .009, .009, .012], [14, 15]),
+    ([.009, .009, .009, .012], [13, 14]),
+    ([.03, .01, .04, .02], [14, 16]),
+])
+def test_four_frame_bucket_keeps_two_lowest_with_stable_ties(scores, expected):
+    selected, buckets = select_bucket_highlight_frames(
+        [13, 14, 15, 16], dict(zip(range(13, 17), scores)), 1, keep_policy="size_dependent")
+    assert buckets == [[13, 14, 15, 16]] and selected == expected
+
+
+def test_three_frame_bucket_keeps_only_one():
+    selected, _ = select_bucket_highlight_frames(
+        [10, 11, 12], {10: .03, 11: .01, 12: .02}, 1, keep_policy="size_dependent")
+    assert selected == [11]
 
 
 @pytest.mark.parametrize("size,quota", [(0, 6), (1, 6), (5, 6), (7, 6), (22, 6), (32, 16)])
@@ -80,13 +110,13 @@ def test_tail_excludes_padding_duplicates_and_history_duplicates():
     metadata = replace(metadata, frame_positions=tuple(positions),
                        is_padding=(False,) * 15 + (True,) * 17)
     audit = {}
-    selected = select_kv_frames(metadata, bucket_config(), 16, dict.fromkeys(range(32), 0.), audit)
+    selected = select_kv_frames(metadata, bucket_config(), 20, dict.fromkeys(range(32), 0.), audit)
     assert selected == [*range(10), 10, 13, 14]
     assert audit["new_temporal_buckets"] == [[10], [13], [14]]
     assert len({metadata.frame_positions[slot] for slot in selected}) == len(selected)
     assert set(selected) <= set(eligible_frame_slots(metadata))
     no_new = replace(metadata, is_padding=(False,) * 10 + (True,) * 22)
-    assert select_kv_frames(no_new, bucket_config(), 16, {}) == list(range(10))
+    assert select_kv_frames(no_new, bucket_config(), 20, {}) == list(range(10))
     short = replace(normal_window(True), frame_positions=(0,) * 32,
                     is_padding=(False,) + (True,) * 31)
     assert select_kv_frames(short, bucket_config(), 16, {0: .5}) == [0]
@@ -97,10 +127,21 @@ def test_bucket_order_uses_source_time_but_final_indices_use_window_order():
     metadata = replace(metadata, frame_positions=(*metadata.frame_positions[:10],
                                                  *reversed(metadata.frame_positions[10:])))
     audit = {}
-    selected = select_kv_frames(metadata, bucket_config(), 16, dict.fromkeys(range(32), 0.), audit)
+    selected = select_kv_frames(metadata, bucket_config(), 20, dict.fromkeys(range(32), 0.), audit)
     assert audit["new_temporal_buckets"][0] == [31, 30, 29]
-    assert audit["bucket_selected_slots"] == [31, 28, 24, 20, 17, 13]
-    assert selected == sorted([*range(10), 31, 28, 24, 20, 17, 13])
+    assert audit["bucket_selected_slots"] == [31, 28, 27, 24, 23, 20, 17, 16, 13, 12]
+    assert selected == sorted([*range(10), 31, 28, 27, 24, 23, 20, 17, 16, 13, 12])
+
+
+@pytest.mark.parametrize("new_count,expected_new", [(0, 0), (1, 1), (5, 5), (7, 6),
+                                                    (18, 6), (19, 7), (21, 9), (22, 10)])
+def test_tail_budget_follows_bucket_sizes_instead_of_forcing_twenty(new_count, expected_new):
+    metadata = replace(normal_window(), is_padding=(False,) * (10 + new_count) + (True,) * (22 - new_count))
+    audit = {}
+    selected = select_kv_frames(metadata, bucket_config(), 20, dict.fromkeys(range(32), 0.), audit)
+    assert len(selected) == 10 + expected_new
+    assert sum(audit["bucket_keep_counts"]) == expected_new
+    assert len(selected) == len(set(selected))
 
 
 def test_legacy_selectors_keep_their_original_policies():
@@ -116,6 +157,14 @@ def test_legacy_selectors_keep_their_original_policies():
     assert select_kv_frames(normal_window(True), legacy, 16, scores) == list(range(16))
 
 
+@pytest.mark.parametrize("name,enabled,budget", [("B", False, 32), ("C", False, 32), ("G", True, 8)])
+def test_other_baseline_configuration_budgets_are_unchanged(name, enabled, budget):
+    config = KVSamplingConfig.from_mapping(load_config(f"configs/baselines/{name}.yaml").get("kv_sampling"))
+    assert config.enabled == enabled
+    assert config.frame_budget(32) == budget
+    assert config.frame_budget(32, first_window=True) == budget
+
+
 @pytest.mark.parametrize("options", [
     {"brightness_threshold": -1}, {"brightness_threshold": float("nan")},
     {"saturation_threshold": 1.1}, {"saturation_threshold": "0.2"},
@@ -128,14 +177,26 @@ def test_invalid_proxy_configuration_fails_at_budget_validation(options):
 
 
 @pytest.mark.parametrize("change", [
-    {"retention_ratio": .25}, {"key_frames": 1, "overlap_frames": 9},
+    {"retention_ratio": .5}, {"key_frames": 1, "overlap_frames": 9},
     {"new_frames": 5}, {"first_window_num_frames": 8}, {"first_window_method": "highlight"},
+    {"first_window_num_frames": 20}, {"first_window_num_buckets": 20},
+    {"first_window_num_buckets": None}, {"first_window_num_buckets": 16.0},
+    {"bucket_highlight": {"num_buckets": 10}}, {"bucket_highlight": {"num_buckets": 6.0}},
+    {"bucket_highlight": {"keep_policy": "one"}}, {"bucket_highlight": {"unknown": 1}},
 ])
-def test_bucket_budget_is_fixed(change):
+def test_first_and_later_budget_validation(change):
     with pytest.raises(ValueError):
         replace(bucket_config(), **change).frame_budget(32)
     with pytest.raises(ValueError):
         bucket_config().frame_budget(16)
+
+
+def test_selector_rejects_a_budget_for_the_wrong_window():
+    scores = dict.fromkeys(range(32), 0.)
+    with pytest.raises(ValueError, match="first/later"):
+        select_kv_frames(normal_window(True), bucket_config(), 20, scores)
+    with pytest.raises(ValueError, match="first/later"):
+        select_kv_frames(normal_window(), bucket_config(), 16, scores)
 
 
 def test_bad_scores_and_bucket_arguments_fail():
@@ -181,7 +242,7 @@ def test_proxy_respects_inclusive_thresholds_and_black_epsilon():
 
 
 @pytest.mark.parametrize("strategy", ["first", "middle", "saddle_balanced"])
-def test_adapter_scores_one_batch_avoids_pcdepth_and_keeps_rectangular_attention(strategy, monkeypatch):
+def test_adapter_variable_kv_windows_preserve_q_and_update_gather_audit(strategy, monkeypatch):
     from datasets.highlight import SpecularHighlightProcessor
     def forbidden(*args, **kwargs):
         raise AssertionError("New H must not instantiate PC-Depth or detect individual frames")
@@ -209,7 +270,8 @@ def test_adapter_scores_one_batch_avoids_pcdepth_and_keeps_rectangular_attention
     def observe(layer, kernel, query, key, value, **kwargs):
         def checked(q, k, v, **kw):
             assert tuple(q.shape) == (1, 2, 160, 12)
-            assert tuple(k.shape) == tuple(v.shape) == (1, 2, 96, 12)
+            expected_tokens = 96 if adapter.metadata.first_window else 112
+            assert tuple(k.shape) == tuple(v.shape) == (1, 2, expected_tokens, 12)
             torch.testing.assert_close(q, query, rtol=0, atol=0)
             ids = adapter.token_indices[:, None, :, None].expand(1, 2, -1, 12)
             torch.testing.assert_close(k, key.gather(2, ids), rtol=0, atol=0)
@@ -222,18 +284,32 @@ def test_adapter_scores_one_batch_avoids_pcdepth_and_keeps_rectangular_attention
         images = torch.zeros(1, 32, 3, 28, 28)
         for window_id in range(3):
             with TransferAudit():
-                adapter.begin_window(replace(normal_window(), window_id=window_id), images)
-            assert adapter.selected == [*range(10), 10, 13, 17, 21, 24, 28]
+                adapter.begin_window(replace(normal_window(first=window_id == 0), window_id=window_id), images)
+            if window_id == 0:
+                assert adapter.budget == 16 and adapter.selected == list(range(0, 32, 2))
+            else:
+                assert adapter.budget == 20
+                assert adapter.selected == [*range(10), 10, 13, 14, 17, 18, 21, 24, 25, 28, 29]
             features, _ = model(images)
             assert features[0][0].shape[:3] == (1, 32, 4)
             adapter.finish_window()
-    assert batches == [(22, 3, 28, 28)] * 3
-    assert transfers == [(22,)] * 3
-    assert observed == [(1, 2, 96, 12)] * 3
+    assert batches == [(32, 3, 28, 28), (22, 3, 28, 28), (22, 3, 28, 28)]
+    assert transfers == [(32,), (22,), (22,)]
+    assert observed == [(1, 2, 96, 12), (1, 2, 112, 12), (1, 2, 112, 12)]
     audits = adapter.summary()["kv_selection_examples"]
     assert len(audits) == 3
-    for audit in audits:
-        assert audit["selected_role_counts"] == {"key": 2, "overlap": 8, "new": 6}
+    first = audits[0]
+    assert first["selected_role_counts"] == {"key": 0, "overlap": 0, "new": 16}
+    assert first["total_kv_frame_count"] == 16 and first["kv_token_count"] == 96
+    assert first["q_token_count"] == 160 and first["kv_patch_token_count"] == 64
+    assert first["frame_retention_ratio"] == .5 and first["token_retention_ratio"] == 96 / 160
+    assert first["bucket_keep_counts"] == [1] * 16 and first["new_candidate_count"] == 32
+    for audit in audits[1:]:
+        assert audit["selected_role_counts"] == {"key": 2, "overlap": 8, "new": 10}
+        assert audit["total_kv_frame_count"] == 20 and audit["kv_token_count"] == 112
+        assert audit["q_token_count"] == 160 and audit["kv_patch_token_count"] == 80
+        assert audit["frame_retention_ratio"] == .625 and audit["token_retention_ratio"] == 112 / 160
         assert audit["new_temporal_buckets"] == BUCKETS
+        assert audit["bucket_keep_counts"] == KEEP_COUNTS
         assert audit["highlight_score_type"] == "gpu_brightness_low_saturation_ratio"
         assert audit["new_candidate_count"] == 22

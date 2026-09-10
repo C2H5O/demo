@@ -33,7 +33,7 @@ def test_exact_example_and_deterministic_ties():
     # Historical scores cannot delete any key/overlap frame.
     scores.update(dict.fromkeys(range(10), 1.0))
     assert select_kv_frames(normal_window(), config, 16, scores) == EXPECTED
-    for name, budget in (("F", 8), ("G", 8), ("H", 16)):
+    for name, budget in (("F", 8), ("G", 8), ("H", 20)):
         policy = KVSamplingConfig.from_mapping(load_config(f"configs/baselines/{name}.yaml")["kv_sampling"])
         assert policy.frame_budget(32) == budget
     with pytest.raises(ValueError):

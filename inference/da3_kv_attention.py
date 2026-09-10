@@ -71,7 +71,8 @@ class DA3KVAttention:
 
     Only selected global layers are wrapped, and every wrapper/hook is restored
     even when inference raises. Dense without debug/profiling installs no hooks.
-    The current schedule uses one shared frame budget at every global layer.
+    Every global layer uses the same selected set within a window. H's budget
+    is 16 for the first window and 20 for standard later windows.
     """
 
     def __init__(self, model, config: KVSamplingConfig, window_length: int):
@@ -166,6 +167,7 @@ class DA3KVAttention:
         self.highlight_scores = None
         self.selection_audit = {}
         if self.config.enabled and self.config.method == "vda_role_bucket_highlight":
+            self.budget = self.config.frame_budget(len(metadata.frame_positions), first_window=metadata.first_window)
             if images.ndim != 5 or images.shape[0] != 1 or images.shape[1] != len(metadata.frame_positions):
                 raise ValueError("Bucket highlight selection requires [1,F,3,H,W] matching metadata")
             new_slots = [slot for slot in eligible_frame_slots(metadata)

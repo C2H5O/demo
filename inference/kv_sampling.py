@@ -46,12 +46,14 @@ class KVSamplingConfig:
     new_frames: int = 4
     first_window_method: str = "uniform"
     first_window_num_frames: int = 8
+    first_window_num_buckets: int | None = None
     temporal_stride: int = 4
     debug: bool = False
     debug_max_windows: int = 2
     profile_attention: bool = False
     highlight_detection: dict = field(default_factory=dict)
     lightweight_highlight: dict = field(default_factory=dict)
+    bucket_highlight: dict = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -64,7 +66,7 @@ class KVSamplingConfig:
         stride = dict(value.pop("spark3r_fixed_stride", {}))
         # Unknown keys fail instead of silently enabling an old selection scheme.
         for section, allowed in ((role, {"key_frames", "overlap_frames", "new_frames"}),
-                                 (first, {"method", "num_frames"}),
+                                 (first, {"method", "num_frames", "num_buckets"}),
                                  (stride, {"temporal_stride"})):
             if set(section) - allowed:
                 raise ValueError("Unknown KV sampling fields: " + str(set(section) - allowed))
@@ -72,8 +74,8 @@ class KVSamplingConfig:
                    **{"first_window_" + key: val for key, val in first.items()},
                    **stride)
 
-    def frame_budget(self, window_length: int) -> int:
-        """Resolve the shared F/G budget once from the real inference window size."""
+    def frame_budget(self, window_length: int, *, first_window: bool = False) -> int:
+        """Validate policy and resolve this window's cap; default is the later-window cap."""
         if not self.enabled:
             return window_length
         if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight", "spark3r_fixed_stride"}:
@@ -87,19 +89,27 @@ class KVSamplingConfig:
         target = ceil(window_length * self.retention_ratio)
         first_method = {"vda_role_highlight": "highlight",
                         "vda_role_bucket_highlight": "bucket_highlight"}.get(self.method, "uniform")
-        if self.first_window_method != first_method or self.first_window_num_frames != target:
+        first_target = 16 if self.method == "vda_role_bucket_highlight" else target
+        if self.first_window_method != first_method or self.first_window_num_frames != first_target:
             raise ValueError("First-window method and budget must match the KV policy")
         if sum((self.key_frames, self.overlap_frames, self.new_frames)) != target:
             raise ValueError("Role quotas must sum to the shared retention budget")
         if self.temporal_stride < 1:
             raise ValueError("temporal_stride must be positive")
-        if self.method in {"vda_role_highlight", "vda_role_bucket_highlight"} and (
+        if self.method == "vda_role_highlight" and (
             window_length != 32 or target != 16
             or (self.key_frames, self.overlap_frames, self.new_frames) != (2, 8, 6)
         ):
             raise ValueError("Highlight policy requires 32 frames and exactly 2+8+6=16 KV")
         if self.method == "vda_role_bucket_highlight":
             resolve_lightweight_highlight_options(self.lightweight_highlight)
+            resolve_bucket_highlight_options(self.bucket_highlight)
+            if (window_length != 32 or target != 20
+                or (self.key_frames, self.overlap_frames, self.new_frames) != (2, 8, 10)
+                or type(self.first_window_num_buckets) is not int or self.first_window_num_buckets != 16):
+                raise ValueError("Bucket highlight requires window32, first16/16 buckets, later2+8+10=20")
+            if first_window:
+                return self.first_window_num_frames
         if self.method == "spark3r_fixed_stride" and len(range(0, window_length, self.temporal_stride)) != target:
             raise ValueError("Fixed stride must give the same full-window frame budget as G")
         return target
@@ -150,18 +160,51 @@ def temporal_buckets(candidates: Sequence[int], count: int) -> list[list[int]]:
             for b in range(buckets)]
 
 
-def select_bucket_highlight_frames(candidates: Sequence[int], scores: Mapping[int, float],
-                                    count: int) -> tuple[list[int], list[list[int]]]:
-    """One lowest-score frame per temporal bucket; ties prefer the earlier candidate.
+def bucket_keep_count(bucket_size: int) -> int:
+    """Later-window quota: empty=0, sizes1..3=1, sizes4+=ceil(size/2)."""
+    if type(bucket_size) is not int:
+        raise ValueError("bucket_size must be an integer")
+    if bucket_size <= 0:
+        return 0
+    return 1 if bucket_size <= 3 else (bucket_size + 1) // 2
 
-    Returns selected slots in bucket order and the buckets for bounded audit.
-    This coverage constraint does not fix which frame is selected in each bucket.
+
+def resolve_bucket_highlight_options(options: Mapping | None = None) -> dict:
+    """Separate six temporal buckets from the ten-new-frame full-window budget."""
+    if options is not None and not isinstance(options, Mapping):
+        raise ValueError("bucket_highlight must be a mapping")
+    defaults = {"num_buckets": 6, "keep_policy": "size_dependent"}
+    values = dict(options or {})
+    if set(values) - defaults.keys():
+        raise ValueError("Unknown bucket_highlight fields: " + str(set(values) - defaults.keys()))
+    values = {**defaults, **values}
+    if type(values["num_buckets"]) is not int or values["num_buckets"] != 6:
+        raise ValueError("Later bucket highlight requires exactly six temporal buckets")
+    if values["keep_policy"] != "size_dependent":
+        raise ValueError("Later bucket highlight requires keep_policy=size_dependent")
+    return values
+
+
+def select_bucket_highlight_frames(candidates: Sequence[int], scores: Mapping[int, float],
+                                    count: int, *, keep_policy: str = "one") -> tuple[list[int], list[list[int]]]:
+    """Lowest-score frame(s) per temporal bucket; ties prefer the earlier candidate.
+
+    The first window retains the original one-per-bucket rule. Later windows use
+    size-dependent counts. Return selected slots in temporal order, not score order.
     """
+    if keep_policy not in {"one", "size_dependent"}:
+        raise ValueError("Unknown bucket keep policy")
     buckets = temporal_buckets(candidates, count)
     if any(slot not in scores or not isfinite(scores[slot]) or not 0 <= scores[slot] <= 1
            for bucket in buckets for slot in bucket):
         raise ValueError("Every bucket candidate requires a finite highlight pixel ratio in [0,1]")
-    return [min(bucket, key=lambda slot: scores[slot]) for bucket in buckets], buckets
+    selected = []
+    for bucket in buckets:
+        keep = 1 if keep_policy == "one" else bucket_keep_count(len(bucket))
+        # Stable sort resolves ties in original candidate temporal order.
+        chosen = set(sorted(bucket, key=lambda slot: scores[slot])[:keep])
+        selected.extend(slot for slot in bucket if slot in chosen)
+    return selected, buckets
 
 
 def uniform_select(indices: Sequence[int], count: int) -> list[int]:
@@ -227,9 +270,9 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     if not config.enabled:
         return list(range(len(metadata.frame_positions)))
     if config.method in {"vda_role_highlight", "vda_role_bucket_highlight"}:
-        config.frame_budget(len(metadata.frame_positions))
-        if budget != 16:
-            raise ValueError("Highlight policy requires a 16-frame budget")
+        expected_budget = config.frame_budget(len(metadata.frame_positions), first_window=metadata.first_window)
+        if budget != expected_budget:
+            raise ValueError("Highlight budget does not match the current first/later window")
         candidates = eligible_frame_slots(metadata)
         new = [slot for slot in candidates if metadata.frame_roles[slot] == "new"]
         scores = highlight_scores or {}
@@ -237,7 +280,7 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
                for slot in new):
             raise ValueError("Every eligible new frame requires a finite highlight pixel ratio in [0,1]")
         # First window has no historical roles. Tail padding/duplicates never
-        # become references; retain all feasible history and up to six new.
+        # become references; retain all feasible history and the policy's new set.
         history = [slot for slot in candidates if metadata.frame_roles[slot] != "new"]
         if not metadata.first_window and (
             sum(metadata.frame_roles[slot] == "key" for slot in history) > 2
@@ -247,14 +290,22 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
         count = budget if metadata.first_window else config.new_frames
         if config.method == "vda_role_bucket_highlight":
             temporal_new = sorted(new, key=lambda slot: (metadata.frame_positions[slot], slot))
-            selected_new, buckets = select_bucket_highlight_frames(temporal_new, scores, count)
+            options = resolve_bucket_highlight_options(config.bucket_highlight)
+            num_buckets = config.first_window_num_buckets if metadata.first_window else options["num_buckets"]
+            keep_policy = "one" if metadata.first_window else options["keep_policy"]
+            selected_new, buckets = select_bucket_highlight_frames(
+                temporal_new, scores, num_buckets, keep_policy=keep_policy)
+            keep_counts = [1 if metadata.first_window else bucket_keep_count(len(bucket)) for bucket in buckets]
+            if len(selected_new) > (config.first_window_num_frames if metadata.first_window else config.new_frames):
+                raise RuntimeError("Bucket selection exceeded this window's new-frame budget")
             if selection_audit is not None:
-                selection_audit.update(new_temporal_buckets=buckets, bucket_selected_slots=selected_new)
+                selection_audit.update(new_temporal_buckets=buckets, bucket_selected_slots=selected_new,
+                                       bucket_keep_counts=keep_counts)
         else:
             selected_new = sorted(new, key=lambda slot: (scores[slot], slot))[:count]
         selected = sorted(history + selected_new)
         if len(candidates) == 32 and not metadata.first_window:
-            assert len(history) == 10 and len(selected_new) == 6 and len(selected) == 16
+            assert len(history) == 10 and len(selected_new) == config.new_frames and len(selected) == budget
     elif config.method == "vda_role":
         selected = select_vda_role_kv_frames(metadata, budget, {
             "key": config.key_frames, "overlap": config.overlap_frames, "new": config.new_frames,
@@ -270,7 +321,9 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     else:
         raise ValueError("Unknown KV sampling method: " + config.method)
     expected = min(budget, len(eligible_frame_slots(metadata)))
-    if config.method in {"vda_role_highlight", "vda_role_bucket_highlight"} and not metadata.first_window:
+    if config.method == "vda_role_bucket_highlight":
+        expected = len(history) + sum(keep_counts)
+    elif config.method == "vda_role_highlight" and not metadata.first_window:
         expected = len(history) + min(config.new_frames, len(new))
     if len(selected) != expected or len(set(selected)) != expected or not selected:
         raise RuntimeError("KV selection must reach the feasible unique-frame budget")
