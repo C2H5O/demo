@@ -1,8 +1,8 @@
 # C weights are the feature/attention-distillation run in the server's vggtoda3 project.
-# Keep C weights; H uses full history plus bucketed lightweight-highlight KV.
+# Keep C weights; H uses full history plus grouped lightweight-highlight KV.
 base_config: G.yaml
 experiment:
-  name: baseline_H_C-bucket-highlight-111124-first16-later20kv
+  name: baseline_H_C-prefix14keep2-recent8-first16-later20kv
   baseline_id: H
   source_weights_branch: feature/attention-distillation
   source_weights_project: vggtoda3
@@ -32,9 +32,11 @@ kv_sampling:
     overlap_frames: 8
     new_frames: 10
   bucket_highlight:
-    num_buckets: 6
-    keep_policy: fixed
-    keep_counts: [1, 1, 1, 1, 2, 4]
+    num_buckets: 2
+    keep_policy: prefix_recent
+    prefix_frames: 14
+    prefix_keep: 2
+    recent_frames: 8
   first_window:
     method: bucket_highlight
     num_frames: 16

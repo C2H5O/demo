@@ -24,7 +24,9 @@ WINNERS = [12, 15, 18, 21, 24, 27, 28, 29, 30, 31]
 
 
 def bucket_config():
-    return KVSamplingConfig.from_mapping(load_config("configs/baselines/H.yaml")["kv_sampling"])
+    # Pin the previous six-bucket ablation independently of the current H policy.
+    config = KVSamplingConfig.from_mapping(load_config("configs/baselines/H.yaml")["kv_sampling"])
+    return replace(config, bucket_highlight={"num_buckets": 6, "keep_policy": "fixed", "keep_counts": KEEP_COUNTS})
 
 
 def test_normal_window_keeps_history_and_ten_new_with_fixed_111124_counts():

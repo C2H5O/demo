@@ -170,14 +170,24 @@ def bucket_keep_count(bucket_size: int) -> int:
 
 
 def resolve_bucket_highlight_options(options: Mapping | None = None) -> dict:
-    """Separate six temporal buckets from the ten-new-frame full-window budget."""
+    """Validate later-window grouping separately from its ten-new-frame budget."""
     if options is not None and not isinstance(options, Mapping):
         raise ValueError("bucket_highlight must be a mapping")
-    defaults = {"num_buckets": 6, "keep_policy": "size_dependent", "keep_counts": None}
+    defaults = {"num_buckets": 6, "keep_policy": "size_dependent", "keep_counts": None,
+                "prefix_frames": None, "prefix_keep": None, "recent_frames": None}
     values = dict(options or {})
     if set(values) - defaults.keys():
         raise ValueError("Unknown bucket_highlight fields: " + str(set(values) - defaults.keys()))
     values = {**defaults, **values}
+    if values["keep_policy"] == "prefix_recent":
+        expected = {"num_buckets": 2, "prefix_frames": 14, "prefix_keep": 2, "recent_frames": 8}
+        if any(type(values[key]) is not int or values[key] != count for key, count in expected.items()):
+            raise ValueError("prefix_recent requires two groups: first14 keep2 and final8 keep all")
+        if values["keep_counts"] is not None:
+            raise ValueError("prefix_recent uses prefix_keep/recent_frames, not keep_counts")
+        return values
+    if any(values[key] is not None for key in ("prefix_frames", "prefix_keep", "recent_frames")):
+        raise ValueError("Prefix/recent fields require keep_policy=prefix_recent")
     if type(values["num_buckets"]) is not int or values["num_buckets"] != 6:
         raise ValueError("Later bucket highlight requires exactly six temporal buckets")
     if values["keep_policy"] not in {"size_dependent", "fixed"}:
@@ -192,6 +202,27 @@ def resolve_bucket_highlight_options(options: Mapping | None = None) -> dict:
     elif counts is not None:
         raise ValueError("keep_counts requires keep_policy=fixed")
     return values
+
+
+def select_prefix_recent_frames(metadata: WindowFrameMetadata, scores: Mapping[int, float],
+                                options: Mapping) -> tuple[list[int], list[list[int]], list[int]]:
+    """Select two clean prefix frames and retain the original final eight new slots.
+
+    Split BEFORE padding/dedup filtering, so a short tail cannot move early frames
+    into the mandatory recent group. Final selected slots retain window order.
+    """
+    new_slots = [slot for slot, role in enumerate(metadata.frame_roles) if role == "new"]
+    total_new = options["prefix_frames"] + options["recent_frames"]
+    if metadata.first_window or len(new_slots) > total_new:
+        raise ValueError("prefix_recent requires at most the later window's 22 original new slots")
+    eligible = set(eligible_frame_slots(metadata))
+    split = options["prefix_frames"]
+    prefix = [slot for slot in new_slots[:split] if slot in eligible]
+    recent = [slot for slot in new_slots[split:] if slot in eligible]
+    if any(slot not in scores or not isfinite(scores[slot]) or not 0 <= scores[slot] <= 1 for slot in prefix):
+        raise ValueError("Every prefix candidate requires a finite highlight pixel ratio in [0,1]")
+    selected_prefix = sorted(prefix, key=lambda slot: (scores[slot], slot))[:options["prefix_keep"]]
+    return (sorted(selected_prefix + recent), [prefix, recent], [len(selected_prefix), len(recent)])
 
 
 def bucket_selection_keep_counts(buckets: Sequence[Sequence[int]], keep_policy: str,
@@ -314,11 +345,14 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
         if config.method == "vda_role_bucket_highlight":
             temporal_new = sorted(new, key=lambda slot: (metadata.frame_positions[slot], slot))
             options = resolve_bucket_highlight_options(config.bucket_highlight)
-            num_buckets = config.first_window_num_buckets if metadata.first_window else options["num_buckets"]
-            keep_policy = "one" if metadata.first_window else options["keep_policy"]
-            selected_new, buckets = select_bucket_highlight_frames(
-                temporal_new, scores, num_buckets, keep_policy=keep_policy, keep_counts=options["keep_counts"])
-            keep_counts = bucket_selection_keep_counts(buckets, keep_policy, options["keep_counts"])
+            if not metadata.first_window and options["keep_policy"] == "prefix_recent":
+                selected_new, buckets, keep_counts = select_prefix_recent_frames(metadata, scores, options)
+            else:
+                num_buckets = config.first_window_num_buckets if metadata.first_window else options["num_buckets"]
+                keep_policy = "one" if metadata.first_window else options["keep_policy"]
+                selected_new, buckets = select_bucket_highlight_frames(
+                    temporal_new, scores, num_buckets, keep_policy=keep_policy, keep_counts=options["keep_counts"])
+                keep_counts = bucket_selection_keep_counts(buckets, keep_policy, options["keep_counts"])
             if len(selected_new) > (config.first_window_num_frames if metadata.first_window else config.new_frames):
                 raise RuntimeError("Bucket selection exceeded this window's new-frame budget")
             if selection_audit is not None:
