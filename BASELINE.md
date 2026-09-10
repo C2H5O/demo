@@ -29,16 +29,20 @@ H uses `kv_sampling.method: vda_role_bucket_highlight`, later-window retention
 New candidates are ordered by `(sequence_position, original_window_slot)` and
 partitioned into B=min(6,N) contiguous temporal buckets using integer boundaries
 `start=b*N//B`, `end=(b+1)*N//B`. These boundaries are unchanged. Bucket sizes
-3/4/4/3/4/4 contribute the lowest-scoring 1/2/2/1/2/2 frames, respectively;
+3/4/4/3/4/4 contribute the lowest-scoring 1/1/1/1/2/4 frames, respectively;
 ties prefer the earlier temporal candidate. The final history+new set is sorted
 by original window slot. Coverage is constrained, but the chosen frame in each
 bucket is image-dependent. There is no fixed-stride or random selection.
 
-`bucket_keep_count(size)` returns 0 for size<=0, 1 for sizes1..3, and
-ceil(size/2) for sizes>=4. It never repeats a source frame to fill a budget.
+H uses fixed ordered bucket quotas `[1,1,1,1,2,4]`: the final standard bucket
+keeps all four frames regardless of highlight scores. In a short tail each quota
+is clipped to the actual bucket size; if fewer than six buckets exist, use the
+corresponding prefix of the quota list. No spare quota is redistributed and no
+source frame is repeated. The previous `size_dependent` policy remains available
+for reproduction, with its original `bucket_keep_count(size)` behavior.
 The full later-window new quota (`vda_role.new_frames: 10`) is separate from
 the number of temporal buckets (`bucket_highlight.num_buckets: 6`), with
-`bucket_highlight.keep_policy: size_dependent`.
+`bucket_highlight.keep_policy: fixed` and `bucket_highlight.keep_counts: [1,1,1,1,2,4]`.
 
 The first window has 32 new frames and no history: use min(16,N) temporal buckets
 and select one lowest-score frame from each. Tail windows exclude padding and duplicate source positions,
@@ -101,19 +105,19 @@ Synthetic example (window slots, not absolute sequence IDs):
 Temporal buckets:
 [10,11,12] [13,14,15,16] [17,18,19,20]
 [21,22,23] [24,25,26,27] [28,29,30,31]
-Bucket keeps:     [1,2,2,1,2,2]
-Bucket winners:   [12], [15,16], [18,19], [21], [24,27], [28,30]
-Temporal new:     [12,15,16,18,19,21,24,27,28,30]
+Bucket keeps:     [1,1,1,1,2,4]
+Bucket winners:   [12], [15], [18], [21], [24,27], [28,29,30,31]
+Temporal new:     [12,15,18,21,24,27,28,29,30,31]
 Key:             [0,1]
 Overlap:         [2,3,4,5,6,7,8,9]
-Final KV:        [0,1,2,3,4,5,6,7,8,9,12,15,16,18,19,21,24,27,28,30]
+Final KV:        [0,1,2,3,4,5,6,7,8,9,12,15,18,21,24,27,28,29,30,31]
 ```
 
 `configs/inference/H_debug.yaml` logs and retains the first three windows per sequence,
 including `new_highlight_scores`, `new_candidate_count`, selected slots/roles,
 absolute IDs and actual SDPA token counts. `new_temporal_buckets` and the flat,
 temporally ordered `bucket_selected_slots` remain. The new `bucket_keep_counts`
-field is [1]*16 in the first full window and [1,2,2,1,2,2] in standard later windows.
+field is [1]*16 in the first full window and [1,1,1,1,2,4] in standard later windows.
 `highlight_score_type` remains
 `gpu_brightness_low_saturation_ratio`. No pixel masks are serialized.
 Normal H does not print per-window scores; its JSON retains two audit examples.
@@ -163,10 +167,10 @@ From this worktree root, using the same configured environment/data paths as G:
 C_CKPT='/public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt'
 
 # Three-window profiling, including the first and later window policies.
-CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/inference/H_debug.yaml --checkpoint "$C_CKPT" --split test --protocol vda --limit-windows 3 --output outputs/baseline_H/evaluation_bucket_highlight_first16_later20_3windows.json
+CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/inference/H_debug.yaml --checkpoint "$C_CKPT" --split test --protocol vda --limit-windows 3 --output outputs/baseline_H/evaluation_bucket_highlight_111124_3windows.json
 
 # Complete C-weight inference with sparse KV.
-CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/baselines/H.yaml --checkpoint "$C_CKPT" --split test --protocol vda --output outputs/baseline_H/evaluation_bucket_highlight_first16_later20_test.json
+CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/baselines/H.yaml --checkpoint "$C_CKPT" --split test --protocol vda --output outputs/baseline_H/evaluation_bucket_highlight_111124_test.json
 ```
 
 H evaluation writes `outputs/baseline_H/evaluation_test.json`; its debug variant
@@ -177,14 +181,13 @@ explicitly to select H (or the branch alias `configs/baseline.yaml`).
 
 Tests are supplied but NOT RUN for this change, as requested.
 `tests/test_bucket_highlight_kv.py` covers normal/first windows, integer partitions,
-3->1 and 4->2 minima/ties, general keep counts, padding/duplicates/short tails,
-legacy methods, invalid configuration and the unchanged batched proxy. The adapter
+fixed 1/1/1/1/2/4 minima/ties, all four final frames, clipped tail quotas,
+previous size-dependent and legacy methods, invalid configuration and the unchanged batched proxy. The adapter
 test runs a single instance through first16 -> later20 -> later20, checking dynamic
 gather, full Q, role/token counts, retention ratios and bucket_keep_counts.
-`tests/test_highlight_kv.py` keeps its legacy PC-Depth/global-top-k checks; only its
-current H configuration budget expectation changes from 16 to 20.
+`tests/test_highlight_kv.py` keeps its legacy PC-Depth/global-top-k checks unchanged.
 No test execution, model inference, evaluation, profiling, runtime debugging,
-training, commit or push was performed for this change. Server validation is pending.
+or training was performed for this change. Server validation is pending.
 
 Review from the baseline-h checkout before server evaluation:
 

@@ -173,34 +173,57 @@ def resolve_bucket_highlight_options(options: Mapping | None = None) -> dict:
     """Separate six temporal buckets from the ten-new-frame full-window budget."""
     if options is not None and not isinstance(options, Mapping):
         raise ValueError("bucket_highlight must be a mapping")
-    defaults = {"num_buckets": 6, "keep_policy": "size_dependent"}
+    defaults = {"num_buckets": 6, "keep_policy": "size_dependent", "keep_counts": None}
     values = dict(options or {})
     if set(values) - defaults.keys():
         raise ValueError("Unknown bucket_highlight fields: " + str(set(values) - defaults.keys()))
     values = {**defaults, **values}
     if type(values["num_buckets"]) is not int or values["num_buckets"] != 6:
         raise ValueError("Later bucket highlight requires exactly six temporal buckets")
-    if values["keep_policy"] != "size_dependent":
-        raise ValueError("Later bucket highlight requires keep_policy=size_dependent")
+    if values["keep_policy"] not in {"size_dependent", "fixed"}:
+        raise ValueError("Later bucket highlight requires keep_policy=size_dependent or fixed")
+    counts = values["keep_counts"]
+    if values["keep_policy"] == "fixed":
+        capacities = [len(bucket) for bucket in temporal_buckets(range(22), values["num_buckets"])]
+        if (not isinstance(counts, (list, tuple)) or len(counts) != 6
+            or any(type(n) is not int or not 1 <= n <= capacity for n, capacity in zip(counts, capacities))
+            or sum(counts) != 10):
+            raise ValueError("Fixed bucket keep_counts must fit six standard buckets and sum to ten")
+    elif counts is not None:
+        raise ValueError("keep_counts requires keep_policy=fixed")
     return values
 
 
+def bucket_selection_keep_counts(buckets: Sequence[Sequence[int]], keep_policy: str,
+                                 keep_counts: Sequence[int] | None = None) -> list[int]:
+    """Actual counts after tail clipping; never redistribute or duplicate frames."""
+    if keep_policy == "one":
+        return [min(1, len(bucket)) for bucket in buckets]
+    if keep_policy == "size_dependent":
+        return [bucket_keep_count(len(bucket)) for bucket in buckets]
+    if keep_policy != "fixed":
+        raise ValueError("Unknown bucket keep policy")
+    if (not isinstance(keep_counts, (list, tuple)) or len(keep_counts) < len(buckets)
+        or any(type(n) is not int or n < 1 for n in keep_counts)):
+        raise ValueError("Fixed bucket selection requires positive integer counts for every bucket")
+    return [min(len(bucket), keep_counts[b]) for b, bucket in enumerate(buckets)]
+
+
 def select_bucket_highlight_frames(candidates: Sequence[int], scores: Mapping[int, float],
-                                    count: int, *, keep_policy: str = "one") -> tuple[list[int], list[list[int]]]:
+                                    count: int, *, keep_policy: str = "one",
+                                    keep_counts: Sequence[int] | None = None) -> tuple[list[int], list[list[int]]]:
     """Lowest-score frame(s) per temporal bucket; ties prefer the earlier candidate.
 
     The first window retains the original one-per-bucket rule. Later windows use
-    size-dependent counts. Return selected slots in temporal order, not score order.
+    configured counts. Return selected slots in temporal order, not score order.
     """
-    if keep_policy not in {"one", "size_dependent"}:
-        raise ValueError("Unknown bucket keep policy")
     buckets = temporal_buckets(candidates, count)
+    actual_counts = bucket_selection_keep_counts(buckets, keep_policy, keep_counts)
     if any(slot not in scores or not isfinite(scores[slot]) or not 0 <= scores[slot] <= 1
            for bucket in buckets for slot in bucket):
         raise ValueError("Every bucket candidate requires a finite highlight pixel ratio in [0,1]")
     selected = []
-    for bucket in buckets:
-        keep = 1 if keep_policy == "one" else bucket_keep_count(len(bucket))
+    for bucket, keep in zip(buckets, actual_counts):
         # Stable sort resolves ties in original candidate temporal order.
         chosen = set(sorted(bucket, key=lambda slot: scores[slot])[:keep])
         selected.extend(slot for slot in bucket if slot in chosen)
@@ -294,8 +317,8 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
             num_buckets = config.first_window_num_buckets if metadata.first_window else options["num_buckets"]
             keep_policy = "one" if metadata.first_window else options["keep_policy"]
             selected_new, buckets = select_bucket_highlight_frames(
-                temporal_new, scores, num_buckets, keep_policy=keep_policy)
-            keep_counts = [1 if metadata.first_window else bucket_keep_count(len(bucket)) for bucket in buckets]
+                temporal_new, scores, num_buckets, keep_policy=keep_policy, keep_counts=options["keep_counts"])
+            keep_counts = bucket_selection_keep_counts(buckets, keep_policy, options["keep_counts"])
             if len(selected_new) > (config.first_window_num_frames if metadata.first_window else config.new_frames):
                 raise RuntimeError("Bucket selection exceeded this window's new-frame budget")
             if selection_audit is not None:

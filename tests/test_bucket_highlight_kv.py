@@ -19,19 +19,19 @@ from test_vda_role_kv import normal_window, tiny_da3
 
 BUCKETS = [[10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20],
            [21, 22, 23], [24, 25, 26, 27], [28, 29, 30, 31]]
-KEEP_COUNTS = [1, 2, 2, 1, 2, 2]
-WINNERS = [12, 15, 16, 18, 19, 21, 24, 27, 28, 30]
+KEEP_COUNTS = [1, 1, 1, 1, 2, 4]
+WINNERS = [12, 15, 18, 21, 24, 27, 28, 29, 30, 31]
 
 
 def bucket_config():
     return KVSamplingConfig.from_mapping(load_config("configs/baselines/H.yaml")["kv_sampling"])
 
 
-def test_normal_window_keeps_history_and_ten_new_with_size_dependent_counts():
+def test_normal_window_keeps_history_and_ten_new_with_fixed_111124_counts():
     config = bucket_config()
     assert config.method == "vda_role_bucket_highlight" and config.frame_budget(32) == 20
     assert config.frame_budget(32, first_window=True) == 16
-    assert config.bucket_highlight == {"num_buckets": 6, "keep_policy": "size_dependent"}
+    assert config.bucket_highlight == {"num_buckets": 6, "keep_policy": "fixed", "keep_counts": KEEP_COUNTS}
     assert config.new_frames == 10 and config.first_window_num_buckets == 16
     scores = {**dict.fromkeys(range(10), 1.), **dict(zip(range(10, 32), SCORES))}
     audit = {}
@@ -60,13 +60,13 @@ def test_first_window_uses_sixteen_buckets_and_lowest_score_in_each():
 def test_ties_use_earlier_temporal_candidate_and_scores_can_change_winners():
     scores = dict.fromkeys(range(32), 0.)
     selected = select_kv_frames(normal_window(), bucket_config(), 20, scores)
-    assert selected == [*range(10), 10, 13, 14, 17, 18, 21, 24, 25, 28, 29]
+    assert selected == [*range(10), 10, 13, 17, 21, 24, 25, 28, 29, 30, 31]
     assert select_kv_frames(normal_window(True), bucket_config(), 16, scores) == list(range(0, 32, 2))
     scores = dict.fromkeys(range(32), 1.)
     for bucket in BUCKETS:
         scores[bucket[-1]] = 0.
     assert select_kv_frames(normal_window(), bucket_config(), 20, scores) == [
-        *range(10), 12, 13, 16, 17, 20, 23, 24, 27, 28, 31]
+        *range(10), 12, 16, 20, 23, 24, 27, 28, 29, 30, 31]
 
 
 @pytest.mark.parametrize("size,expected", [(-1, 0), (0, 0), (1, 1), (2, 1),
@@ -90,6 +90,30 @@ def test_three_frame_bucket_keeps_only_one():
     selected, _ = select_bucket_highlight_frames(
         [10, 11, 12], {10: .03, 11: .01, 12: .02}, 1, keep_policy="size_dependent")
     assert selected == [11]
+
+
+def test_fixed_last_bucket_keeps_all_four_even_with_high_scores():
+    scores = dict.fromkeys(range(32), 0.)
+    scores.update({28: 1., 29: .9, 30: .8, 31: .7})
+    selected = select_kv_frames(normal_window(), bucket_config(), 20, scores)
+    assert selected[-4:] == [28, 29, 30, 31]
+
+
+def test_previous_size_dependent_policy_remains_reproducible():
+    config = replace(bucket_config(), bucket_highlight={"num_buckets": 6, "keep_policy": "size_dependent"})
+    audit = {}
+    selected = select_kv_frames(normal_window(), config, 20, dict(zip(range(10, 32), SCORES)), audit)
+    assert selected == [*range(10), 12, 15, 16, 18, 19, 21, 24, 27, 28, 30]
+    assert audit["bucket_keep_counts"] == [1, 2, 2, 1, 2, 2]
+
+
+@pytest.mark.parametrize("counts", [None, [], [1, 1, 1], [1, 1, 1, 1, 2, 3],
+                                    [1, 1, 1, 1, 1, 5], [0, 2, 1, 1, 2, 4],
+                                    [True, 1, 1, 1, 2, 4], [1., 1, 1, 1, 2, 4]])
+def test_fixed_counts_invalid_config_fails_before_inference(counts):
+    config = replace(bucket_config(), bucket_highlight={"keep_policy": "fixed", "keep_counts": counts})
+    with pytest.raises(ValueError, match="keep_counts"):
+        config.frame_budget(32)
 
 
 @pytest.mark.parametrize("size,quota", [(0, 6), (1, 6), (5, 6), (7, 6), (22, 6), (32, 16)])
@@ -129,12 +153,12 @@ def test_bucket_order_uses_source_time_but_final_indices_use_window_order():
     audit = {}
     selected = select_kv_frames(metadata, bucket_config(), 20, dict.fromkeys(range(32), 0.), audit)
     assert audit["new_temporal_buckets"][0] == [31, 30, 29]
-    assert audit["bucket_selected_slots"] == [31, 28, 27, 24, 23, 20, 17, 16, 13, 12]
-    assert selected == sorted([*range(10), 31, 28, 27, 24, 23, 20, 17, 16, 13, 12])
+    assert audit["bucket_selected_slots"] == [31, 28, 24, 20, 17, 16, 13, 12, 11, 10]
+    assert selected == sorted([*range(10), 31, 28, 24, 20, 17, 16, 13, 12, 11, 10])
 
 
-@pytest.mark.parametrize("new_count,expected_new", [(0, 0), (1, 1), (5, 5), (7, 6),
-                                                    (18, 6), (19, 7), (21, 9), (22, 10)])
+@pytest.mark.parametrize("new_count,expected_new", [(0, 0), (1, 1), (5, 5), (7, 7),
+                                                    (18, 9), (19, 10), (21, 10), (22, 10)])
 def test_tail_budget_follows_bucket_sizes_instead_of_forcing_twenty(new_count, expected_new):
     metadata = replace(normal_window(), is_padding=(False,) * (10 + new_count) + (True,) * (22 - new_count))
     audit = {}
@@ -289,7 +313,7 @@ def test_adapter_variable_kv_windows_preserve_q_and_update_gather_audit(strategy
                 assert adapter.budget == 16 and adapter.selected == list(range(0, 32, 2))
             else:
                 assert adapter.budget == 20
-                assert adapter.selected == [*range(10), 10, 13, 14, 17, 18, 21, 24, 25, 28, 29]
+                assert adapter.selected == [*range(10), 10, 13, 17, 21, 24, 25, 28, 29, 30, 31]
             features, _ = model(images)
             assert features[0][0].shape[:3] == (1, 32, 4)
             adapter.finish_window()

@@ -2,7 +2,7 @@
 # Keep C weights; H uses full history plus bucketed lightweight-highlight KV.
 base_config: G.yaml
 experiment:
-  name: baseline_H_C-bucket-highlight-first16-later20kv
+  name: baseline_H_C-bucket-highlight-111124-first16-later20kv
   baseline_id: H
   source_weights_branch: feature/attention-distillation
   source_weights_project: vggtoda3
@@ -33,7 +33,8 @@ kv_sampling:
     new_frames: 10
   bucket_highlight:
     num_buckets: 6
-    keep_policy: size_dependent
+    keep_policy: fixed
+    keep_counts: [1, 1, 1, 1, 2, 4]
   first_window:
     method: bucket_highlight
     num_frames: 16
