@@ -236,3 +236,53 @@ def test_cache_resume_start_and_metadata_fallback_remain_compatible(tmp_path) ->
     )
     assert isinstance(fallback, CacheMetadataRGBDataset)
     assert [record.clip_start for record in fallback.clips] == [0, 8, 16]
+
+@pytest.mark.parametrize("online_attention", [False, True])
+def test_dense_cache_is_sampled_exactly_like_stride_eight(tmp_path, online_attention):
+    # Two video-local grids; source IDs need not begin at zero or one.
+    sequences = [_sequence("video_a", 40), _sequence("video_b", 33)]
+    for sequence, source_start in zip(sequences, [100, 503]):
+        sequence["absolute_frame_ids"] = list(
+            range(source_start, source_start + sequence["sequence_length"])
+        )
+    rgb = _FakeRGBDataset(sequences)
+    rgb.window_stride = 1
+    rgb.clips = [
+        ClipRecord(sequence, tuple(range(start, start + 16)), start)
+        for sequence in sequences
+        for start in range(sequence["sequence_length"] - 15)
+    ]
+    for index in range(len(rgb)):
+        _write_cache(tmp_path, rgb, index)
+    expected = [(seq["sequence_id"], start) for seq in sequences
+                for start in range(0, seq["sequence_length"] - 15, 8)]
+    before = sorted(str(path) for path in tmp_path.rglob("*.npz"))
+    dataset = DirectTeacherDistillationDataset(
+        rgb, tmp_path, BASE_CHECKPOINT, online_teacher_attention=online_attention,
+    )
+    assert [(dataset.metadata(i)["sequence_id"], dataset.metadata(i)["clip_start"])
+            for i in range(len(dataset))] == expected
+    assert dataset.skipped_off_stride == len(rgb) - len(expected)
+    assert dataset.skipped_without_cache == 0
+    # Shuffle can change order only, not the legal set of clip starts.
+    from torch.utils.data import RandomSampler
+    for _ in range(3):
+        assert sorted(RandomSampler(dataset)) == list(range(len(expected)))
+    assert sorted(str(path) for path in tmp_path.rglob("*.npz")) == before
+    # The cache-metadata fallback must select the identical per-video grid.
+    fallback = CacheMetadataRGBDataset(tmp_path, {})
+    assert sorted((r.sequence["sequence_id"], r.clip_start) for r in fallback.clips) == sorted(expected)
+
+
+def test_missing_legal_cache_does_not_substitute_adjacent_start(tmp_path):
+    rgb = _FakeRGBDataset([_sequence("video", 32)])
+    rgb.window_stride = 1
+    sequence = rgb.sequences[0]
+    rgb.clips = [ClipRecord(sequence, tuple(range(s, s + 16)), s) for s in range(17)]
+    for index in range(len(rgb)):
+        if index != 8:
+            _write_cache(tmp_path, rgb, index)
+    dataset = DirectTeacherDistillationDataset(rgb, tmp_path, BASE_CHECKPOINT)
+    assert [dataset.metadata(i)["clip_start"] for i in range(len(dataset))] == [0, 16]
+    assert dataset.skipped_without_cache == 1
+    assert dataset.skipped_off_stride == 14
