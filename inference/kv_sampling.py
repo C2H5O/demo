@@ -51,6 +51,7 @@ class KVSamplingConfig:
     debug_max_windows: int = 2
     profile_attention: bool = False
     highlight_detection: dict = field(default_factory=dict)
+    lightweight_highlight: dict = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -75,7 +76,7 @@ class KVSamplingConfig:
         """Resolve the shared F/G budget once from the real inference window size."""
         if not self.enabled:
             return window_length
-        if self.method not in {"vda_role", "vda_role_highlight", "spark3r_fixed_stride"}:
+        if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight", "spark3r_fixed_stride"}:
             raise ValueError("Unknown kv_sampling.method")
         if not isfinite(self.retention_ratio) or not 0 < self.retention_ratio <= 1:
             raise ValueError("retention_ratio must be in (0, 1]")
@@ -84,18 +85,21 @@ class KVSamplingConfig:
         if any(type(count) is not int or count < 0 for count in counts):
             raise ValueError("Frame budgets, stride and debug limit must be nonnegative integers")
         target = ceil(window_length * self.retention_ratio)
-        first_method = "highlight" if self.method == "vda_role_highlight" else "uniform"
+        first_method = {"vda_role_highlight": "highlight",
+                        "vda_role_bucket_highlight": "bucket_highlight"}.get(self.method, "uniform")
         if self.first_window_method != first_method or self.first_window_num_frames != target:
             raise ValueError("First-window method and budget must match the KV policy")
         if sum((self.key_frames, self.overlap_frames, self.new_frames)) != target:
             raise ValueError("Role quotas must sum to the shared retention budget")
         if self.temporal_stride < 1:
             raise ValueError("temporal_stride must be positive")
-        if self.method == "vda_role_highlight" and (
+        if self.method in {"vda_role_highlight", "vda_role_bucket_highlight"} and (
             window_length != 32 or target != 16
             or (self.key_frames, self.overlap_frames, self.new_frames) != (2, 8, 6)
         ):
             raise ValueError("Highlight policy requires 32 frames and exactly 2+8+6=16 KV")
+        if self.method == "vda_role_bucket_highlight":
+            resolve_lightweight_highlight_options(self.lightweight_highlight)
         if self.method == "spark3r_fixed_stride" and len(range(0, window_length, self.temporal_stride)) != target:
             raise ValueError("Fixed stride must give the same full-window frame budget as G")
         return target
@@ -109,6 +113,55 @@ def resolve_kv_sampling(config: Mapping) -> KVSamplingConfig:
     if "kv_sampling" not in config and config.get("inference", {}).get("acceleration", "none") != "none":
         raise NotImplementedError("Legacy acceleration needs an explicit kv_sampling configuration")
     return KVSamplingConfig.from_mapping(config.get("kv_sampling"))
+
+
+def resolve_lightweight_highlight_options(options: Mapping | None = None) -> dict:
+    """Validate inference-only frame-ranking proxy options without touching tensors."""
+    defaults = {"brightness_threshold": 0.90, "saturation_threshold": 0.20,
+                "downsample_factor": 4}
+    if options is not None and not isinstance(options, Mapping):
+        raise ValueError("lightweight_highlight must be a mapping")
+    values = dict(options or {})
+    if set(values) - defaults.keys():
+        raise ValueError("Unknown lightweight_highlight fields: " + str(set(values) - defaults.keys()))
+    values = {**defaults, **values}
+    for name in ("brightness_threshold", "saturation_threshold"):
+        value = values[name]
+        if type(value) not in (int, float) or not isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(name + " must be a finite number in [0,1]")
+    factor = values["downsample_factor"]
+    if type(factor) is not int or factor < 1:
+        raise ValueError("downsample_factor must be a positive integer")
+    return values
+
+
+def temporal_buckets(candidates: Sequence[int], count: int) -> list[list[int]]:
+    """Partition already temporally ordered candidates with floor(b*N/B) bounds."""
+    if type(count) is not int or count < 0:
+        raise ValueError("Bucket count must be a nonnegative integer")
+    candidates = list(candidates)
+    if len(candidates) != len(set(candidates)):
+        raise ValueError("Temporal bucket candidates must be unique")
+    size = len(candidates)
+    buckets = min(count, size)
+    if buckets == 0:
+        return []
+    return [candidates[b * size // buckets:(b + 1) * size // buckets]
+            for b in range(buckets)]
+
+
+def select_bucket_highlight_frames(candidates: Sequence[int], scores: Mapping[int, float],
+                                    count: int) -> tuple[list[int], list[list[int]]]:
+    """One lowest-score frame per temporal bucket; ties prefer the earlier candidate.
+
+    Returns selected slots in bucket order and the buckets for bounded audit.
+    This coverage constraint does not fix which frame is selected in each bucket.
+    """
+    buckets = temporal_buckets(candidates, count)
+    if any(slot not in scores or not isfinite(scores[slot]) or not 0 <= scores[slot] <= 1
+           for bucket in buckets for slot in bucket):
+        raise ValueError("Every bucket candidate requires a finite highlight pixel ratio in [0,1]")
+    return [min(bucket, key=lambda slot: scores[slot]) for bucket in buckets], buckets
 
 
 def uniform_select(indices: Sequence[int], count: int) -> list[int]:
@@ -168,11 +221,12 @@ def select_vda_role_kv_frames(metadata: WindowFrameMetadata, budget: int,
 
 
 def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
-                     budget: int, highlight_scores: Mapping[int, float] | None = None) -> list[int]:
+                     budget: int, highlight_scores: Mapping[int, float] | None = None,
+                     selection_audit: dict | None = None) -> list[int]:
     """Dispatch frame selection with an identical unique-frame cap for F and G."""
     if not config.enabled:
         return list(range(len(metadata.frame_positions)))
-    if config.method == "vda_role_highlight":
+    if config.method in {"vda_role_highlight", "vda_role_bucket_highlight"}:
         config.frame_budget(len(metadata.frame_positions))
         if budget != 16:
             raise ValueError("Highlight policy requires a 16-frame budget")
@@ -191,7 +245,13 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
         ):
             raise ValueError("Highlight policy expects at most 2 key and 8 overlap frames")
         count = budget if metadata.first_window else config.new_frames
-        selected_new = sorted(new, key=lambda slot: (scores[slot], slot))[:count]
+        if config.method == "vda_role_bucket_highlight":
+            temporal_new = sorted(new, key=lambda slot: (metadata.frame_positions[slot], slot))
+            selected_new, buckets = select_bucket_highlight_frames(temporal_new, scores, count)
+            if selection_audit is not None:
+                selection_audit.update(new_temporal_buckets=buckets, bucket_selected_slots=selected_new)
+        else:
+            selected_new = sorted(new, key=lambda slot: (scores[slot], slot))[:count]
         selected = sorted(history + selected_new)
         if len(candidates) == 32 and not metadata.first_window:
             assert len(history) == 10 and len(selected_new) == 6 and len(selected) == 16
@@ -210,7 +270,7 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     else:
         raise ValueError("Unknown KV sampling method: " + config.method)
     expected = min(budget, len(eligible_frame_slots(metadata)))
-    if config.method == "vda_role_highlight" and not metadata.first_window:
+    if config.method in {"vda_role_highlight", "vda_role_bucket_highlight"} and not metadata.first_window:
         expected = len(history) + min(config.new_frames, len(new))
     if len(selected) != expected or len(set(selected)) != expected or not selected:
         raise RuntimeError("KV selection must reach the feasible unique-frame budget")

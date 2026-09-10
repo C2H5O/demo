@@ -6,7 +6,7 @@ Selected configuration: `configs/baselines/H.yaml` (also `configs/baseline.yaml`
 
 Training required: False. Implementation complete; runtime validation pending.
 
-H = existing baseline C checkpoint + 16-frame highlight-aware KV selection.
+H = existing baseline C checkpoint + temporal-bucket lightweight-highlight 16-KV selection.
 Here C means the already-trained `feature/attention-distillation` run, whose
 server project directory is `vggtoda3`; it does not mean a separate baseline_C run.
 G remains E checkpoint + its original 8-frame VDA role KV sampling. C/G configs,
@@ -19,42 +19,59 @@ There was no highlight selector, token-level highlight pruning, temporal binning
 or minimum-spacing rule. `DA3KVAttention.attend` already kept full Q and gathered
 only K/V patch tokens, retaining every frame's special tokens.
 
-H now uses `kv_sampling.method: vda_role_highlight`, retention 0.5 and fixed
-quotas 2 key + 8 overlap + 6 new. All eligible key/overlap frames are retained.
-New frames are ranked by `(highlight_pixel_ratio, original_window_slot)`;
-the lowest six are then sorted back into original window order. Equal scores
-prefer earlier slots; near-equal but distinct scores keep their numeric order.
-There is no uniform/random/stride fallback, temporal binning or forced last frame.
-Concentrated selections are intentionally allowed in this clean ablation.
+The previous `vda_role_highlight` method used per-frame PC-Depth detection and
+global lowest-score selection. That method and detector remain available unchanged
+for legacy experiment reproduction; the current H configuration no longer uses them.
 
-The first window actually has 32 new frames and no history: select the lowest
-16 highlight scores. Tail windows exclude padding and duplicate source positions,
+H now uses `kv_sampling.method: vda_role_bucket_highlight`, retention 0.5 and fixed
+quotas 2 key + 8 overlap + 6 new. All eligible key/overlap frames are retained.
+New candidates are ordered by `(sequence_position, original_window_slot)` and
+partitioned into B=min(6,N) contiguous temporal buckets using integer boundaries
+`start=b*N//B`, `end=(b+1)*N//B`. Each bucket contributes its lowest-score frame;
+ties prefer the earlier temporal candidate. The final history+new set is sorted
+by original window slot. Coverage is constrained, but the chosen frame in each
+bucket is image-dependent. There is no fixed-stride or random selection.
+
+The first window has 32 new frames and no history: use min(16,N) temporal buckets
+and select one lowest-score frame from each. Tail windows exclude padding and duplicate source positions,
 keep all eligible history and at most six eligible new frames (possibly fewer
 than 16 total). Input windows and all their queries remain length 32.
 
-`SpecularHighlightProcessor.detect_mask_numpy` in `datasets/highlight.py`
-exposes the original detector without producing an inpainted output. It preserves
-the absolute/candidate/relative thresholds, connected components, median filtering,
-and dilation. Its internal candidate-region fill remains part of relative detection;
-no filled image is sent to the model. The original `process_numpy` training API
-still returns the same mask and inpainted RGB.
+`DA3KVAttention.begin_window` gathers eligible new RGB tensors once and calls
+`compute_lightweight_highlight_scores` in `inference/lightweight_highlight.py`
+on the complete [N,3,H,W] batch. Input RGB is [0,1], before student ImageNet
+normalization. All pooling and scoring stay on the input device (GPU in normal
+sequence inference). No image/mask host transfer, NumPy, OpenCV, PC-Depth detector
+or per-frame detection loop is used by this method.
 
-The RGB-only sequence evaluator does not load precomputed highlight masks.
-`DA3KVAttention.begin_window` therefore computes masks online only for eligible
-new candidates: 22 in a normal later window, 32 in the first, fewer in a tail.
-Score = binary mask mean over all model-input RGB pixels, not tokens and not
-GT-valid pixels. H's `highlight_detection` thresholds match the existing dataset
-detector. No neural-network forward or persistent mask cache is added.
-Detection uses CPU OpenCV and currently includes a device-to-host image copy
-for CUDA inputs; its real cost at 448x560 has not been benchmarked.
+The lightweight proxy converts to FP32 and average-pools with kernel=stride=4
+(448x560 -> 112x140), then computes:
+
+```python
+value = rgb.amax(dim=1)
+min_rgb = rgb.amin(dim=1)
+saturation = (value - min_rgb) / value.clamp_min(1e-6)
+score = ((value >= 0.90) & (saturation <= 0.20)).float().mean(dim=(-2, -1))
+```
+
+Only the [N] score vector is copied to a Python list, once per window, for simple
+deterministic bucket selection and audit. N is 22 for standard later windows,
+32 for the first, and smaller for tails. No eligible new frames means no scoring
+or transfer. This inference-only frame-ranking proxy is not segmentation GT or a
+replacement for the PC-Depth detector used by legacy/training paths.
+
+New options under `kv_sampling.lightweight_highlight` are
+`brightness_threshold: 0.90`, `saturation_threshold: 0.20`, `downsample_factor: 4`.
+Invalid keys, nonfinite/out-of-range thresholds and nonpositive/noninteger factors
+fail validation. `first_window.method` is `bucket_highlight`, with 16 frames.
+The new method validates window32, target16 and exactly 2/8/6 quotas.
 
 The unchanged `infer_student_video` timer starts before `begin_window` and stops
-after synchronized model inference. Detection, image copies for detection, mask
-averaging, ranking and K/V gather are included in `model_forward_seconds` and
+after synchronized model inference. Batch scoring, the score-vector transfer,
+bucket selection and K/V gather are included in `model_forward_seconds` and
 `inference_fps`, as well as the broader `sequence_pipeline_seconds`/`pipeline_fps`.
 The optional `global_sdpa_seconds` remains kernel-only and excludes selection;
-it must not be presented as total inference time. First-use OpenCV import is also
-inside the first timed selection. Debug printing is outside model-forward timing
+it must not be presented as total inference time. Debug printing is outside model-forward timing
 but inside pipeline timing; warm-up is not excluded.
 
 Synthetic example (window slots, not absolute sequence IDs):
@@ -64,17 +81,22 @@ Synthetic example (window slots, not absolute sequence IDs):
 18:.06 19:.16 20:.24 21:.04 22:.19 23:.25 24:.13 25:.35
 26:.21 27:.03 28:.17 29:.28 30:.07 31:.20
 
-Score-ranked new: [27,21,12,18,30,15]
+Temporal buckets:
+[10,11,12] [13,14,15,16] [17,18,19,20]
+[21,22,23] [24,25,26,27] [28,29,30,31]
+Bucket winners:   [12,15,18,21,27,30]
 Temporal new:     [12,15,18,21,27,30]
 Key:             [0,1]
 Overlap:         [2,3,4,5,6,7,8,9]
 Final KV:        [0,1,2,3,4,5,6,7,8,9,12,15,18,21,27,30]
 ```
 
-`configs/inference/H_debug.yaml` logs only the first two windows per sequence,
+`configs/inference/H_debug.yaml` logs and retains the first three windows per sequence,
 including `new_highlight_scores`, `new_candidate_count`, selected slots/roles,
-absolute IDs and actual SDPA token counts. Normal H does not print per-window
-scores; result JSON retains the first two audit examples.
+absolute IDs and actual SDPA token counts. New fields are `new_temporal_buckets`
+and `bucket_selected_slots`; `highlight_score_type` is
+`gpu_brightness_low_saturation_ratio`. No pixel masks are serialized.
+Normal H does not print per-window scores; its JSON retains two audit examples.
 
 The actual global attention contract is 32Q x 16KV **for patch frames**, plus
 all 32 frames' special tokens in K/V. With P patch tokens and S special tokens
@@ -82,9 +104,9 @@ per frame: Q `[B,heads,32*(P+S),head_dim]`, K/V `[B,heads,16*P+32*S,head_dim]`.
 At the checked local DA3-Small configuration (448x560, patch14, six heads,
 head_dim64, S=1), these are Q `[1,6,40992,64]`, K=V `[1,6,20512,64]`.
 These full-resolution sizes are source-derived, not a checkpoint runtime result.
-Small real upstream CPU Transformer tests observed Q `[1,2,160,12]` and
-K=V `[1,2,96,12]`, with unchanged Q, identical K/V gather and all 32 outputs.
-Local attention, full QKV projections and heads are unchanged.
+The new test code checks tiny-upstream Q `[1,2,160,12]` and K=V `[1,2,96,12]`,
+unchanged Q, identical K/V gather and all 32 outputs; it has not been run.
+Local attention, global layers 5/7/9/11, full QKV projections and heads are unchanged.
 
 `frame_slots_to_token_indices` preserves original slot identity through DA3's
 reference-view permutation. Gathering occurs after Q/K normalization and RoPE.
@@ -116,14 +138,11 @@ From this worktree root, using the same configured environment/data paths as G:
 ```bash
 C_CKPT='/public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt'
 
-# Two-window audit; not a full evaluation or a speed/accuracy result.
-python evaluate_crossclip_projection.py --config configs/inference/H_debug.yaml --checkpoint "$C_CKPT" --limit-windows 2
+# Three-window profiling, including the first and later window policies.
+CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/inference/H_debug.yaml --checkpoint "$C_CKPT" --split test --protocol vda --limit-windows 3 --output outputs/baseline_H/evaluation_bucket_highlight_3windows.json
 
 # Complete C-weight inference with sparse KV.
-python evaluate_crossclip_projection.py --config configs/baselines/H.yaml --checkpoint "$C_CKPT"
-
-# Dense comparison using the same C checkpoint and existing C config.
-python evaluate_crossclip_projection.py --config configs/baselines/C.yaml --checkpoint "$C_CKPT"
+CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/baselines/H.yaml --checkpoint "$C_CKPT" --split test --protocol vda --output outputs/baseline_H/evaluation_bucket_highlight_test.json
 ```
 
 H evaluation writes `outputs/baseline_H/evaluation_test.json`; its debug variant
@@ -132,12 +151,14 @@ writes `outputs/baseline_H/evaluation_debug.json`. Visualization output is
 Existing entrypoints default to their historical configs; pass `--config`
 explicitly to select H (or the branch alias `configs/baseline.yaml`).
 
-CPU validation: `tests/test_highlight_kv.py`, `tests/test_vda_role_kv.py` and
-`tests/test_student_video.py`: **46 passed**. This includes detector equivalence,
-selector examples/ties/tails, F/G budget preservation and small real upstream
-attention under first/middle/saddle_balanced reference strategies. No checkpoint,
-full evaluation, GPU benchmark, training or download was run. Real speed, memory
-and accuracy remain unvalidated. Changes are not automatically committed/pushed.
+Tests are supplied but NOT RUN for this change, as requested.
+`tests/test_bucket_highlight_kv.py` covers normal/first windows, integer partitions,
+bucket minima and ties, padding/duplicates/short tails, legacy methods, invalid
+configuration, the batched proxy, and adapter batch/transfer/attention/audit contracts.
+`tests/test_highlight_kv.py` now pins an explicit legacy configuration instead of
+loading the current H method for its PC-Depth/global-top-k regression checks.
+No test execution, model inference, evaluation, profiling, runtime debugging,
+training, commit or push was performed for this change. Server validation is pending.
 
 Review from the baseline-h checkout before server evaluation:
 

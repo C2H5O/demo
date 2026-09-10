@@ -17,12 +17,15 @@ SCORES = [.18, .27, .05, .31, .22, .08, .14, .29, .06, .16, .24,
 EXPECTED = [*range(10), 12, 15, 18, 21, 27, 30]
 
 
-def h_config():
-    return KVSamplingConfig.from_mapping(load_config("configs/baselines/H.yaml")["kv_sampling"])
+def legacy_highlight_config():
+    # Pin the old experiment independently of the current H selection method.
+    return KVSamplingConfig(enabled=True, method="vda_role_highlight", retention_ratio=.5,
+                            key_frames=2, overlap_frames=8, new_frames=6,
+                            first_window_method="highlight", first_window_num_frames=16)
 
 
 def test_exact_example_and_deterministic_ties():
-    config = h_config()
+    config = legacy_highlight_config()
     assert config.frame_budget(32) == 16
     scores = dict(zip(range(10, 32), SCORES))
     assert select_kv_frames(normal_window(), config, 16, scores) == EXPECTED
@@ -38,7 +41,7 @@ def test_exact_example_and_deterministic_ties():
 
 
 def test_first_window_tail_and_invalid_scores():
-    config = h_config()
+    config = legacy_highlight_config()
     scores = {i: (31-i) / 32 for i in range(32)}
     assert select_kv_frames(normal_window(True), config, 16, scores) == list(range(16, 32))
     metadata = replace(normal_window(), is_padding=(False,) * 13 + (True,) * 19)
@@ -75,7 +78,7 @@ def test_detector_mask_matches_original_pipeline_without_output_inpainting(monke
 @pytest.mark.parametrize("strategy", ["first", "middle", "saddle_balanced"])
 def test_h_actual_rectangular_sdpa_and_score_audit(strategy, monkeypatch):
     model, _ = tiny_da3(strategy)
-    adapter = DA3KVAttention(model, h_config(), 32)
+    adapter = DA3KVAttention(model, legacy_highlight_config(), 32)
     calls = []
     def synthetic_mask(image):
         index = len(calls)

@@ -20,6 +20,7 @@ from inference.kv_sampling import (
     KVSamplingConfig, WindowFrameMetadata, eligible_frame_slots, select_kv_frames,
 )
 from models.attention_capture import _blocks
+from inference.lightweight_highlight import compute_lightweight_highlight_scores
 
 
 def frame_slots_to_token_indices(selected_slots, *, num_frames: int,
@@ -163,7 +164,21 @@ class DA3KVAttention:
         """Receive provenance from window construction, never infer roles in attention."""
         self.metadata = metadata
         self.highlight_scores = None
-        if self.highlight_processor is not None:
+        self.selection_audit = {}
+        if self.config.enabled and self.config.method == "vda_role_bucket_highlight":
+            if images.ndim != 5 or images.shape[0] != 1 or images.shape[1] != len(metadata.frame_positions):
+                raise ValueError("Bucket highlight selection requires [1,F,3,H,W] matching metadata")
+            new_slots = [slot for slot in eligible_frame_slots(metadata)
+                         if metadata.frame_roles[slot] == "new"]
+            self.highlight_scores = {}
+            if new_slots:
+                indices = torch.tensor(new_slots, dtype=torch.long, device=images.device)
+                new_images = images[0].index_select(0, indices)
+                scores = compute_lightweight_highlight_scores(new_images, self.config.lightweight_highlight)
+                # One tiny score-vector host transfer per window, never RGB/masks.
+                # Selection stays inside the existing synchronized forward timer.
+                self.highlight_scores = dict(zip(new_slots, scores.detach().cpu().tolist()))
+        elif self.highlight_processor is not None:
             if images.shape[0] != 1:
                 raise ValueError("Highlight window selection requires the sequence inference batch size of one")
             # begin_window is inside synchronized inference timing. Detection,
@@ -172,7 +187,8 @@ class DA3KVAttention:
                 slot: float(self.highlight_processor.detect_mask_numpy(images[0, slot]).mean())
                 for slot in eligible_frame_slots(metadata) if metadata.frame_roles[slot] == "new"
             }
-        self.selected = select_kv_frames(metadata, self.config, self.budget, self.highlight_scores)
+        self.selected = select_kv_frames(metadata, self.config, self.budget,
+                                         self.highlight_scores, self.selection_audit)
         self.calls, self.events = [], []
         self.reference_indices = None
         self.token_indices = None
@@ -285,7 +301,12 @@ class DA3KVAttention:
                 audit["new_highlight_scores"] = self.highlight_scores
                 audit["new_candidate_count"] = len(self.highlight_scores)
                 audit["highlight_score_type"] = "highlight_pixels / all_RGB_pixels"
-            if len(self.audit_examples) < 2:
+                if self.config.method == "vda_role_bucket_highlight":
+                    audit["highlight_score_type"] = "gpu_brightness_low_saturation_ratio"
+                    audit.update(self.selection_audit)
+            audit_limit = (self.config.debug_max_windows
+                           if self.config.debug and self.config.method == "vda_role_bucket_highlight" else 2)
+            if len(self.audit_examples) < audit_limit:
                 self.audit_examples.append(audit)
             if self.config.debug and metadata.window_id < self.config.debug_max_windows:
                 # Logging is outside model-forward timing. No GPU->CPU reference

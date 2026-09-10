@@ -61,6 +61,6 @@
     "source_baseline": "C",
     "source_weights_branch": "feature/attention-distillation",
     "source_weights_project": "vggtoda3",
-    "inference_algorithm": "vda_role_highlight_2_key_8_overlap_6_new"
+    "inference_algorithm": "vda_role_bucket_highlight_2_key_8_overlap_6_new"
   }
 ]

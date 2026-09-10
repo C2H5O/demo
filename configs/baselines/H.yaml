@@ -1,8 +1,8 @@
 # C weights are the feature/attention-distillation run in the server's vggtoda3 project.
-# Keep C weights; H uses full history plus lowest-highlight new-frame KV.
+# Keep C weights; H uses full history plus bucketed lightweight-highlight KV.
 base_config: G.yaml
 experiment:
-  name: baseline_H_C-highlight-16kv
+  name: baseline_H_C-bucket-highlight-16kv
   baseline_id: H
   source_weights_branch: feature/attention-distillation
   source_weights_project: vggtoda3
@@ -20,26 +20,21 @@ vda_evaluation:
 visualization:
   output_dir: ./outputs/baseline_H/visualization
 inference:
-  acceleration: vda_role_highlight
+  acceleration: vda_role_bucket_highlight
   source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt
 kv_sampling:
   enabled: true
-  method: vda_role_highlight
+  method: vda_role_bucket_highlight
   retention_ratio: 0.5
   vda_role:
     key_frames: 2
     overlap_frames: 8
     new_frames: 6
   first_window:
-    method: highlight
+    method: bucket_highlight
     num_frames: 16
-  # Same detector and thresholds as dataset.highlight, used on inference RGB.
-  # Dataset masks are not loaded by the existing RGB-only sequence pipeline.
-  highlight_detection:
-    absolute_threshold: 250.0
-    candidate_threshold: 230.0
-    relative_threshold: 0.95
-    minimum_component_size: 5000
-    keep_components: smaller
-    dilation_radius: 2
-    median_kernel: 31
+  # Batched Torch proxy on inference RGB; not PC-Depth segmentation.
+  lightweight_highlight:
+    brightness_threshold: 0.90
+    saturation_threshold: 0.20
+    downsample_factor: 4
