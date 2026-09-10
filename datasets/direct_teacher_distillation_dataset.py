@@ -139,23 +139,33 @@ class DirectTeacherDistillationDataset(Dataset):
         )
         if int(rgb_dataset.clip_length) != 16 or int(rgb_dataset.sample_stride) != 1:
             raise ValueError("Direct distillation requires consecutive 16-frame RGB clips")
-        if int(rgb_dataset.window_stride) != 8:
-            raise ValueError("dataset.window_stride must be the cache sampling stride 8")
+        if int(rgb_dataset.window_stride) not in (1, 8):
+            raise ValueError("RGB candidates must use window_stride 1 or 8")
         self.rgb_indices: List[int] = []
         self.cache_paths: List[Path] = []
+        self.skipped_off_stride = 0
+        self.skipped_without_cache = 0
         for rgb_index in range(len(rgb_dataset)):
             metadata = clip_metadata(rgb_dataset, rgb_index)
+            # clip_start is a zero-based position within THIS video, not the
+            # source filename ID or the candidate's global dataset index.
+            # A dense teacher-cache root must behave like a stride-8 root.
+            start = int(metadata["clip_start"])
+            if start < 0 or start % 8:
+                self.skipped_off_stride += 1
+                continue
             path = crossclip_teacher_cache_path(self.cache_root, metadata)
             if path.is_file():
                 self.rgb_indices.append(rgb_index)
                 self.cache_paths.append(path)
+            else:
+                self.skipped_without_cache += 1
         if not self.rgb_indices:
             raise RuntimeError(
                 "No RGB clip has an exactly matching raw teacher cache under {}".format(
                     self.cache_root
                 )
             )
-        self.skipped_without_cache = len(rgb_dataset) - len(self.rgb_indices)
 
     def __len__(self) -> int:
         return len(self.rgb_indices)
