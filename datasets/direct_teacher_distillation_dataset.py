@@ -127,13 +127,23 @@ class DirectTeacherDistillationDataset(Dataset):
         cache_root: Union[str, Path],
         expected_base_checkpoint: str,
         online_teacher_attention: bool = False,
+        teacher_input_height: int = 1024,
+        teacher_input_width: int = 1280,
     ) -> None:
         self.rgb_dataset = rgb_dataset
         self.cache_root = Path(cache_root)
         self.expected_base_checkpoint = expected_base_checkpoint
         self.online_teacher_attention = bool(online_teacher_attention)
+        self.teacher_input_height = int(teacher_input_height)
+        self.teacher_input_width = int(teacher_input_width)
+        if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
+            raise ValueError("Teacher input dimensions must be positive")
         self.teacher_rgb_dataset = (
-            TeacherClipInputDataset(rgb_dataset)
+            TeacherClipInputDataset(
+                rgb_dataset,
+                teacher_input_height=self.teacher_input_height,
+                teacher_input_width=self.teacher_input_width,
+            )
             if self.online_teacher_attention
             else None
         )
@@ -204,10 +214,17 @@ class DirectTeacherDistillationDataset(Dataset):
         }
         if self.teacher_rgb_dataset is not None:
             teacher_images, _ = self.teacher_rgb_dataset.load_images(rgb_index)
-            if tuple(teacher_images.shape) != (16, 3, 1024, 1280):
+            expected_shape = (
+                16,
+                3,
+                self.teacher_input_height,
+                self.teacher_input_width,
+            )
+            if tuple(teacher_images.shape) != expected_shape:
                 raise RuntimeError(
-                    "Online VGGT-Omega RGB must have shape [16,3,1024,1280]; got {}"
-                    .format(tuple(teacher_images.shape))
+                    "Online VGGT-Omega RGB must have shape {}; got {}".format(
+                        expected_shape, tuple(teacher_images.shape)
+                    )
                 )
             result["teacher_images"] = teacher_images
         return result

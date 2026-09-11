@@ -33,6 +33,8 @@ class AttentionDistillationConfig:
     eps: float
     pair_chunk_size: int = 1
     teacher_probability_outside_checkpoint: bool = False
+    teacher_input_height: int = 1024
+    teacher_input_width: int = 1280
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "AttentionDistillationConfig":
@@ -82,6 +84,8 @@ class AttentionDistillationConfig:
             teacher_probability_outside_checkpoint=bool(
                 config.get("teacher_probability_outside_checkpoint", False)
             ),
+            teacher_input_height=int(config.get("teacher_input_height", 1024)),
+            teacher_input_width=int(config.get("teacher_input_width", 1280)),
         )
         result.validate()
         return result
@@ -119,6 +123,8 @@ class AttentionDistillationConfig:
             raise ValueError("attention_distill.query_chunk_size must be positive")
         if self.pair_chunk_size <= 0:
             raise ValueError("attention_distill.pair_chunk_size must be positive")
+        if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
+            raise ValueError("attention_distill Teacher input dimensions must be positive")
         if self.eps <= 0.0:
             raise ValueError("attention_distill.eps must be positive")
         if not self.enabled and self.weight != 0.0:
@@ -215,6 +221,8 @@ class SpatialTokenAligner(nn.Module):
                     value.shape[-2], self.source_grid
                 )
             )
+        if self.source_grid == self.target_grid:
+            return value
         batch, frames, heads, _, head_dim = value.shape
         source_h, source_w = self.source_grid
         target_h, target_w = self.target_grid

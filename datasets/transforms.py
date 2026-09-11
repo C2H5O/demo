@@ -146,6 +146,27 @@ def load_precomputed_student_rgb_tensor(path: Union[str, Path], normalize_mode: 
     return normalize_image(_decode_rgb(path, (560, 448), "precomputed student"), normalize_mode)
 
 
-def load_teacher_rgb_tensor(path: Union[str, Path]) -> torch.Tensor:
-    """Canonical teacher input: decode the required 1280x1024 RGB directly."""
-    return _decode_rgb(path, (1280, 1024), "teacher")
+def load_teacher_rgb_tensor(
+    path: Union[str, Path],
+    output_height: int = 1024,
+    output_width: int = 1280,
+) -> torch.Tensor:
+    """Decode strict native Teacher RGB and optionally resize it on the CPU."""
+    output_height, output_width = int(output_height), int(output_width)
+    if output_height <= 0 or output_width <= 0:
+        raise ValueError("Teacher output dimensions must be positive")
+    try:
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            if rgb.size != (1280, 1024):
+                raise RuntimeError(
+                    "teacher image {} has size {} but requires {}".format(
+                        path, rgb.size, (1280, 1024)
+                    )
+                )
+            if (output_height, output_width) != (1024, 1280):
+                rgb = _resize_image(rgb, output_height, output_width, "resize")
+            tensor = _rgb_image_to_tensor(rgb)
+    except (OSError, ValueError) as error:
+        raise RuntimeError("Failed to decode teacher RGB image {}: {}".format(path, error)) from error
+    return tensor

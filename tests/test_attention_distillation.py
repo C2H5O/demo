@@ -21,6 +21,7 @@ from losses.attention_distillation_loss import (
     patch_overlap_matrix,
 )
 from trainers.direct_teacher_distillation_trainer import (
+    _audit_online_teacher_geometry,
     _audit_attention_backward,
     _check_resume_contract,
     _compute_online_teacher_attention_loss,
@@ -138,6 +139,57 @@ def test_patch_overlap_alignment_uses_area_and_only_changes_tokens() -> None:
     assert "projection" not in dict(SpatialTokenAligner((64, 80), (32, 40)).named_buffers())
 
 
+def test_same_grid_alignment_is_exact_identity_and_legacy_pooling_remains() -> None:
+    same_grid = torch.randn(1, 2, 3, 32 * 40, 4)
+    identity = SpatialTokenAligner((32, 40), (32, 40))(same_grid)
+    assert identity is same_grid
+    assert torch.equal(identity, same_grid)
+
+    legacy = torch.arange(64 * 80.0).reshape(1, 1, 1, 64 * 80, 1)
+    pooled = SpatialTokenAligner((64, 80), (32, 40))(legacy)
+    expected = torch.nn.functional.avg_pool2d(
+        legacy.reshape(1, 1, 64, 80), kernel_size=2, stride=2
+    ).reshape(1, 1, 1, 32 * 40, 1)
+    assert torch.equal(pooled, expected)
+
+
+def test_online_teacher_geometry_audit_reports_e_identity_and_legacy_pooling(capsys) -> None:
+    class FakeTeacher:
+        attention_capture = type("Capture", (), {"patch_size": 16})()
+
+    class FakeStudent:
+        config = type(
+            "StudentConfig",
+            (),
+            {"image_height": 448, "image_width": 560, "patch_size": 14},
+        )()
+
+    e_mapping = _config()
+    e_mapping.update({"teacher_input_height": 512, "teacher_input_width": 640})
+    e_audit = _audit_online_teacher_geometry(
+        FakeTeacher(),
+        FakeStudent(),
+        AttentionDistillationConfig.from_mapping(e_mapping),
+        baseline_id="E",
+    )
+    e_output = capsys.readouterr().out
+    assert e_audit["teacher_grid"] == e_audit["student_grid"] == (32, 40)
+    assert e_audit["alignment"] == "identity"
+    assert "Online Teacher resize: 1024x1280 -> 512x640" in e_output
+    assert "Attention spatial alignment: identity" in e_output
+
+    legacy_audit = _audit_online_teacher_geometry(
+        FakeTeacher(),
+        FakeStudent(),
+        AttentionDistillationConfig.from_mapping(_config()),
+    )
+    legacy_output = capsys.readouterr().out
+    assert legacy_audit["teacher_grid"] == (64, 80)
+    assert legacy_audit["student_grid"] == (32, 40)
+    assert legacy_audit["alignment"] == "2x2 average pooling"
+    assert "Online Teacher resize: disabled" in legacy_output
+
+
 def test_separable_noninteger_overlap_matches_dense_reference() -> None:
     source_grid, target_grid = (3, 5), (2, 4)
     values = torch.randn(2, 3, 2, 15, 4)
@@ -221,7 +273,9 @@ def test_js_epsilon_smoothing_preserves_gradient_for_disjoint_sharp_support() ->
 
 
 def test_online_teacher_attention_is_chunked_detached_and_backpropagates_student() -> None:
-    config = AttentionDistillationConfig.from_mapping(_config())
+    mapping = _config()
+    mapping.update({"teacher_input_height": 512, "teacher_input_width": 640})
+    config = AttentionDistillationConfig.from_mapping(mapping)
     student = {
         student_layer: _feature(
             student_layer,
@@ -263,7 +317,7 @@ def test_online_teacher_attention_is_chunked_detached_and_backpropagates_student
             return features
 
     teacher = FakeTeacher()
-    teacher_images = torch.zeros(1).expand(2, 16, 3, 1024, 1280)
+    teacher_images = torch.zeros(1).expand(2, 16, 3, 512, 640)
     loss, logs = _compute_online_teacher_attention_loss(
         teacher,
         teacher_images,

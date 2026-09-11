@@ -155,6 +155,34 @@ def test_online_attention_loads_native_teacher_rgb_but_not_attention_cache(tmp_p
     assert "attention" not in sample["teacher"]
 
 
+def test_online_attention_uses_configured_teacher_shape_and_collates(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 16)])
+    _write_cache(tmp_path, rgb, 0)
+    dataset = DirectTeacherDistillationDataset(
+        rgb,
+        tmp_path,
+        BASE_CHECKPOINT,
+        online_teacher_attention=True,
+        teacher_input_height=512,
+        teacher_input_width=640,
+    )
+    assert dataset.teacher_rgb_dataset is not None
+    assert dataset.teacher_rgb_dataset.teacher_input_height == 512
+    assert dataset.teacher_rgb_dataset.teacher_input_width == 640
+
+    class FakeTeacherRGB:
+        def load_images(self, index):
+            del index
+            images = torch.zeros(1, dtype=torch.uint8).expand(16, 3, 512, 640)
+            return images, ["teacher.png"] * 16
+
+    dataset.teacher_rgb_dataset = FakeTeacherRGB()
+    sample = dataset[0]
+    batch = direct_teacher_distillation_collate([sample])
+    assert sample["teacher_images"].shape == (16, 3, 512, 640)
+    assert batch["teacher_images"].shape == (1, 16, 3, 512, 640)
+
+
 def test_dataset_filters_legal_rgb_clips_without_matching_cache(tmp_path) -> None:
     rgb = _FakeRGBDataset([_sequence("sequence_a", 40)])
     _write_cache(tmp_path, rgb, 2)

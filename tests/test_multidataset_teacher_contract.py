@@ -51,6 +51,23 @@ def test_precomputed_student_decode_skips_resize_and_teacher_is_strict(tmp_path,
         load_teacher_rgb_tensor(student)
 
 
+def test_teacher_rgb_optional_resize_is_bicubic_and_keeps_source_strict(tmp_path) -> None:
+    teacher = tmp_path / "teacher.png"
+    invalid = tmp_path / "invalid.png"
+    Image.new("RGB", (1280, 1024), color=(7, 8, 9)).save(teacher)
+    Image.new("RGB", (640, 512), color=(7, 8, 9)).save(invalid)
+
+    resized = load_teacher_rgb_tensor(
+        teacher, output_height=512, output_width=640
+    )
+    assert resized.shape == (3, 512, 640)
+    torch.testing.assert_close(
+        resized[:, 0, 0], torch.tensor([7.0, 8.0, 9.0]) / 255.0
+    )
+    with pytest.raises(RuntimeError, match="requires"):
+        load_teacher_rgb_tensor(invalid, output_height=512, output_width=640)
+
+
 def test_numpy_buffer_conversion_preserves_values_without_from_numpy() -> None:
     floats = __import__("numpy").arange(12, dtype="float32").reshape(3, 4)
     boolean = floats > 5

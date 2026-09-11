@@ -71,6 +71,7 @@ def test_only_baseline_e_opts_into_optimized_relation_compute() -> None:
     )
     assert e_config.pair_chunk_size == 2
     assert e_config.teacher_probability_outside_checkpoint is True
+    assert (e_config.teacher_input_height, e_config.teacher_input_width) == (512, 640)
 
     for baseline in "ABCD FG".replace(" ", ""):
         config = AttentionDistillationConfig.from_mapping(
@@ -78,6 +79,7 @@ def test_only_baseline_e_opts_into_optimized_relation_compute() -> None:
         )
         assert config.pair_chunk_size == 1
         assert config.teacher_probability_outside_checkpoint is False
+        assert (config.teacher_input_height, config.teacher_input_width) == (1024, 1280)
 
 
 def test_sixteen_frames_keep_all_thirty_directed_neighbor_pairs() -> None:

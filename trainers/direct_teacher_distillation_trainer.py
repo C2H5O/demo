@@ -78,6 +78,12 @@ def _build_dataset(
         online_teacher_attention=bool(
             config.get("attention_distill", {}).get("enabled", False)
         ),
+        teacher_input_height=int(
+            config.get("attention_distill", {}).get("teacher_input_height", 1024)
+        ),
+        teacher_input_width=int(
+            config.get("attention_distill", {}).get("teacher_input_width", 1280)
+        ),
     )
     print(
         "same-clip cache sampling: length=16 start_stride=8 first_frames=1,9,17,... "
@@ -258,10 +264,18 @@ def _compute_online_teacher_attention_loss(
     amp_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, Dict[str, float]]:
     """Run frozen Teacher Q/K and relation loss chunk-by-chunk without caching."""
-    if tuple(teacher_images.shape[1:]) != (16, 3, 1024, 1280):
+    expected_shape = (
+        16,
+        3,
+        config.teacher_input_height,
+        config.teacher_input_width,
+    )
+    if tuple(teacher_images.shape[1:]) != expected_shape:
         raise RuntimeError(
-            "Online Teacher batch must have shape [B,16,3,1024,1280]; got {}"
-            .format(tuple(teacher_images.shape))
+            "Online Teacher batch must have shape [B,{}]; got {}".format(
+                ",".join(str(value) for value in expected_shape),
+                tuple(teacher_images.shape),
+            )
         )
     batch_size = int(teacher_images.shape[0])
     if batch_size <= 0:
@@ -305,6 +319,99 @@ def _compute_online_teacher_attention_loss(
     logs["stats/online_teacher_chunks"] = float(chunks)
     logs["timing/online_teacher_attention_seconds"] = time.perf_counter() - started
     return total, logs
+
+
+def _audit_online_teacher_geometry(
+    teacher_model: VGGTOmegaTeacher,
+    student_model: DA3SmallStudent,
+    config: AttentionDistillationConfig,
+    baseline_id: str = "",
+) -> Dict[str, Any]:
+    """Validate and print the resolved online Teacher/Student token geometry once."""
+    capture = teacher_model.attention_capture
+    if capture is None:
+        raise RuntimeError("Online VGGT-Omega Teacher has no attention capture")
+    teacher_patch = int(capture.patch_size)
+    if teacher_patch != 16:
+        raise RuntimeError(
+            "Online VGGT-Omega patch size must be 16; got {}".format(teacher_patch)
+        )
+    teacher_height = int(config.teacher_input_height)
+    teacher_width = int(config.teacher_input_width)
+    if teacher_height % teacher_patch or teacher_width % teacher_patch:
+        raise RuntimeError(
+            "Online Teacher input {}x{} is not divisible by patch size {}".format(
+                teacher_height, teacher_width, teacher_patch
+            )
+        )
+    teacher_grid = (teacher_height // teacher_patch, teacher_width // teacher_patch)
+
+    student_height = int(student_model.config.image_height)
+    student_width = int(student_model.config.image_width)
+    student_patch = int(student_model.config.patch_size)
+    if student_height % student_patch or student_width % student_patch:
+        raise RuntimeError(
+            "Student input {}x{} is not divisible by patch size {}".format(
+                student_height, student_width, student_patch
+            )
+        )
+    student_grid = (student_height // student_patch, student_width // student_patch)
+
+    if str(baseline_id).upper() == "E":
+        if (teacher_height, teacher_width) != (512, 640):
+            raise RuntimeError(
+                "Baseline E online Teacher input must resolve to 512x640; got {}x{}"
+                .format(teacher_height, teacher_width)
+            )
+        if teacher_grid != (32, 40) or student_grid != (32, 40):
+            raise RuntimeError(
+                "Baseline E requires Teacher and Student patch grids to both be 32x40; "
+                "got Teacher {} and Student {}".format(teacher_grid, student_grid)
+            )
+
+    if teacher_grid == student_grid:
+        alignment = "identity"
+    elif (
+        teacher_grid[0] % student_grid[0] == 0
+        and teacher_grid[1] % student_grid[1] == 0
+    ):
+        alignment = "{}x{} average pooling".format(
+            teacher_grid[0] // student_grid[0],
+            teacher_grid[1] // student_grid[1],
+        )
+    else:
+        alignment = "patch-overlap projection"
+
+    print("Online Teacher RGB source: teacher_rgb 1024x1280")
+    if (teacher_height, teacher_width) == (1024, 1280):
+        print("Online Teacher resize: disabled")
+        print("Online Teacher input: 1024x1280")
+    else:
+        print(
+            "Online Teacher resize: 1024x1280 -> {}x{}".format(
+                teacher_height, teacher_width
+            )
+        )
+    print(
+        "Online Teacher tensor shape: [B,16,3,{},{}]".format(
+            teacher_height, teacher_width
+        )
+    )
+    print("Teacher patch size: {}".format(teacher_patch))
+    print("Teacher patch grid: {}x{}".format(*teacher_grid))
+    print("Student input: {}x{}".format(student_height, student_width))
+    print("Student patch size: {}".format(student_patch))
+    print("Student patch grid: {}x{}".format(*student_grid))
+    print("Attention spatial alignment: {}".format(alignment))
+    return {
+        "teacher_input": (teacher_height, teacher_width),
+        "teacher_patch_size": teacher_patch,
+        "teacher_grid": teacher_grid,
+        "student_input": (student_height, student_width),
+        "student_patch_size": student_patch,
+        "student_grid": student_grid,
+        "alignment": alignment,
+    }
 
 
 def _audit_attention_backward(
@@ -525,7 +632,8 @@ def _check_resume_contract(
         "teacher_layers", "student_layers", "attention_type",
         "spatial_alignment", "common_grid", "head_aggregation", "divergence",
         "temperature_teacher", "temperature_student", "weight", "frame_offsets",
-        "query_chunk_size", "eps",
+        "query_chunk_size", "eps", "teacher_input_height",
+        "teacher_input_width",
     )
     attention_mismatches = {}
     if checkpoint_attention_enabled != current_attention_enabled:
@@ -633,6 +741,12 @@ def train_direct_teacher_distillation(
         online_teacher.eval()
         if any(parameter.requires_grad for parameter in online_teacher.parameters()):
             raise RuntimeError("Online VGGT-Omega Teacher is not fully frozen")
+        _audit_online_teacher_geometry(
+            online_teacher,
+            model,
+            attention_config,
+            baseline_id=str(config.get("experiment", {}).get("baseline_id", "")),
+        )
         teacher_amp_enabled, teacher_amp_dtype = _teacher_amp_settings(teacher, device)
     loss_function = DirectTeacherDistillationLoss(config["loss"]).to(device)
     attention_loss_function = (

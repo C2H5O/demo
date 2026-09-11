@@ -9,6 +9,8 @@ attention_distill:
   weight: 0.1
   pair_chunk_size: 2
   teacher_probability_outside_checkpoint: true
+  teacher_input_height: 512
+  teacher_input_width: 640
 loss:
   highlight_mode: angular_soft_margin
   highlight_cone_full_angle_degrees: 10.0

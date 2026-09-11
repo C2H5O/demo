@@ -296,9 +296,18 @@ class CanonicalTemporalRGBDataset(Dataset):
 class TeacherClipInputDataset(Dataset):
     """Pair an RGB dataset's student-grid highlights with strict teacher RGB."""
 
-    def __init__(self, rgb_dataset: Any) -> None:
+    def __init__(
+        self,
+        rgb_dataset: Any,
+        teacher_input_height: int = CANONICAL_TEACHER_SIZE[0],
+        teacher_input_width: int = CANONICAL_TEACHER_SIZE[1],
+    ) -> None:
         self.rgb_dataset = rgb_dataset
         self.normalize_mode = "zero_one"
+        self.teacher_input_height = int(teacher_input_height)
+        self.teacher_input_width = int(teacher_input_width)
+        if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
+            raise ValueError("Teacher input dimensions must be positive")
 
     def __len__(self) -> int:
         return len(self.rgb_dataset)
@@ -309,7 +318,16 @@ class TeacherClipInputDataset(Dataset):
         sequence = record.sequence
         teacher_paths = sequence.get("teacher_frame_paths", sequence["frame_paths"])
         paths = [str(teacher_paths[item]) for item in record.frame_indices]
-        return torch.stack([load_teacher_rgb_tensor(path) for path in paths]), paths
+        return torch.stack(
+            [
+                load_teacher_rgb_tensor(
+                    path,
+                    output_height=self.teacher_input_height,
+                    output_width=self.teacher_input_width,
+                )
+                for path in paths
+            ]
+        ), paths
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         student = self.rgb_dataset[index]
