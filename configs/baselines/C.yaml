@@ -1,6 +1,4 @@
 base_config: _4090_common.yaml
-flash_attention:
-  enabled: true
 experiment:
   name: baseline_C_attention-distill
   baseline_id: C
