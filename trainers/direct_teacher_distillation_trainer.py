@@ -6,7 +6,6 @@ import json
 import math
 import random
 import time
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -29,7 +28,6 @@ from losses.attention_distillation_loss import (
 )
 from models.student.da3_small_student import DA3SmallStudent
 from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
-from models.flash_attention import configure_flash_attention
 from utils.checkpoint import (
     DIRECT_TEACHER_DISTILLATION_PROTOCOL,
     atomic_torch_save,
@@ -556,26 +554,6 @@ def train_direct_teacher_distillation(
     max_steps: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
-    attention_enabled = bool(config.get("attention_distill", {}).get("enabled", False))
-    context = nullcontext()
-    if attention_enabled:
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-
-        # Disable the instance-local Flash-first policy as well as PyTorch's
-        # automatic Flash selection, including checkpoint recomputation.
-        config["flash_attention"] = {**config.get("flash_attention", {}), "enabled": False}
-        context = sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH])
-        print("Attention distillation: Flash SDPA disabled; allowed=efficient_sdpa,math_sdpa")
-    with context:
-        return _train_direct_teacher_distillation(config, dry_run, resume_override, max_steps)
-
-
-def _train_direct_teacher_distillation(
-    config: Dict[str, Any],
-    dry_run: bool = False,
-    resume_override: Optional[Path] = None,
-    max_steps: Optional[int] = None,
-) -> Dict[str, Any]:
     if config.get("experiment", {}).get("training_required") is False:
         raise ValueError("This baseline is inference-only; use its documented existing checkpoint")
     objective = config.get("experiment", {}).get("objective_protocol")
@@ -621,8 +599,6 @@ def _train_direct_teacher_distillation(
     device = torch.device(requested_device)
     if dry_run and device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    flash_config = config.get("flash_attention", {})
-    print("FlashAttention enabled: {}".format(bool(flash_config.get("enabled", False))))
     if attention_config.enabled:
         print("Attention distillation mode: query_chunked")
         print("Attention distillation query_chunk_size: {}".format(attention_config.query_chunk_size))
@@ -637,7 +613,6 @@ def _train_direct_teacher_distillation(
         attention_config=config["attention_distill"],
     )
     model.train()
-    configure_flash_attention(model.backbone, flash_config, "Student")
     online_teacher: Optional[VGGTOmegaTeacher] = None
     teacher_amp_enabled = False
     teacher_amp_dtype = torch.float16
@@ -656,7 +631,6 @@ def _train_direct_teacher_distillation(
             online_teacher_config, device=device
         )
         online_teacher.eval()
-        configure_flash_attention(online_teacher.model.aggregator, flash_config, "Teacher")
         if any(parameter.requires_grad for parameter in online_teacher.parameters()):
             raise RuntimeError("Online VGGT-Omega Teacher is not fully frozen")
         teacher_amp_enabled, teacher_amp_dtype = _teacher_amp_settings(teacher, device)
