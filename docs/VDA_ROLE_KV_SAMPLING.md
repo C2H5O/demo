@@ -30,8 +30,6 @@ F fixed-stride 和 G role 三种推理配置；没有修改独立 F 分支，也
 `rope_start=4`；实际 global block 为 **0-based `[5,7,9,11]`**。
 普通 patch 之前有 CLS，随后在 `alt_start` 被原生 camera token 替换；当前 Small 没有 register token。
 `models/attention_capture.py` 已有从 `alt_start-2` block 输出恢复参考视图 permutation 的 hook 约定。
-另一个已有 Flash 工作目录的 `models/flash_attention.py` 使用 instance-local `TorchFunctionMode`
-接管 SDPA；本实现沿用这种局部接入方式，不复制上游 attention forward。
 
 原 F/G 的 KV 实现只有配置与拒绝运行的占位入口；没有已完成的 Spark3R KV 算法可直接调用。
 本次 F 是 Spark3R 风格的 **frame temporal stride 对照**，并非完整 Spark3R 算法或官方实现。
