@@ -6,7 +6,6 @@ import json
 import math
 import random
 import time
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -555,26 +554,6 @@ def train_direct_teacher_distillation(
     max_steps: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
-    attention_enabled = bool(config.get("attention_distill", {}).get("enabled", False))
-    context = nullcontext()
-    if attention_enabled:
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-
-        # Disable the instance-local Flash-first policy as well as PyTorch's
-        # automatic Flash selection, including checkpoint recomputation.
-        config["flash_attention"] = {**config.get("flash_attention", {}), "enabled": False}
-        context = sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH])
-        print("Attention distillation: Flash SDPA disabled; allowed=efficient_sdpa,math_sdpa")
-    with context:
-        return _train_direct_teacher_distillation(config, dry_run, resume_override, max_steps)
-
-
-def _train_direct_teacher_distillation(
-    config: Dict[str, Any],
-    dry_run: bool = False,
-    resume_override: Optional[Path] = None,
-    max_steps: Optional[int] = None,
-) -> Dict[str, Any]:
     if config.get("experiment", {}).get("training_required") is False:
         raise ValueError("This baseline is inference-only; use its documented existing checkpoint")
     objective = config.get("experiment", {}).get("objective_protocol")
