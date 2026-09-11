@@ -7,6 +7,8 @@ experiment:
 attention_distill:
   enabled: true
   weight: 0.1
+  pair_chunk_size: 2
+  teacher_probability_outside_checkpoint: true
 loss:
   highlight_mode: angular_soft_margin
   highlight_cone_full_angle_degrees: 10.0

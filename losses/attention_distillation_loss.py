@@ -31,6 +31,8 @@ class AttentionDistillationConfig:
     frame_offsets: Tuple[int, ...]
     query_chunk_size: int
     eps: float
+    pair_chunk_size: int = 1
+    teacher_probability_outside_checkpoint: bool = False
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "AttentionDistillationConfig":
@@ -76,6 +78,10 @@ class AttentionDistillationConfig:
             frame_offsets=tuple(int(value) for value in config["frame_offsets"]),
             query_chunk_size=int(config["query_chunk_size"]),
             eps=float(config["eps"]),
+            pair_chunk_size=int(config.get("pair_chunk_size", 1)),
+            teacher_probability_outside_checkpoint=bool(
+                config.get("teacher_probability_outside_checkpoint", False)
+            ),
         )
         result.validate()
         return result
@@ -111,6 +117,8 @@ class AttentionDistillationConfig:
             raise ValueError("frame_offsets must contain non-zero temporal offsets")
         if self.query_chunk_size <= 0:
             raise ValueError("attention_distill.query_chunk_size must be positive")
+        if self.pair_chunk_size <= 0:
+            raise ValueError("attention_distill.pair_chunk_size must be positive")
         if self.eps <= 0.0:
             raise ValueError("attention_distill.eps must be positive")
         if not self.enabled and self.weight != 0.0:
@@ -262,6 +270,89 @@ def _head_mean_attention(
         return torch.softmax(logits, dim=-1).mean(dim=1)
 
 
+def _head_mean_attention_pairs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    """Return head-mean probabilities for batched directed frame pairs."""
+    if q.ndim != 5 or k.ndim != 5:
+        raise ValueError("Pair-batched Q/K must have shape [B,P,H,N,D]")
+    if q.shape[:3] != k.shape[:3] or q.shape[-1] != k.shape[-1]:
+        raise ValueError("Pair-batched Q/K batch, pair, heads, or dimensions differ")
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        logits = torch.matmul(q.float(), k.float().transpose(-2, -1))
+        logits = logits / (math.sqrt(float(q.shape[-1])) * float(temperature))
+        return torch.softmax(logits, dim=-1).mean(dim=2)
+
+
+def _directed_frame_pair_indices(
+    frames: int,
+    frame_offsets: Sequence[int],
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    source_indices = []
+    target_indices = []
+    for source_frame in range(frames):
+        for offset in frame_offsets:
+            target_frame = source_frame + int(offset)
+            if 0 <= target_frame < frames:
+                source_indices.append(source_frame)
+                target_indices.append(target_frame)
+    return (
+        torch.tensor(source_indices, device=device, dtype=torch.long),
+        torch.tensor(target_indices, device=device, dtype=torch.long),
+    )
+
+
+def _teacher_pair_probability(
+    teacher_q: torch.Tensor,
+    teacher_k: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    with torch.no_grad():
+        return _head_mean_attention_pairs(
+            teacher_q, teacher_k, temperature
+        ).detach()
+
+
+def _pair_query_chunk_divergence_sum(
+    teacher_q: torch.Tensor,
+    teacher_k: torch.Tensor,
+    student_q: torch.Tensor,
+    student_k: torch.Tensor,
+    config: AttentionDistillationConfig,
+) -> torch.Tensor:
+    with torch.no_grad():
+        teacher_probability = _head_mean_attention_pairs(
+            teacher_q, teacher_k, config.temperature_teacher
+        )
+    student_probability = _head_mean_attention_pairs(
+        student_q, student_k, config.temperature_student
+    )
+    if teacher_probability.shape != student_probability.shape:
+        raise ValueError("Aligned Teacher/Student pair probabilities must match")
+    return _probability_divergence(
+        teacher_probability, student_probability, config.divergence, config.eps
+    ).sum()
+
+
+def _student_pair_query_chunk_divergence_sum(
+    student_q: torch.Tensor,
+    student_k: torch.Tensor,
+    teacher_probability: torch.Tensor,
+    config: AttentionDistillationConfig,
+) -> torch.Tensor:
+    student_probability = _head_mean_attention_pairs(
+        student_q, student_k, config.temperature_student
+    )
+    if teacher_probability.shape != student_probability.shape:
+        raise ValueError("Aligned Teacher/Student pair probabilities must match")
+    return _probability_divergence(
+        teacher_probability, student_probability, config.divergence, config.eps
+    ).sum()
+
+
 def _probability_divergence(
     teacher: torch.Tensor,
     student: torch.Tensor,
@@ -346,6 +437,11 @@ class CrossFrameAttentionDistillationLoss(nn.Module):
         teacher: Mapping[str, Any],
         student: Mapping[str, Any],
     ) -> torch.Tensor:
+        if (
+            self.config.pair_chunk_size != 1
+            or self.config.teacher_probability_outside_checkpoint
+        ):
+            return self._layer_loss_optimized(teacher, student)
         student_q, student_k = student["q"], student["k"]
         teacher_q = teacher["q"].detach().to(
             device=student_q.device, non_blocking=True
@@ -425,6 +521,124 @@ class CrossFrameAttentionDistillationLoss(nn.Module):
                     count += int(student_q.shape[0]) * (stop - start)
         if count == 0:
             raise RuntimeError("No valid cross-frame attention pairs were produced")
+        return total / float(count)
+
+    def _layer_loss_optimized(
+        self,
+        teacher: Mapping[str, Any],
+        student: Mapping[str, Any],
+    ) -> torch.Tensor:
+        student_q, student_k = student["q"], student["k"]
+        teacher_q = teacher["q"].detach().to(
+            device=student_q.device, non_blocking=True
+        )
+        teacher_k = teacher["k"].detach().to(
+            device=student_k.device, non_blocking=True
+        )
+        for name, value in (
+            ("teacher Q", teacher_q),
+            ("teacher K", teacher_k),
+            ("student Q", student_q),
+            ("student K", student_k),
+        ):
+            if value.ndim != 5:
+                raise ValueError("{} must have shape [B,F,H,N,D]".format(name))
+        if teacher_q.shape != teacher_k.shape or student_q.shape != student_k.shape:
+            raise ValueError("Teacher or student Q/K shapes differ")
+        if teacher_q.shape[:2] != student_q.shape[:2]:
+            raise ValueError("Teacher/student batch or frame counts differ")
+        teacher_grid, student_grid = _metadata_grid(teacher), _metadata_grid(student)
+        teacher_extent = _metadata_image_extent(teacher)
+        student_extent = _metadata_image_extent(student)
+        if teacher_extent[0] * student_extent[1] != teacher_extent[1] * student_extent[0]:
+            raise ValueError(
+                "Teacher/student patch grids do not represent the same full-frame aspect ratio"
+            )
+        aligner = SpatialTokenAligner(teacher_grid, student_grid).to(teacher_q.device)
+        teacher_q = aligner(teacher_q)
+        teacher_k = aligner(teacher_k)
+        expected_tokens = student_grid[0] * student_grid[1]
+        if teacher_q.shape[-2] != expected_tokens or student_q.shape[-2] != expected_tokens:
+            raise RuntimeError("Aligned Teacher and Student spatial token counts differ")
+
+        frames = int(student_q.shape[1])
+        tokens = int(student_q.shape[-2])
+        source_indices, target_indices = _directed_frame_pair_indices(
+            frames, self.config.frame_offsets, student_q.device
+        )
+        num_pairs = int(source_indices.numel())
+        if num_pairs == 0:
+            raise RuntimeError("No valid cross-frame attention pairs were produced")
+
+        total = student_q.new_zeros((), dtype=torch.float32)
+        count = 0
+        batch_size = int(student_q.shape[0])
+        for pair_start in range(0, num_pairs, self.config.pair_chunk_size):
+            pair_stop = min(num_pairs, pair_start + self.config.pair_chunk_size)
+            pair_sources = source_indices[pair_start:pair_stop]
+            pair_targets = target_indices[pair_start:pair_stop]
+            teacher_q_pairs = teacher_q.index_select(1, pair_sources)
+            teacher_k_pairs = teacher_k.index_select(1, pair_targets)
+            student_q_pairs = student_q.index_select(1, pair_sources)
+            student_k_pairs = student_k.index_select(1, pair_targets)
+
+            for start in range(0, tokens, self.config.query_chunk_size):
+                stop = min(tokens, start + self.config.query_chunk_size)
+                teacher_q_chunk = teacher_q_pairs[:, :, :, start:stop]
+                student_q_chunk = student_q_pairs[:, :, :, start:stop]
+
+                if self.config.teacher_probability_outside_checkpoint:
+                    teacher_probability = _teacher_pair_probability(
+                        teacher_q_chunk,
+                        teacher_k_pairs,
+                        self.config.temperature_teacher,
+                    )
+                    if teacher_probability.requires_grad:
+                        raise RuntimeError("Teacher probability unexpectedly requires gradients")
+
+                    def chunk_sum(
+                        sq: torch.Tensor,
+                        sk: torch.Tensor,
+                        tp: torch.Tensor,
+                    ) -> torch.Tensor:
+                        return _student_pair_query_chunk_divergence_sum(
+                            sq, sk, tp, self.config
+                        )
+
+                    checkpoint_inputs = (
+                        student_q_chunk,
+                        student_k_pairs,
+                        teacher_probability,
+                    )
+                else:
+                    def chunk_sum(
+                        tq: torch.Tensor,
+                        tk: torch.Tensor,
+                        sq: torch.Tensor,
+                        sk: torch.Tensor,
+                    ) -> torch.Tensor:
+                        return _pair_query_chunk_divergence_sum(
+                            tq, tk, sq, sk, self.config
+                        )
+
+                    checkpoint_inputs = (
+                        teacher_q_chunk,
+                        teacher_k_pairs,
+                        student_q_chunk,
+                        student_k_pairs,
+                    )
+
+                if torch.is_grad_enabled() and (
+                    student_q_chunk.requires_grad or student_k_pairs.requires_grad
+                ):
+                    value = checkpoint(
+                        chunk_sum, *checkpoint_inputs, use_reentrant=False
+                    )
+                else:
+                    value = chunk_sum(*checkpoint_inputs)
+                total = total + value
+                pair_count = pair_stop - pair_start
+                count += batch_size * pair_count * (stop - start)
         return total / float(count)
 
     def forward(
