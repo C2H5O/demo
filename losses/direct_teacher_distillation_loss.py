@@ -37,6 +37,9 @@ class DirectTeacherDistillationLossConfig:
     highlight_mode: str = "legacy"
     highlight_cone_full_angle_degrees: float = 10.0
     highlight_softness: float = 0.0005
+    depth_mode: str = "raw_depth_l1"
+    depth_robust_loss: str = "smooth_l1"
+    affine_detach: bool = True
 
     @classmethod
     def from_mapping(
@@ -65,6 +68,14 @@ class DirectTeacherDistillationLossConfig:
     def validate(self) -> None:
         if self.mode != "direct_teacher_distillation":
             raise ValueError("Unsupported loss mode {!r}".format(self.mode))
+        if self.depth_mode not in {"raw_depth_l1", "clip_shared_affine_disparity"}:
+            raise ValueError("Unsupported depth_mode {!r}".format(self.depth_mode))
+        if self.depth_robust_loss != "smooth_l1":
+            raise ValueError("Unsupported depth_robust_loss {!r}".format(self.depth_robust_loss))
+        if not isinstance(self.affine_detach, bool):
+            raise ValueError("loss.affine_detach must be boolean")
+        if self.depth_mode == "clip_shared_affine_disparity" and not self.affine_detach:
+            raise ValueError("Baseline-I requires loss.affine_detach=true")
         for name in (
             "lambda_depth", "lambda_camera", "lambda_highlight", "lambda_smooth"
         ):
@@ -149,6 +160,130 @@ def compute_direct_depth_distillation_loss(
         "effective_weight": effective_weight,
         "valid_weight_sum": denominator,
         "fallback": fallback,
+    }
+    return loss, diagnostics
+
+
+def compute_clip_shared_affine_disparity_distillation_loss(
+    student_depth: torch.Tensor,
+    teacher_depth: torch.Tensor,
+    teacher_confidence: torch.Tensor,
+    teacher_valid_mask: torch.Tensor,
+    eps: float = 1e-6,
+    use_confidence_weight: bool = True,
+    affine_detach: bool = True,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Fit one detached disparity affine transform per complete clip.
+
+    The affine fit reduces all ``[T,H,W]`` values of each batch sample together.
+    Residuals remain frame-balanced: weighted means are formed per frame, then
+    averaged over frames with at least one valid weighted pixel.
+    """
+    if student_depth.ndim != 4:
+        raise ValueError("Student depth must have shape [B,T,H,W]")
+    if student_depth.shape[1] != 16:
+        raise ValueError("Clip-shared affine disparity requires exactly 16 frames")
+    expected = tuple(student_depth.shape)
+    for name, value in (
+        ("teacher depth", teacher_depth),
+        ("teacher confidence", teacher_confidence),
+        ("teacher valid mask", teacher_valid_mask),
+    ):
+        if tuple(value.shape) != expected:
+            raise ValueError("{} shape {} != {}".format(name, tuple(value.shape), expected))
+    if not affine_detach:
+        raise ValueError("Baseline-I requires detached affine parameters")
+
+    teacher_depth = teacher_depth.detach()
+    teacher_confidence = teacher_confidence.detach()
+    teacher_valid_mask = teacher_valid_mask.detach().bool()
+    valid = (
+        teacher_valid_mask
+        & torch.isfinite(teacher_depth)
+        & (teacher_depth > 0.0)
+        & torch.isfinite(student_depth)
+        & (student_depth > 0.0)
+    )
+    confidence = torch.nan_to_num(
+        teacher_confidence.float(), nan=0.0, posinf=0.0, neginf=0.0
+    ).clamp_min(0.0)
+    if not use_confidence_weight:
+        confidence = torch.ones_like(confidence)
+    valid_count = valid.flatten(1).sum(1)
+    confidence_sum = torch.where(
+        valid, confidence, torch.zeros_like(confidence)
+    ).flatten(1).sum(1)
+    confidence_fallback = (confidence_sum <= eps) & (valid_count > 0)
+    effective_weight = torch.where(
+        confidence_fallback[:, None, None, None],
+        torch.ones_like(confidence),
+        confidence,
+    )
+    weight = effective_weight * valid.to(effective_weight.dtype)
+
+    student_fp32 = student_depth.float()
+    teacher_fp32 = teacher_depth.float()
+    safe_student = torch.where(
+        valid, student_fp32.clamp_min(eps), torch.ones_like(student_fp32)
+    )
+    safe_teacher = torch.where(
+        valid, teacher_fp32.clamp_min(eps), torch.ones_like(teacher_fp32)
+    )
+    student_disparity = torch.where(
+        valid, safe_student.reciprocal(), torch.zeros_like(safe_student)
+    )
+    teacher_disparity = torch.where(
+        valid, safe_teacher.reciprocal(), torch.zeros_like(safe_teacher)
+    )
+
+    weight_sum = weight.flatten(1).sum(1)
+    mean_x = (weight * student_disparity).flatten(1).sum(1) / weight_sum.clamp_min(eps)
+    mean_y = (weight * teacher_disparity).flatten(1).sum(1) / weight_sum.clamp_min(eps)
+    centered_x = student_disparity - mean_x[:, None, None, None]
+    centered_y = teacher_disparity - mean_y[:, None, None, None]
+    covariance = (weight * centered_x * centered_y).flatten(1).sum(1)
+    variance_sum = (weight * centered_x.square()).flatten(1).sum(1)
+    variance = variance_sum / weight_sum.clamp_min(eps)
+    fitted_scale = covariance / (variance_sum + eps)
+    fitted_shift = mean_y - fitted_scale * mean_x
+    fit_finite = torch.isfinite(fitted_scale) & torch.isfinite(fitted_shift)
+    affine_fallback = (weight_sum <= eps) | (variance <= eps) | ~fit_finite
+    scale = torch.where(
+        affine_fallback, torch.ones_like(fitted_scale), fitted_scale
+    ).detach()
+    shift = torch.where(
+        affine_fallback, torch.zeros_like(fitted_shift), fitted_shift
+    ).detach()
+
+    aligned_student_disparity = (
+        scale[:, None, None, None] * student_disparity
+        + shift[:, None, None, None]
+    )
+    residual = F.smooth_l1_loss(
+        aligned_student_disparity, teacher_disparity, reduction="none"
+    )
+    frame_weight_sum = weight.flatten(2).sum(2)
+    frame_numerator = (weight * residual).flatten(2).sum(2)
+    per_frame = frame_numerator / frame_weight_sum.clamp_min(eps)
+    valid_frames = frame_weight_sum > eps
+    valid_frame_count = valid_frames.sum(1)
+    per_sample = torch.where(
+        valid_frames, per_frame, torch.zeros_like(per_frame)
+    ).sum(1) / valid_frame_count.to(per_frame.dtype).clamp_min(1.0)
+    loss = _masked_mean(per_sample, valid_frame_count > 0, student_depth)
+
+    diagnostics = {
+        "valid": valid,
+        "effective_weight": effective_weight,
+        "valid_weight_sum": weight_sum,
+        "confidence_fallback": confidence_fallback,
+        "fallback": affine_fallback,
+        "scale": scale,
+        "shift": shift,
+        "valid_frames": valid_frames,
+        "student_disparity": student_disparity.detach(),
+        "teacher_disparity": teacher_disparity.detach(),
+        "aligned_student_disparity": aligned_student_disparity.detach(),
     }
     return loss, diagnostics
 
@@ -398,13 +533,23 @@ class DirectTeacherDistillationLoss(nn.Module):
         teacher = batch["teacher"]
         if tuple(points.shape) != tuple(student_depth.shape) + (3,):
             raise ValueError("Student xyz_local does not match depth")
-        depth, depth_diagnostics = compute_direct_depth_distillation_loss(
+        depth_function = (
+            compute_clip_shared_affine_disparity_distillation_loss
+            if self.config.depth_mode == "clip_shared_affine_disparity"
+            else compute_direct_depth_distillation_loss
+        )
+        depth_kwargs = {
+            "eps": self.config.eps,
+            "use_confidence_weight": self.config.use_confidence_weight,
+        }
+        if self.config.depth_mode == "clip_shared_affine_disparity":
+            depth_kwargs["affine_detach"] = self.config.affine_detach
+        depth, depth_diagnostics = depth_function(
             student_depth,
             teacher["depth"],
             teacher["confidence"],
             teacher["valid_mask"],
-            eps=self.config.eps,
-            use_confidence_weight=self.config.use_confidence_weight,
+            **depth_kwargs,
         )
         camera, camera_diagnostics = compute_camera_distillation_loss(
             prediction["intrinsics"],
@@ -468,7 +613,9 @@ class DirectTeacherDistillationLoss(nn.Module):
             "loss/smooth": smooth,
             "loss/smooth_weighted": smooth_weighted,
             "stats/depth_valid_ratio": valid.float().mean(),
-            "stats/depth_confidence_fallback_ratio": depth_diagnostics["fallback"].float().mean(),
+            "stats/depth_confidence_fallback_ratio": depth_diagnostics.get(
+                "confidence_fallback", depth_diagnostics["fallback"]
+            ).float().mean(),
             "stats/teacher_confidence_mean": torch.nan_to_num(teacher["confidence"].detach().float()).mean(),
             "stats/teacher_confidence_valid_mean": confidence_valid_mean,
             "stats/student_depth_min": student_min,
@@ -488,6 +635,31 @@ class DirectTeacherDistillationLoss(nn.Module):
             "stats/teacher_fx_mean": camera_diagnostics["teacher_fx_mean"],
             "stats/teacher_fy_mean": camera_diagnostics["teacher_fy_mean"],
         }
+        if self.config.depth_mode == "clip_shared_affine_disparity":
+            scale = depth_diagnostics["scale"]
+            shift = depth_diagnostics["shift"]
+            valid_frames = depth_diagnostics["valid_frames"]
+            tensors.update(
+                {
+                    "stats/depth_affine_scale_mean": scale.mean(),
+                    "stats/depth_affine_scale_min": scale.min(),
+                    "stats/depth_affine_scale_max": scale.max(),
+                    "stats/depth_affine_shift_mean": shift.mean(),
+                    "stats/depth_affine_shift_min": shift.min(),
+                    "stats/depth_affine_shift_max": shift.max(),
+                    "stats/depth_affine_fallback_ratio": depth_diagnostics["fallback"].float().mean(),
+                    "stats/depth_valid_frames_mean": valid_frames.float().sum(1).mean(),
+                    "stats/student_disparity_mean": _masked_mean(
+                        depth_diagnostics["student_disparity"], valid, student_depth
+                    ),
+                    "stats/teacher_disparity_mean": _masked_mean(
+                        depth_diagnostics["teacher_disparity"], valid, student_depth
+                    ),
+                    "stats/aligned_student_disparity_mean": _masked_mean(
+                        depth_diagnostics["aligned_student_disparity"], valid, student_depth
+                    ),
+                }
+            )
         return total, {name: float(value.detach().cpu()) for name, value in tensors.items()}
 
 
@@ -496,6 +668,7 @@ __all__ = [
     "DirectTeacherDistillationLoss",
     "DirectTeacherDistillationLossConfig",
     "compute_camera_distillation_loss",
+    "compute_clip_shared_affine_disparity_distillation_loss",
     "compute_direct_depth_distillation_loss",
     "compute_highlight_aware_smoothness_loss",
     "compute_highlight_surface_loss",

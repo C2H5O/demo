@@ -595,7 +595,11 @@ def _check_resume_contract(
         raise ValueError("Resume checkpoint config has an incompatible objective protocol")
     if checkpoint_config.get("loss", {}).get("mode") != "direct_teacher_distillation":
         raise ValueError("Resume checkpoint does not use direct_teacher_distillation loss")
-    loss_fields = ("lambda_depth", "lambda_camera", "lambda_highlight", "lambda_smooth", "camera", "eps", "use_confidence_weight")
+    loss_fields = (
+        "lambda_depth", "lambda_camera", "lambda_highlight", "lambda_smooth",
+        "camera", "eps", "use_confidence_weight", "depth_mode",
+        "depth_robust_loss", "affine_detach",
+    )
     loss_mismatches = {key: (checkpoint_config.get("loss", {}).get(key), config["loss"].get(key))
                        for key in loss_fields
                        if checkpoint_config.get("loss", {}).get(key) != config["loss"].get(key)}

@@ -47,5 +47,12 @@
     "config": "configs/baselines/G.yaml",
     "training_required": false,
     "implemented": false
+  },
+  {
+    "id": "I",
+    "branch": "baseline-I",
+    "config": "configs/baselines/I.yaml",
+    "training_required": true,
+    "implemented": true
   }
 ]
