@@ -112,17 +112,17 @@ def test_token_indices_preserve_all_specials_and_original_frame_identity():
         assert indices.shape[1] == len(expected) == 5 * 3 + 3 * 4
 
 
-def tiny_da3(strategy):
+def tiny_da3(strategy, depth=6):
     upstream = pytest.importorskip("depth_anything_3.model.dinov2.vision_transformer")
     class Backbone(nn.Module):
         def __init__(self):
             super().__init__()
             self.pretrained = upstream.DinoVisionTransformer(
-                img_size=28, patch_size=14, embed_dim=24, depth=6, num_heads=2,
+                img_size=28, patch_size=14, embed_dim=24, depth=depth, num_heads=2,
                 alt_start=4, qknorm_start=4, rope_start=4,
             )
         def forward(self, images, **kwargs):
-            return self.pretrained.get_intermediate_layers(images, n=[5], **kwargs)
+            return self.pretrained.get_intermediate_layers(images, n=[depth - 1], **kwargs)
     class Model(nn.Module):
         def __init__(self):
             super().__init__()

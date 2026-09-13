@@ -44,6 +44,7 @@ class KVSamplingConfig:
     key_frames: int = 2
     overlap_frames: int = 2
     new_frames: int = 4
+    selected_new_frames: int | None = None
     first_window_method: str = "uniform"
     first_window_num_frames: int = 8
     first_window_num_buckets: int | None = None
@@ -54,6 +55,10 @@ class KVSamplingConfig:
     highlight_detection: dict = field(default_factory=dict)
     lightweight_highlight: dict = field(default_factory=dict)
     bucket_highlight: dict = field(default_factory=dict)
+    new_frame_selection: dict = field(default_factory=dict)
+    spatial_sampling: dict = field(default_factory=dict)
+    special_tokens: dict = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -65,7 +70,8 @@ class KVSamplingConfig:
         first = dict(value.pop("first_window", {}))
         stride = dict(value.pop("spark3r_fixed_stride", {}))
         # Unknown keys fail instead of silently enabling an old selection scheme.
-        for section, allowed in ((role, {"key_frames", "overlap_frames", "new_frames"}),
+        for section, allowed in ((role, {"key_frames", "overlap_frames", "new_frames",
+                                        "selected_new_frames"}),
                                  (first, {"method", "num_frames", "num_buckets"}),
                                  (stride, {"temporal_stride"})):
             if set(section) - allowed:
@@ -78,7 +84,8 @@ class KVSamplingConfig:
         """Validate policy and resolve this window's cap; default is the later-window cap."""
         if not self.enabled:
             return window_length
-        if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight", "spark3r_fixed_stride"}:
+        if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight",
+                               "role_layer_spatial_kv", "spark3r_fixed_stride"}:
             raise ValueError("Unknown kv_sampling.method")
         if not isfinite(self.retention_ratio) or not 0 < self.retention_ratio <= 1:
             raise ValueError("retention_ratio must be in (0, 1]")
@@ -86,13 +93,20 @@ class KVSamplingConfig:
                   self.first_window_num_frames, self.temporal_stride, self.debug_max_windows)
         if any(type(count) is not int or count < 0 for count in counts):
             raise ValueError("Frame budgets, stride and debug limit must be nonnegative integers")
+        if self.selected_new_frames is not None and (
+            type(self.selected_new_frames) is not int or self.selected_new_frames < 0
+        ):
+            raise ValueError("selected_new_frames must be a nonnegative integer")
         target = ceil(window_length * self.retention_ratio)
         first_method = {"vda_role_highlight": "highlight",
-                        "vda_role_bucket_highlight": "bucket_highlight"}.get(self.method, "uniform")
-        first_target = 16 if self.method == "vda_role_bucket_highlight" else target
+                        "vda_role_bucket_highlight": "bucket_highlight",
+                        "role_layer_spatial_kv": "bucket_highlight"}.get(self.method, "uniform")
+        first_target = 16 if self.method in {"vda_role_bucket_highlight",
+                                             "role_layer_spatial_kv"} else target
         if self.first_window_method != first_method or self.first_window_num_frames != first_target:
             raise ValueError("First-window method and budget must match the KV policy")
-        if sum((self.key_frames, self.overlap_frames, self.new_frames)) != target:
+        if (self.method != "role_layer_spatial_kv"
+            and sum((self.key_frames, self.overlap_frames, self.new_frames)) != target):
             raise ValueError("Role quotas must sum to the shared retention budget")
         if self.temporal_stride < 1:
             raise ValueError("temporal_stride must be positive")
@@ -108,6 +122,23 @@ class KVSamplingConfig:
                 or (self.key_frames, self.overlap_frames, self.new_frames) != (2, 8, 10)
                 or type(self.first_window_num_buckets) is not int or self.first_window_num_buckets != 16):
                 raise ValueError("Bucket highlight requires window32, first16/16 buckets, later2+8+10=20")
+            if first_window:
+                return self.first_window_num_frames
+        if self.method == "role_layer_spatial_kv":
+            resolve_lightweight_highlight_options(self.lightweight_highlight)
+            resolve_new_frame_selection_options(self.new_frame_selection)
+            resolve_spatial_sampling_options(self.spatial_sampling)
+            resolve_special_token_options(self.special_tokens)
+            resolve_diagnostics_options(self.diagnostics)
+            if (window_length != 32 or target != 24
+                or (self.key_frames, self.overlap_frames, self.new_frames,
+                    self.selected_new_frames) != (2, 8, 22, 14)
+                or type(self.first_window_num_buckets) is not int
+                or self.first_window_num_buckets != 16):
+                raise ValueError(
+                    "Role/layer spatial KV requires window32, first16, and later "
+                    "2 key + 8 overlap + 14 selected of 22 new = 24 providers"
+                )
             if first_window:
                 return self.first_window_num_frames
         if self.method == "spark3r_fixed_stride" and len(range(0, window_length, self.temporal_stride)) != target:
@@ -143,6 +174,101 @@ def resolve_lightweight_highlight_options(options: Mapping | None = None) -> dic
     if type(factor) is not int or factor < 1:
         raise ValueError("downsample_factor must be a positive integer")
     return values
+
+
+def _exact_mapping(options: Mapping | None, defaults: Mapping, name: str) -> dict:
+    if not isinstance(options, Mapping):
+        raise ValueError(name + " must be a mapping")
+    values = dict(options)
+    if set(values) != set(defaults):
+        raise ValueError(name + " fields must be exactly " + str(sorted(defaults)))
+    return values
+
+
+def resolve_new_frame_selection_options(options: Mapping | None = None) -> dict:
+    """Validate H's fixed seven-bucket, two-clean-frames-per-bucket policy."""
+    expected = {"method": "temporal_bucket_highlight", "num_buckets": 7,
+                "keep_per_bucket": 2, "score": "lightweight_highlight",
+                "tie_break": "frame_index"}
+    values = _exact_mapping(options, expected, "new_frame_selection")
+    if any(type(values[key]) is not type(expected[key]) or values[key] != expected[key]
+           for key in expected):
+        raise ValueError("new_frame_selection must use 7 buckets x 2 lightweight-highlight frames")
+    return values
+
+
+def resolve_spatial_sampling_options(options: Mapping | None = None) -> dict:
+    """Validate encoder-block schedule; global blocks use their real block index."""
+    if not isinstance(options, Mapping):
+        raise ValueError("spatial_sampling must be a mapping")
+    values = dict(options)
+    if set(values) != {"enabled", "early_layers", "late_layers"} or values["enabled"] is not True:
+        raise ValueError("spatial_sampling must enable early_layers and late_layers")
+    expected = {
+        "early_layers": {"start": 0, "end": 5, "key_stride": 1,
+                         "overlap_stride": 2, "new_stride": 2},
+        "late_layers": {"start": 6, "end": 11, "key_stride": 1,
+                        "overlap_stride": 1, "new_stride": 1},
+    }
+    for name, schedule in expected.items():
+        section = values[name]
+        if (not isinstance(section, Mapping) or set(section) != set(schedule)
+            or any(type(section[key]) is not type(expected_value)
+                   or section[key] != expected_value
+                   for key, expected_value in schedule.items())):
+            raise ValueError(name + " must match the fixed DA3-Small 0-5 / 6-11 schedule")
+        values[name] = dict(section)
+    return values
+
+
+def resolve_special_token_options(options: Mapping | None = None) -> dict:
+    values = _exact_mapping(options, {"keep_all": True}, "special_tokens")
+    if values["keep_all"] is not True:
+        raise ValueError("All special-token K/V must be retained")
+    return values
+
+
+def resolve_diagnostics_options(options: Mapping | None = None) -> dict:
+    values = _exact_mapping(options, {"print_once_per_sequence": True}, "diagnostics")
+    if values["print_once_per_sequence"] is not True:
+        raise ValueError("H requires one bounded KV diagnostic per sequence")
+    return values
+
+
+def spatial_strides_for_layer(layer_index: int, options: Mapping) -> dict[str, int]:
+    """Return role strides for a real DA3 encoder block index."""
+    if type(layer_index) is not int:
+        raise ValueError("layer_index must be an integer")
+    values = resolve_spatial_sampling_options(options)
+    for name in ("early_layers", "late_layers"):
+        section = values[name]
+        if section["start"] <= layer_index <= section["end"]:
+            return {role: section[role + "_stride"] for role in ("key", "overlap", "new")}
+    raise ValueError("DA3 encoder block is outside the configured 0-11 schedule")
+
+
+def build_spatial_patch_indices(grid_height: int, grid_width: int, stride: int) -> tuple[int, ...]:
+    """Row-major indices equivalent to grid[::stride, ::stride]."""
+    if any(type(value) is not int or value < 1 for value in (grid_height, grid_width, stride)):
+        raise ValueError("Patch grid dimensions and stride must be positive integers")
+    return tuple(row * grid_width + column
+                 for row in range(0, grid_height, stride)
+                 for column in range(0, grid_width, stride))
+
+
+def build_role_layer_patch_indices(metadata: WindowFrameMetadata, selected_slots: Sequence[int],
+                                   layer_index: int, grid_height: int, grid_width: int,
+                                   options: Mapping) -> dict[int, tuple[int, ...]]:
+    """Build original-grid patch offsets for only the selected provider frames."""
+    selected = list(selected_slots)
+    if not selected or len(selected) != len(set(selected)):
+        raise ValueError("Selected provider slots must be nonempty and unique")
+    if any(type(slot) is not int or not 0 <= slot < len(metadata.frame_roles) for slot in selected):
+        raise ValueError("Selected provider slot is outside metadata")
+    strides = spatial_strides_for_layer(layer_index, options)
+    cache = {stride: build_spatial_patch_indices(grid_height, grid_width, stride)
+             for stride in set(strides.values())}
+    return {slot: cache[strides[metadata.frame_roles[slot]]] for slot in selected}
 
 
 def temporal_buckets(candidates: Sequence[int], count: int) -> list[list[int]]:
@@ -323,7 +449,8 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     """Dispatch frame selection with an identical unique-frame cap for F and G."""
     if not config.enabled:
         return list(range(len(metadata.frame_positions)))
-    if config.method in {"vda_role_highlight", "vda_role_bucket_highlight"}:
+    if config.method in {"vda_role_highlight", "vda_role_bucket_highlight",
+                          "role_layer_spatial_kv"}:
         expected_budget = config.frame_budget(len(metadata.frame_positions), first_window=metadata.first_window)
         if budget != expected_budget:
             raise ValueError("Highlight budget does not match the current first/later window")
@@ -341,18 +468,32 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
             or sum(metadata.frame_roles[slot] == "overlap" for slot in history) > 8
         ):
             raise ValueError("Highlight policy expects at most 2 key and 8 overlap frames")
-        count = budget if metadata.first_window else config.new_frames
-        if config.method == "vda_role_bucket_highlight":
+        count = budget if metadata.first_window else (
+            config.selected_new_frames if config.method == "role_layer_spatial_kv"
+            else config.new_frames
+        )
+        if config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
             temporal_new = sorted(new, key=lambda slot: (metadata.frame_positions[slot], slot))
-            options = resolve_bucket_highlight_options(config.bucket_highlight)
-            if not metadata.first_window and options["keep_policy"] == "prefix_recent":
+            options = (resolve_bucket_highlight_options(config.bucket_highlight)
+                       if config.method == "vda_role_bucket_highlight" else None)
+            if (config.method == "vda_role_bucket_highlight" and not metadata.first_window
+                and options["keep_policy"] == "prefix_recent"):
                 selected_new, buckets, keep_counts = select_prefix_recent_frames(metadata, scores, options)
             else:
-                num_buckets = config.first_window_num_buckets if metadata.first_window else options["num_buckets"]
-                keep_policy = "one" if metadata.first_window else options["keep_policy"]
+                if metadata.first_window:
+                    num_buckets, keep_policy, configured_counts = (
+                        config.first_window_num_buckets, "one", None)
+                elif config.method == "role_layer_spatial_kv":
+                    selection = resolve_new_frame_selection_options(config.new_frame_selection)
+                    num_buckets, keep_policy = selection["num_buckets"], "fixed"
+                    configured_counts = [selection["keep_per_bucket"]] * num_buckets
+                else:
+                    num_buckets, keep_policy = options["num_buckets"], options["keep_policy"]
+                    configured_counts = options["keep_counts"]
                 selected_new, buckets = select_bucket_highlight_frames(
-                    temporal_new, scores, num_buckets, keep_policy=keep_policy, keep_counts=options["keep_counts"])
-                keep_counts = bucket_selection_keep_counts(buckets, keep_policy, options["keep_counts"])
+                    temporal_new, scores, num_buckets, keep_policy=keep_policy,
+                    keep_counts=configured_counts)
+                keep_counts = bucket_selection_keep_counts(buckets, keep_policy, configured_counts)
             if len(selected_new) > (config.first_window_num_frames if metadata.first_window else config.new_frames):
                 raise RuntimeError("Bucket selection exceeded this window's new-frame budget")
             if selection_audit is not None:
@@ -362,7 +503,11 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
             selected_new = sorted(new, key=lambda slot: (scores[slot], slot))[:count]
         selected = sorted(history + selected_new)
         if len(candidates) == 32 and not metadata.first_window:
-            assert len(history) == 10 and len(selected_new) == config.new_frames and len(selected) == budget
+            expected_new = (config.selected_new_frames
+                            if config.method == "role_layer_spatial_kv" else config.new_frames)
+            if not (len(history) == 10 and len(selected_new) == expected_new
+                    and len(selected) == budget):
+                raise RuntimeError("Standard VDA window did not satisfy its exact role/provider budget")
     elif config.method == "vda_role":
         selected = select_vda_role_kv_frames(metadata, budget, {
             "key": config.key_frames, "overlap": config.overlap_frames, "new": config.new_frames,
@@ -378,7 +523,7 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     else:
         raise ValueError("Unknown KV sampling method: " + config.method)
     expected = min(budget, len(eligible_frame_slots(metadata)))
-    if config.method == "vda_role_bucket_highlight":
+    if config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
         expected = len(history) + sum(keep_counts)
     elif config.method == "vda_role_highlight" and not metadata.first_window:
         expected = len(history) + min(config.new_frames, len(new))

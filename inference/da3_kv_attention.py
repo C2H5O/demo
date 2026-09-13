@@ -17,7 +17,8 @@ import torch.nn.functional as F
 from torch.overrides import TorchFunctionMode
 
 from inference.kv_sampling import (
-    KVSamplingConfig, WindowFrameMetadata, eligible_frame_slots, select_kv_frames,
+    KVSamplingConfig, WindowFrameMetadata, build_role_layer_patch_indices,
+    eligible_frame_slots, select_kv_frames, spatial_strides_for_layer,
 )
 from models.attention_capture import _blocks
 from inference.lightweight_highlight import compute_lightweight_highlight_scores
@@ -25,11 +26,13 @@ from inference.lightweight_highlight import compute_lightweight_highlight_scores
 
 def frame_slots_to_token_indices(selected_slots, *, num_frames: int,
                                   tokens_per_frame: int, special_tokens: int,
-                                  reference_indices: torch.Tensor) -> torch.Tensor:
+                                  reference_indices: torch.Tensor,
+                                  patch_indices_by_slot=None) -> torch.Tensor:
     """Map original window slots into DA3's [reference, remaining] token layout.
 
-    Return [B, K] indices: all frames' special-token prefixes, plus every patch
-    token of each selected frame. These exact indices are shared by K and V.
+    Return [B, K] indices: all frames' special-token prefixes, plus configured
+    original-grid patch tokens of each selected frame. These exact indices are
+    shared by K and V.
     Positions have already been applied to full Q/K before these indices are used.
     """
     selected_slots = list(selected_slots)
@@ -42,12 +45,27 @@ def frame_slots_to_token_indices(selected_slots, *, num_frames: int,
     if reference_indices.ndim != 1 or reference_indices.dtype != torch.long:
         raise ValueError("Reference indices must be a one-dimensional LongTensor")
     device = reference_indices.device
-    slots = torch.tensor(selected_slots, dtype=torch.long, device=device)[None, :]
-    reference = reference_indices[:, None]
-    internal = torch.where(slots < reference, slots + 1, slots)
-    internal = torch.where(slots == reference, 0, internal)
-    patches = torch.arange(special_tokens, tokens_per_frame, device=device)
-    patch_indices = (internal[:, :, None] * tokens_per_frame + patches).flatten(1)
+    patch_count = tokens_per_frame - special_tokens
+    if patch_indices_by_slot is None:
+        patch_indices_by_slot = {slot: tuple(range(patch_count)) for slot in selected_slots}
+    if set(patch_indices_by_slot) != set(selected_slots):
+        raise ValueError("Patch-index mapping must cover exactly the selected provider slots")
+    patch_parts = []
+    local_index_cache = {}
+    for slot in selected_slots:
+        offsets = tuple(patch_indices_by_slot[slot])
+        if (not offsets or len(offsets) != len(set(offsets))
+            or any(type(offset) is not int or not 0 <= offset < patch_count for offset in offsets)):
+            raise ValueError("Patch offsets must be nonempty unique original-grid indices")
+        internal = torch.where(slot < reference_indices, slot + 1, slot)
+        internal = torch.where(slot == reference_indices, 0, internal)
+        if offsets not in local_index_cache:
+            local_index_cache[offsets] = (
+                special_tokens + torch.tensor(offsets, dtype=torch.long, device=device)
+            )
+        local = local_index_cache[offsets]
+        patch_parts.append(internal[:, None] * tokens_per_frame + local[None, :])
+    patch_indices = torch.cat(patch_parts, dim=1)
     special = (torch.arange(num_frames, device=device)[:, None] * tokens_per_frame
                + torch.arange(special_tokens, device=device)).flatten()
     special = special[None, :].expand(len(reference_indices), -1)
@@ -71,8 +89,9 @@ class DA3KVAttention:
 
     Only selected global layers are wrapped, and every wrapper/hook is restored
     even when inference raises. Dense without debug/profiling installs no hooks.
-    Every global layer uses the same selected set within a window. H's budget
-    is 16 for the first window and 20 for standard later windows.
+    Every global layer uses the same provider frames within a window. H keeps
+    16 providers in its first window and 24 in standard later windows, while
+    patch K/V density follows the real DA3 encoder block index.
     """
 
     def __init__(self, model, config: KVSamplingConfig, window_length: int):
@@ -86,6 +105,7 @@ class DA3KVAttention:
         self.audit_examples = []
         self.attention_seconds = 0.0
         self.profiled_calls = 0
+        self.diagnostic_printed = False
         self.metadata = None
         self.highlight_processor = None
         if config.enabled and config.method == "vda_role_highlight":
@@ -104,6 +124,11 @@ class DA3KVAttention:
                        if alt_start != -1 and i >= alt_start and i % 2 == 1]
         if self.observing and (not self.layers or not 0 <= alt_start - 2 < len(self.blocks)):
             raise RuntimeError("Unsupported DA3 global/reference-selection block layout")
+        if config.enabled and config.method == "role_layer_spatial_kv":
+            if len(self.blocks) != 12:
+                raise RuntimeError("Role/layer spatial KV requires the 12-block DA3-Small encoder")
+            for layer in self.layers:
+                spatial_strides_for_layer(layer, config.spatial_sampling)
 
     def __enter__(self):
         if not self.observing:
@@ -136,6 +161,7 @@ class DA3KVAttention:
     def __exit__(self, *exc):
         self.metadata = None
         self.token_indices = None
+        self.token_indices_by_layer = None
         self.reference_indices = None
         self.events = []
         return self.stack.__exit__(*exc)
@@ -166,7 +192,9 @@ class DA3KVAttention:
         self.metadata = metadata
         self.highlight_scores = None
         self.selection_audit = {}
-        if self.config.enabled and self.config.method == "vda_role_bucket_highlight":
+        if self.config.enabled and self.config.method in {
+            "vda_role_bucket_highlight", "role_layer_spatial_kv"
+        }:
             self.budget = self.config.frame_budget(len(metadata.frame_positions), first_window=metadata.first_window)
             if images.ndim != 5 or images.shape[0] != 1 or images.shape[1] != len(metadata.frame_positions):
                 raise ValueError("Bucket highlight selection requires [1,F,3,H,W] matching metadata")
@@ -194,11 +222,14 @@ class DA3KVAttention:
         self.calls, self.events = [], []
         self.reference_indices = None
         self.token_indices = None
+        self.token_indices_by_layer = None
         self.batch, self.frames = images.shape[:2]
         if self.frames != len(metadata.frame_positions):
             raise RuntimeError("Metadata does not match model input frames")
         if self.encoder is not None:
-            self.patches = (images.shape[-2] // self.patch_size) * (images.shape[-1] // self.patch_size)
+            self.grid_height = images.shape[-2] // self.patch_size
+            self.grid_width = images.shape[-1] // self.patch_size
+            self.patches = self.grid_height * self.grid_width
             self.tokens_per_frame = self.special_tokens + self.patches
 
     def _backbone_input(self, module, args, kwargs):
@@ -215,10 +246,26 @@ class DA3KVAttention:
         else:
             self.reference_indices = torch.zeros(self.batch, dtype=torch.long, device=output.device)
         if self.config.enabled:
-            self.token_indices = frame_slots_to_token_indices(
-                self.selected, num_frames=self.frames, tokens_per_frame=self.tokens_per_frame,
-                special_tokens=self.special_tokens, reference_indices=self.reference_indices,
-            )
+            self.token_indices_by_layer = {}
+            token_layout_cache = {}
+            for layer in self.layers:
+                patch_indices = None
+                if self.config.method == "role_layer_spatial_kv":
+                    patch_indices = build_role_layer_patch_indices(
+                        self.metadata, self.selected, layer, self.grid_height, self.grid_width,
+                        self.config.spatial_sampling)
+                signature = None if patch_indices is None else tuple(patch_indices.items())
+                if signature not in token_layout_cache:
+                    token_layout_cache[signature] = frame_slots_to_token_indices(
+                        self.selected, num_frames=self.frames,
+                        tokens_per_frame=self.tokens_per_frame,
+                        special_tokens=self.special_tokens,
+                        reference_indices=self.reference_indices,
+                        patch_indices_by_slot=patch_indices,
+                    )
+                self.token_indices_by_layer[layer] = token_layout_cache[signature]
+            # Compatibility surface for existing uniform-KV policies and their tests.
+            self.token_indices = self.token_indices_by_layer[self.layers[0]]
 
     def attend(self, layer, kernel, query, key, value, attn_mask=None,
                dropout_p=0.0, is_causal=False, **kwargs):
@@ -231,13 +278,15 @@ class DA3KVAttention:
         if self.config.enabled:
             if attn_mask is not None or is_causal or dropout_p:
                 raise ValueError("VDA KV sampling expects unmasked, noncausal eval attention")
-            if self.token_indices is None:
+            if self.token_indices_by_layer is None or layer not in self.token_indices_by_layer:
                 raise RuntimeError("DA3 reference permutation was not captured before global attention")
-            indices = self.token_indices[:, None, :, None].expand(
+            token_indices = self.token_indices_by_layer[layer]
+            indices = token_indices[:, None, :, None].expand(
                 self.batch, key.shape[1], -1, key.shape[-1])
             key = torch.gather(key, dim=2, index=indices)
             value = torch.gather(value, dim=2, index=indices)
-        expected_kv = len(self.selected) * self.patches + self.frames * self.special_tokens
+        expected_kv = (self.token_indices_by_layer[layer].shape[1] if self.config.enabled
+                       else self.frames * self.tokens_per_frame)
         if key.shape[-2] != expected_kv or key.shape != value.shape:
             raise RuntimeError("K/V gather did not preserve the shared selected-token budget")
         self.calls.append((layer, int(query.shape[-2]), int(key.shape[-2])))
@@ -271,7 +320,19 @@ class DA3KVAttention:
             self.attention_seconds += sum(start.elapsed_time(end) / 1000 for start, end in self.events)
         if self.encoder is not None:
             q_tokens = self.frames * self.tokens_per_frame
-            kv_tokens = len(self.selected) * self.patches + self.frames * self.special_tokens
+            layer_kv_tokens = {
+                layer: (int(self.token_indices_by_layer[layer].shape[1]) if self.config.enabled
+                        else q_tokens)
+                for layer in self.layers
+            }
+            unique_kv_tokens = set(layer_kv_tokens.values())
+            kv_tokens = next(iter(unique_kv_tokens)) if len(unique_kv_tokens) == 1 else None
+            layer_kv_patches = {
+                layer: count - self.frames * self.special_tokens
+                for layer, count in layer_kv_tokens.items()
+            }
+            unique_kv_patches = set(layer_kv_patches.values())
+            kv_patches = next(iter(unique_kv_patches)) if len(unique_kv_patches) == 1 else None
             if not self.observing:
                 self.shape_counts.update((layer, q_tokens, kv_tokens) for layer in self.layers)
             selected_roles = {role: [slot for slot in self.selected if metadata.frame_roles[slot] == role]
@@ -292,24 +353,80 @@ class DA3KVAttention:
                 "total_kv_frame_count": len(self.selected),
                 "input_frame_count": self.frames,
                 "q_patch_token_count": self.frames * self.patches,
-                "kv_patch_token_count": len(self.selected) * self.patches,
+                "kv_patch_token_count": kv_patches,
+                "kv_patch_token_count_by_layer": layer_kv_patches,
                 "special_tokens_per_frame": self.special_tokens,
                 "q_token_count": q_tokens, "kv_token_count": kv_tokens,
+                "kv_token_count_by_layer": layer_kv_tokens,
                 "frame_retention_ratio": len(self.selected) / self.frames,
-                "token_retention_ratio": kv_tokens / q_tokens,
+                "token_retention_ratio": kv_tokens / q_tokens if kv_tokens is not None else None,
+                "token_retention_ratio_by_layer": {
+                    layer: count / q_tokens for layer, count in layer_kv_tokens.items()
+                },
                 "token_count_source": "observed_sdpa_inputs" if self.observing else "encoder_layout_dense",
             }
             if self.highlight_scores is not None:
                 audit["new_highlight_scores"] = self.highlight_scores
                 audit["new_candidate_count"] = len(self.highlight_scores)
                 audit["highlight_score_type"] = "highlight_pixels / all_RGB_pixels"
-                if self.config.method == "vda_role_bucket_highlight":
+                if self.config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
                     audit["highlight_score_type"] = "gpu_brightness_low_saturation_ratio"
                     audit.update(self.selection_audit)
             audit_limit = (self.config.debug_max_windows
-                           if self.config.debug and self.config.method == "vda_role_bucket_highlight" else 2)
+                           if self.config.debug and self.config.method in {
+                               "vda_role_bucket_highlight", "role_layer_spatial_kv"
+                           } else 2)
             if len(self.audit_examples) < audit_limit:
                 self.audit_examples.append(audit)
+            if (self.config.method == "role_layer_spatial_kv" and not self.diagnostic_printed
+                and self.config.diagnostics.get("print_once_per_sequence") is True):
+                sparse_patches = len(range(0, self.grid_height, 2)) * len(
+                    range(0, self.grid_width, 2))
+                standard_early_tokens = (
+                    self.frames * self.special_tokens
+                    + self.config.key_frames * self.patches
+                    + (self.config.overlap_frames + self.config.selected_new_frames)
+                    * sparse_patches
+                )
+                standard_late_tokens = (
+                    self.frames * self.special_tokens
+                    + (self.config.key_frames + self.config.overlap_frames
+                       + self.config.selected_new_frames) * self.patches
+                )
+                schedules = {
+                    "early": {"encoder_blocks": [layer for layer in self.layers if layer <= 5],
+                              "strides": spatial_strides_for_layer(5, self.config.spatial_sampling)},
+                    "late": {"encoder_blocks": [layer for layer in self.layers if layer >= 6],
+                             "strides": spatial_strides_for_layer(6, self.config.spatial_sampling)},
+                }
+                diagnostic = {
+                    "configured_standard_window": {
+                        "window_frames": 32, "key": self.config.key_frames,
+                        "overlap": self.config.overlap_frames,
+                        "new_candidates": self.config.new_frames,
+                        "selected_new": self.config.selected_new_frames,
+                        "kv_provider_frames": (self.config.key_frames + self.config.overlap_frames
+                                               + self.config.selected_new_frames),
+                        "unselected_new": self.config.new_frames - self.config.selected_new_frames,
+                        "dense_kv_tokens": q_tokens,
+                        "early_sparse_kv_tokens": standard_early_tokens,
+                        "late_sparse_kv_tokens": standard_late_tokens,
+                        "early_retention_ratio": standard_early_tokens / q_tokens,
+                        "late_retention_ratio": standard_late_tokens / q_tokens,
+                    },
+                    "observed_window": {
+                        "window_id": metadata.window_id, "first_window": metadata.first_window,
+                        "role_counts": audit["role_counts"],
+                        "selected_role_counts": audit["selected_role_counts"],
+                        "kv_provider_frames": len(self.selected),
+                    },
+                    "layer_schedule": schedules,
+                    "dense_kv_tokens": q_tokens,
+                    "sparse_kv_tokens_by_encoder_block": layer_kv_tokens,
+                    "retention_ratio_by_encoder_block": audit["token_retention_ratio_by_layer"],
+                }
+                print("KV sampling diagnostics: " + json.dumps(diagnostic, ensure_ascii=False), flush=True)
+                self.diagnostic_printed = True
             if self.config.debug and metadata.window_id < self.config.debug_max_windows:
                 # Logging is outside model-forward timing. No GPU->CPU reference
                 # transfer is needed during the timed attention path.
@@ -318,6 +435,7 @@ class DA3KVAttention:
                 print("KV selection audit: " + json.dumps(audit, ensure_ascii=False), flush=True)
         self.metadata = None
         self.token_indices = None
+        self.token_indices_by_layer = None
         self.reference_indices = None
         self.events = []
 
