@@ -20,15 +20,22 @@ from evaluation.temporal_alignment import (
     camera_index,
     evaluate_tae,
 )
+from evaluation.teacher_scale_diagnostics import TeacherWindowScaleDiagnostics
 from inference.student_video import infer_student_video, sequence_frames
+from inference.vggt_omega_video import (
+    VGGTOmegaSequenceFrames,
+    infer_vggt_omega_video,
+)
 
 from models.student.da3_small_student import DA3SmallStudent
+from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
 from utils.checkpoint import require_student_cache_protocol
 from utils.config import ensure_dir, load_config
 
 
 TRAINED_STUDENT_SOURCE = "trained_student_checkpoint"
 OFFICIAL_DA3_SMALL_SOURCE = "official_da3_small"
+VGGT_OMEGA_SOURCE = "vggt_omega_online"
 
 
 def select_protocol(config: Dict[str, Any], override: Optional[str] = None) -> str:
@@ -111,6 +118,8 @@ def _evaluation_section(protocol: str, model_source: str) -> str:
         return "da3_small_baseline_{}_evaluation".format(protocol)
     if model_source == TRAINED_STUDENT_SOURCE:
         return "{}_evaluation".format(protocol)
+    if model_source == VGGT_OMEGA_SOURCE:
+        return "vggt_omega_baseline_{}_evaluation".format(protocol)
     raise ValueError("Unsupported evaluation model source {!r}".format(model_source))
 
 
@@ -119,11 +128,19 @@ def _evaluation_model(
     config: Dict[str, Any],
     device: torch.device,
     model_source: str,
-) -> DA3SmallStudent:
+) -> torch.nn.Module:
     if model_source == OFFICIAL_DA3_SMALL_SOURCE:
         if checkpoint is not None:
             raise ValueError("Official DA3-Small baseline does not accept a training checkpoint")
         return load_official_da3_small(config, device)
+    if model_source == VGGT_OMEGA_SOURCE:
+        teacher_config = dict(config["teacher"])
+        if checkpoint is not None:
+            teacher_config["pretrained_checkpoint"] = str(checkpoint)
+        model = VGGTOmegaTeacher.from_config(teacher_config, device=device)
+        if model.training or any(parameter.requires_grad for parameter in model.parameters()):
+            raise RuntimeError("VGGT-Omega evaluation requires a frozen eval-mode Teacher")
+        return model
     if model_source != TRAINED_STUDENT_SOURCE:
         raise ValueError("Unsupported evaluation model source {!r}".format(model_source))
     if checkpoint is None or not checkpoint.is_file():
@@ -184,12 +201,19 @@ def evaluate_vda(
         raise NotImplementedError("Spark3R variants are planned, not implemented; do not report dense inference as accelerated results")
     eval_config = dict(config.get(_evaluation_section("vda", model_source), {}))
     split = split_override or str(eval_config.get("split", "test"))
-    if model_source == OFFICIAL_DA3_SMALL_SOURCE and split != "test":
-        raise ValueError("Official DA3-Small baseline is fixed to SCARED test split 8 and 9")
+    if model_source in {OFFICIAL_DA3_SMALL_SOURCE, VGGT_OMEGA_SOURCE} and split != "test":
+        raise ValueError("Model baseline evaluation is fixed to SCARED test split 8 and 9")
     checkpoint = (
         None
         if model_source == OFFICIAL_DA3_SMALL_SOURCE
-        else checkpoint_override or Path(str(eval_config["checkpoint"]))
+        else checkpoint_override
+        or Path(
+            str(
+                config["teacher"]["pretrained_checkpoint"]
+                if model_source == VGGT_OMEGA_SOURCE
+                else eval_config["checkpoint"]
+            )
+        )
     )
     output = output_override or Path(str(eval_config["output"]))
     ensure_dir(output.parent)
@@ -199,7 +223,7 @@ def evaluate_vda(
     dataset, sequences, gt_depths, skipped = _dataset_and_ground_truth(
         config, eval_config, split
     )
-    if model_source == OFFICIAL_DA3_SMALL_SOURCE:
+    if model_source in {OFFICIAL_DA3_SMALL_SOURCE, VGGT_OMEGA_SOURCE}:
         _require_scared_8_9(sequences)
     if limit_clips is not None and limit_clips <= 0:
         raise ValueError("Window limit must be positive")
@@ -225,16 +249,36 @@ def evaluate_vda(
     width = int(config["dataset"]["image_width"])
     remaining = limit_clips
     sequence_results = []
+    teacher_window_diagnostics = []
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
-        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+        if model_source == VGGT_OMEGA_SOURCE:
+            preprocessing = dict(eval_config.get("preprocessing", {}))
+            frames = VGGTOmegaSequenceFrames(
+                sequence["frame_paths"],
+                image_resolution=int(preprocessing.get("image_resolution", 512)),
+                mode=str(preprocessing.get("mode", "balanced")),
+                patch_size=int(preprocessing.get("patch_size", 16)),
+            )
+        else:
+            frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
         spool = vda_core._SequencePredictionSpool(output.parent, len(frames), height, width)
         try:
             def emit(start, disparities, intrinsics):
                 spool.add(range(start, start + len(disparities)), disparities)
-            timing = infer_student_video(model, frames, emit, device=device, amp=amp,
-                                         max_windows=remaining)
+            if model_source == VGGT_OMEGA_SOURCE:
+                diagnostic = TeacherWindowScaleDiagnostics(
+                    sequence, gt_depths[sequence_id], int(eval_config.get("gt_depth_channel", 0))
+                ) if bool(eval_config.get("window_scale_diagnostic", True)) else None
+                timing = infer_vggt_omega_video(
+                    model, frames, emit, device=device, amp=amp,
+                    max_windows=remaining, inspect_window=diagnostic,
+                )
+            else:
+                diagnostic = None
+                timing = infer_student_video(model, frames, emit, device=device, amp=amp,
+                                             max_windows=remaining)
             spool.flush()
             item = vda_core._evaluate_sequence(
                 sequence, spool, int(eval_config.get("gt_depth_channel", 0)),
@@ -246,6 +290,15 @@ def evaluate_vda(
             item["temporal"] = evaluate_tae(temporal_sequence, spool, item, eval_config)
             item["metrics"]["tae"] = item["temporal"]["tae"]
             item["inference"] = timing
+            if model_source == VGGT_OMEGA_SOURCE:
+                item["teacher_preprocessing"] = frames.metadata()
+                item["teacher_window_scale_diagnostics"] = (
+                    diagnostic.records if diagnostic is not None else []
+                )
+                teacher_window_diagnostics.extend(
+                    {"sequence_id": sequence_id, **record}
+                    for record in item["teacher_window_scale_diagnostics"]
+                )
             sequence_results.append(item)
         finally:
             spool.close()
@@ -288,6 +341,24 @@ def evaluate_vda(
         "window_limit": limit_clips,
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }
+    if model_source == VGGT_OMEGA_SOURCE:
+        teacher_input_shapes = {
+            tuple(item["teacher_preprocessing"]["observed_input_shape_hw"])
+            for item in sequence_results
+        }
+        sorted_teacher_shapes = sorted(teacher_input_shapes)
+        result["input_resolution_hw"] = (
+            list(sorted_teacher_shapes[0]) if len(sorted_teacher_shapes) == 1 else None
+        )
+        result["input_resolutions_hw"] = [list(shape) for shape in sorted_teacher_shapes]
+        result["evaluation_resolution_hw"] = [height, width]
+        result["per_sequence"] = {
+            item["sequence_id"]: dict(item["metrics"]) for item in sequence_results
+        }
+        result["teacher_window_scale_diagnostics"] = teacher_window_diagnostics
+        result["teacher_preprocessing"] = sequence_results[0]["teacher_preprocessing"]
+        result["teacher_cache_used"] = False
+        result["attention_mode"] = "VGGT-Omega native dense attention"
     output.write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
     print("wrote full-sequence VDA + TAE evaluation: {}".format(output))
     return result
@@ -327,11 +398,32 @@ def evaluate_official_da3_small(
     )
 
 
+def evaluate_vggt_omega_online(
+    config_path: Path,
+    checkpoint: Optional[Path] = None,
+    output: Optional[Path] = None,
+    limit_clips: Optional[int] = None,
+    protocol: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Evaluate frozen VGGT-Omega online with formal student VDA semantics."""
+    return evaluate(
+        config_path,
+        checkpoint=checkpoint,
+        split="test",
+        output=output,
+        limit_clips=limit_clips,
+        protocol=protocol,
+        model_source=VGGT_OMEGA_SOURCE,
+    )
+
+
 __all__ = [
     "OFFICIAL_DA3_SMALL_SOURCE",
     "TRAINED_STUDENT_SOURCE",
+    "VGGT_OMEGA_SOURCE",
     "evaluate",
     "evaluate_official_da3_small",
+    "evaluate_vggt_omega_online",
     "evaluate_vda",
     "load_official_da3_small",
     "select_protocol",

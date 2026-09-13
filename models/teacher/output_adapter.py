@@ -58,3 +58,30 @@ def adapt_teacher_outputs(
         "extrinsics": extrinsics,
         "pose_enc": predictions["pose_enc"],
     }
+
+
+def adapt_teacher_depth_outputs(
+    predictions: Dict[str, torch.Tensor], image_shape: Tuple[int, int]
+) -> Dict[str, torch.Tensor]:
+    """Decode only the dense depth/cameras needed by online VDA evaluation."""
+    required = ("pose_enc", "depth")
+    missing = [name for name in required if name not in predictions]
+    if missing:
+        raise KeyError("VGGT-Omega outputs are missing {}".format(missing))
+    pose_module = importlib.import_module("vggt_omega.utils.pose_enc")
+    extrinsics, intrinsics = pose_module.encoding_to_camera(
+        predictions["pose_enc"].float(), image_shape
+    )
+    depth = predictions["depth"].float()
+    if depth.ndim == 5 and depth.shape[-1] == 1:
+        depth = depth[..., 0]
+    if depth.ndim != 4:
+        raise ValueError("VGGT-Omega depth must be [B,F,H,W] or [B,F,H,W,1]")
+    return {
+        "depth": depth,
+        "intrinsics": intrinsics.float(),
+        "extrinsics": extrinsics.float(),
+    }
+
+
+__all__ = ["adapt_teacher_depth_outputs", "adapt_teacher_outputs"]

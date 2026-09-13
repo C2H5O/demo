@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import torch
@@ -93,8 +93,11 @@ class InferenceStats:
 
 
 @torch.inference_mode()
-def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
-                        max_windows=None, emit_window=None) -> dict:
+def infer_vda_video(model, frames, emit: Callable, *, device, amp=True,
+                    max_windows=None, emit_window=None,
+                    forward_model: Optional[Callable] = None,
+                    inspect_window: Optional[Callable] = None,
+                    prediction_label: str = "model") -> dict:
     """Emit (start, disparities[N,H,W], intrinsics[N,3,3]) once per finalized span.
 
     `emit_window(indices, raw_predictions)` optionally saves camera predictions
@@ -122,13 +125,24 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         if previous_ids is not None:
             ids[:OVERLAP] = [previous_ids[j] for j in KEYFRAMES]
         # Duplicate padding/anchor frames are decoded only once per window.
-        decoded = {j: frames[j] for j in dict.fromkeys(ids)}
+        unique_ids = list(dict.fromkeys(ids))
+        if hasattr(frames, "load_indices"):
+            loaded = frames.load_indices(unique_ids)
+            if len(loaded) != len(unique_ids):
+                raise RuntimeError("Frame loader returned the wrong number of images")
+            decoded = dict(zip(unique_ids, loaded))
+        else:
+            decoded = {j: frames[j] for j in unique_ids}
         images = torch.stack([decoded[j] for j in ids]).unsqueeze(0).to(device)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         tick = time.perf_counter()
         with torch.autocast(device_type=device.type, enabled=bool(amp and device.type == "cuda")):
-            prediction = model(images, include_global_points=False)
+            prediction = (
+                model(images, include_global_points=False)
+                if forward_model is None
+                else forward_model(model, images)
+            )
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         stats.model_forward_seconds += time.perf_counter() - tick
@@ -136,7 +150,9 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         stats.model_input_frame_count += WINDOW
         depth = prediction["depth"][0].float().cpu().numpy()
         if depth.shape != (WINDOW, *images.shape[-2:]) or not np.isfinite(depth).all():
-            raise FloatingPointError("Invalid DA3 sequence depth output")
+            raise FloatingPointError("Invalid {} sequence depth output".format(prediction_label))
+        if inspect_window is not None:
+            inspect_window(window_number, ids, depth)
         disparity = 1.0 / np.maximum(depth, 1e-3)
         intrinsics = prediction["intrinsics"][0].float().cpu().numpy()
         if emit_window is not None:
@@ -169,3 +185,18 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
     stats.output_frame_count = next_output
     stats.sequence_pipeline_seconds = time.perf_counter() - started
     return stats.as_dict()
+
+
+def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
+                        max_windows=None, emit_window=None) -> dict:
+    """Run DA3 through the shared formal VDA temporal/stitching pipeline."""
+    return infer_vda_video(
+        model,
+        frames,
+        emit,
+        device=device,
+        amp=amp,
+        max_windows=max_windows,
+        emit_window=emit_window,
+        prediction_label="DA3",
+    )

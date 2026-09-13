@@ -1,0 +1,41 @@
+base_config: _4090_common.yaml
+
+experiment:
+  name: baseline_T_vggt_omega_online
+  baseline_id: T
+  objective_protocol: vggt_omega_online_vda_evaluation_v1
+  hypothesis: >-
+    Frozen VGGT-Omega is evaluated online on raw SCARED test sequences through
+    the same formal 32-view VDA temporal, stitching, alignment, and metric path
+    used by the dense DA3 student.
+  training_required: false
+  implementation_status: ready_for_server_dry_run
+
+teacher:
+  cache_protocol: null
+  cache_checkpoint_identity: null
+  raw_cache_root: null
+  save_attention: false
+
+vggt_omega_baseline_vda_evaluation:
+  split: test
+  protocol: vda
+  rgb_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
+  frame_source: auto
+  gt_root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/scared
+  gt_relative_directory: data/depth
+  gt_depth_channel: 0
+  require_all_gt: true
+  tae:
+    enabled: true
+    require_all_pairs: true
+    frame_data_relative_directory: data/frame_data
+    pose_translation_scale: 0.001
+  preprocessing:
+    implementation: vggt_omega.utils.load_fn.load_and_preprocess_images
+    image_resolution: 512
+    mode: balanced
+    patch_size: 16
+  window_scale_diagnostic: true
+  amp: true
+  output: ./outputs/baseline_T/evaluation_test_vda.json
