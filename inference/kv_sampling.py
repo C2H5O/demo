@@ -204,20 +204,27 @@ def resolve_spatial_sampling_options(options: Mapping | None = None) -> dict:
     values = dict(options)
     if set(values) != {"enabled", "early_layers", "late_layers"} or values["enabled"] is not True:
         raise ValueError("spatial_sampling must enable early_layers and late_layers")
-    expected = {
-        "early_layers": {"start": 0, "end": 5, "key_stride": 1,
-                         "overlap_stride": 2, "new_stride": 2},
-        "late_layers": {"start": 6, "end": 11, "key_stride": 1,
-                        "overlap_stride": 1, "new_stride": 1},
+    expected_strides = {
+        "early_layers": {"key_stride": 1, "overlap_stride": 2, "new_stride": 2},
+        "late_layers": {"key_stride": 1, "overlap_stride": 1, "new_stride": 1},
     }
-    for name, schedule in expected.items():
+    required_fields = {"start", "end", "key_stride", "overlap_stride", "new_stride"}
+    for name, strides in expected_strides.items():
         section = values[name]
-        if (not isinstance(section, Mapping) or set(section) != set(schedule)
-            or any(type(section[key]) is not type(expected_value)
-                   or section[key] != expected_value
-                   for key, expected_value in schedule.items())):
-            raise ValueError(name + " must match the fixed DA3-Small 0-5 / 6-11 schedule")
+        if not isinstance(section, Mapping) or set(section) != required_fields:
+            raise ValueError(name + " must define start, end, and all three role strides")
+        if any(type(section[key]) is not int for key in required_fields):
+            raise ValueError(name + " fields must be integers")
+        if any(section[key] != expected for key, expected in strides.items()):
+            raise ValueError(name + " must preserve the configured role strides")
+        if not 0 <= section["start"] <= section["end"] < 12:
+            raise ValueError(name + " must be a nonempty range within DA3-Small blocks [0, 11]")
         values[name] = dict(section)
+    early, late = values["early_layers"], values["late_layers"]
+    if early["start"] != 0 or late["end"] != 11 or late["start"] != early["end"] + 1:
+        raise ValueError(
+            "early/late layer ranges must be contiguous, nonoverlapping, and cover [0, 11]"
+        )
     return values
 
 
