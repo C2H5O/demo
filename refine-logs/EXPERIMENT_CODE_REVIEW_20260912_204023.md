@@ -1,5 +1,9 @@
 # Baseline-I 实验代码审查
 
+> **已废弃：** 此快照审查的是 2026-09-12 的 Student-side affine-disparity
+> Baseline-I。当前 Baseline-I 已重新定义为 Baseline-E + offline Teacher
+> cross-clip scale alignment；请参阅 EXPERIMENT_CODE_REVIEW.md。
+
 审查者：独立 Codex 子代理，GPT-5.6-Sol（xhigh）
 
 结论：**修复后无阻塞问题。**

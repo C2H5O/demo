@@ -36,6 +36,7 @@ def _load_same_clip_teacher(
     student_absolute_ids: torch.Tensor,
     spatial_shape: tuple[int, int],
     expected_base_checkpoint: str,
+    alignment_record: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Load only fields consumed by direct distillation and fail on any mismatch."""
     if not path.is_file():
@@ -115,7 +116,53 @@ def _load_same_clip_teacher(
             "sequence_id": str(cache["sequence_id"].item()),
             "cache_path": str(path),
         }
+        if alignment_record is not None:
+            if "alignment_scale" not in cache or float(cache["alignment_scale"].item()) != 1.0:
+                raise RuntimeError(
+                    "Baseline-I requires an unmodified raw cache with alignment_scale=1.0: {}"
+                    .format(path)
+                )
+            teacher = apply_teacher_geometry_scale(
+                teacher, float(alignment_record["alignment_scale"])
+            )
     return teacher
+
+
+def apply_teacher_geometry_scale(
+    teacher: Dict[str, Any], alignment_scale: float
+) -> Dict[str, Any]:
+    """Scale Teacher geometry to one sequence gauge without changing other targets."""
+    if not np.isfinite(alignment_scale) or alignment_scale <= 0.0:
+        raise ValueError("Teacher alignment_scale must be positive and finite")
+    result = dict(teacher)
+    raw_depth = teacher.get("depth")
+    if not isinstance(raw_depth, torch.Tensor):
+        raise RuntimeError("Teacher geometry alignment requires a depth tensor")
+    for key in ("depth", "xyz_local", "xyz_global"):
+        value = teacher.get(key)
+        if value is not None:
+            if not isinstance(value, torch.Tensor):
+                raise RuntimeError("Teacher {} must be a tensor".format(key))
+            result[key] = value * alignment_scale
+    extrinsics = teacher.get("extrinsics")
+    if not isinstance(extrinsics, torch.Tensor) or extrinsics.shape[-2:] != (3, 4):
+        raise RuntimeError("Teacher extrinsics must have shape [...,3,4]")
+    scaled_extrinsics = extrinsics.clone()
+    scaled_extrinsics[..., :3, 3] *= alignment_scale
+    result["extrinsics"] = scaled_extrinsics
+    result["alignment_scale"] = torch.tensor(alignment_scale, dtype=torch.float32)
+    valid = teacher.get("valid_mask")
+    if isinstance(valid, torch.Tensor) and tuple(valid.shape) == tuple(raw_depth.shape):
+        finite_valid = valid.bool() & torch.isfinite(raw_depth)
+        denominator = finite_valid.sum().clamp_min(1).to(torch.float32)
+        raw_mean = torch.where(
+            finite_valid, raw_depth.float(), torch.zeros_like(raw_depth, dtype=torch.float32)
+        ).sum() / denominator
+    else:
+        raw_mean = torch.nan_to_num(raw_depth.float()).mean()
+    result["raw_depth_mean"] = raw_mean
+    result["aligned_depth_mean"] = raw_mean * alignment_scale
+    return result
 
 
 class DirectTeacherDistillationDataset(Dataset):
@@ -129,6 +176,7 @@ class DirectTeacherDistillationDataset(Dataset):
         online_teacher_attention: bool = False,
         teacher_input_height: int = 1024,
         teacher_input_width: int = 1280,
+        teacher_clip_alignment: Any | None = None,
     ) -> None:
         self.rgb_dataset = rgb_dataset
         self.cache_root = Path(cache_root)
@@ -136,6 +184,15 @@ class DirectTeacherDistillationDataset(Dataset):
         self.online_teacher_attention = bool(online_teacher_attention)
         self.teacher_input_height = int(teacher_input_height)
         self.teacher_input_width = int(teacher_input_width)
+        self.teacher_clip_alignment = teacher_clip_alignment
+        if self.teacher_clip_alignment is not None:
+            declared_root = self.teacher_clip_alignment.metadata.get("source_cache_root")
+            if not declared_root:
+                raise RuntimeError("Teacher alignment metadata does not declare source_cache_root")
+            if Path(str(declared_root)).expanduser().resolve() != self.cache_root.expanduser().resolve():
+                raise RuntimeError(
+                    "Teacher alignment metadata source root does not match training cache root"
+                )
         if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
             raise ValueError("Teacher input dimensions must be positive")
         self.teacher_rgb_dataset = (
@@ -166,6 +223,20 @@ class DirectTeacherDistillationDataset(Dataset):
                 continue
             path = crossclip_teacher_cache_path(self.cache_root, metadata)
             if path.is_file():
+                if self.teacher_clip_alignment is not None:
+                    record = self.teacher_clip_alignment.lookup(
+                        str(metadata["sequence_id"]),
+                        start,
+                        metadata["frame_indices"],
+                    )
+                    expected_relative = path.resolve().relative_to(
+                        self.cache_root.expanduser().resolve()
+                    ).as_posix()
+                    if record.get("cache_relative_path") != expected_relative:
+                        raise RuntimeError(
+                            "Teacher alignment cache path mismatch for sequence={!r} clip_start={}"
+                            .format(metadata["sequence_id"], start)
+                        )
                 self.rgb_indices.append(rgb_index)
                 self.cache_paths.append(path)
             else:
@@ -183,6 +254,16 @@ class DirectTeacherDistillationDataset(Dataset):
     def metadata(self, index: int) -> Dict[str, Any]:
         return clip_metadata(self.rgb_dataset, self.rgb_indices[index])
 
+    def alignment_record(self, index: int) -> Dict[str, Any] | None:
+        if self.teacher_clip_alignment is None:
+            return None
+        metadata = self.metadata(index)
+        return self.teacher_clip_alignment.lookup(
+            str(metadata["sequence_id"]),
+            int(metadata["clip_start"]),
+            metadata["frame_indices"],
+        )
+
     def __getitem__(self, index: int) -> Dict[str, Any]:
         rgb_index = self.rgb_indices[index]
         sample = self.rgb_dataset[rgb_index]
@@ -197,6 +278,7 @@ class DirectTeacherDistillationDataset(Dataset):
             absolute_ids,
             tuple(int(value) for value in images.shape[-2:]),
             self.expected_base_checkpoint,
+            self.alignment_record(index),
         )
         highlight = sample.get(
             "highlight_masks",
@@ -241,6 +323,12 @@ def direct_teacher_distillation_collate(
     }
     teacher["sequence_id"] = [sample["teacher"]["sequence_id"] for sample in samples]
     teacher["cache_path"] = [sample["teacher"]["cache_path"] for sample in samples]
+    aligned_flags = ["alignment_scale" in sample["teacher"] for sample in samples]
+    if any(aligned_flags) and not all(aligned_flags):
+        raise RuntimeError("Teacher alignment availability differs within a batch")
+    if all(aligned_flags):
+        for key in ("alignment_scale", "raw_depth_mean", "aligned_depth_mean"):
+            teacher[key] = torch.stack([sample["teacher"][key] for sample in samples])
     batch = {
         "images": torch.stack([sample["images"] for sample in samples]),
         "clean_images": torch.stack([sample["clean_images"] for sample in samples]),
@@ -287,6 +375,7 @@ def build_direct_teacher_distillation_dataloader(
 
 __all__ = [
     "DirectTeacherDistillationDataset",
+    "apply_teacher_geometry_scale",
     "build_direct_teacher_distillation_dataloader",
     "direct_teacher_distillation_collate",
 ]

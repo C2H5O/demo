@@ -12,6 +12,11 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 import torch
 
+from cache.teacher_clip_alignment import (
+    ALIGNMENT_ANCHOR,
+    ALIGNMENT_METHOD,
+    TeacherClipAlignmentIndex,
+)
 from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_PROTOCOL,
     make_teacher_cache_rgb_dataset,
@@ -71,6 +76,26 @@ def _build_dataset(
     rgb = make_teacher_cache_rgb_dataset(
         config["dataset"], split, cache_root=cache_root
     )
+    alignment_config = dict(config.get("teacher_clip_alignment", {}))
+    alignment_index = None
+    if bool(alignment_config.get("enabled", False)):
+        if str(alignment_config.get("method")) != ALIGNMENT_METHOD:
+            raise ValueError("teacher_clip_alignment.method must be {}".format(ALIGNMENT_METHOD))
+        if str(alignment_config.get("anchor")) != ALIGNMENT_ANCHOR:
+            raise ValueError("teacher_clip_alignment.anchor must be {}".format(ALIGNMENT_ANCHOR))
+        if int(alignment_config.get("expected_overlap_frames", -1)) != 8:
+            raise ValueError("teacher_clip_alignment.expected_overlap_frames must be 8")
+        metadata_template = alignment_config.get("metadata_path")
+        if not metadata_template:
+            raise ValueError("teacher_clip_alignment.metadata_path must be configured")
+        metadata_path = _project_path(str(metadata_template).format(split=split))
+        alignment_index = TeacherClipAlignmentIndex.from_json(metadata_path)
+        if float(alignment_index.metadata["eps"]) != float(alignment_config.get("eps")):
+            raise ValueError("Teacher alignment metadata eps differs from config")
+        if int(alignment_index.metadata["minimum_valid_pixels_per_frame"]) != int(
+            alignment_config.get("minimum_valid_pixels_per_frame")
+        ):
+            raise ValueError("Teacher alignment metadata valid-pixel threshold differs from config")
     dataset = DirectTeacherDistillationDataset(
         rgb,
         cache_root,
@@ -84,6 +109,7 @@ def _build_dataset(
         teacher_input_width=int(
             config.get("attention_distill", {}).get("teacher_input_width", 1280)
         ),
+        teacher_clip_alignment=alignment_index,
     )
     print(
         "same-clip cache sampling: length=16 start_stride=8 first_frames=1,9,17,... "
@@ -113,6 +139,21 @@ def _print_same_clip_examples(
                 student_ids, dataset.cache_paths[index],
             )
         )
+        alignment = dataset.alignment_record(index)
+        if alignment is not None:
+            with np.load(str(dataset.cache_paths[index]), allow_pickle=False) as cache:
+                raw_depth = np.asarray(cache["depth"], dtype=np.float64)
+                valid = np.asarray(cache["valid_mask"], dtype=np.bool_) & np.isfinite(raw_depth)
+                if not np.any(valid):
+                    raise RuntimeError("Startup Teacher alignment audit found no valid depth")
+                raw_mean = float(raw_depth[valid].mean())
+            scale = float(alignment["alignment_scale"])
+            print(
+                "teacher alignment sample: sequence_id={} clip_start={} alignment_scale={:.9g} "
+                "raw_teacher_depth_mean={:.9g} aligned_teacher_depth_mean={:.9g}".format(
+                    metadata["sequence_id"], student_start, scale, raw_mean, raw_mean * scale
+                )
+            )
 
 
 def build_direct_distillation_optimizer(
@@ -595,11 +636,7 @@ def _check_resume_contract(
         raise ValueError("Resume checkpoint config has an incompatible objective protocol")
     if checkpoint_config.get("loss", {}).get("mode") != "direct_teacher_distillation":
         raise ValueError("Resume checkpoint does not use direct_teacher_distillation loss")
-    loss_fields = (
-        "lambda_depth", "lambda_camera", "lambda_highlight", "lambda_smooth",
-        "camera", "eps", "use_confidence_weight", "depth_mode",
-        "depth_robust_loss", "affine_detach",
-    )
+    loss_fields = ("lambda_depth", "lambda_camera", "lambda_highlight", "lambda_smooth", "camera", "eps", "use_confidence_weight")
     loss_mismatches = {key: (checkpoint_config.get("loss", {}).get(key), config["loss"].get(key))
                        for key in loss_fields
                        if checkpoint_config.get("loss", {}).get(key) != config["loss"].get(key)}
@@ -655,6 +692,17 @@ def _check_resume_contract(
         raise ValueError(
             "Checkpoint attention-distillation settings differ from current config: {}. "
             "Start a new run.".format(attention_mismatches)
+        )
+    checkpoint_alignment = dict(
+        checkpoint_config.get("teacher_clip_alignment", {"enabled": False})
+    )
+    current_alignment = dict(
+        config.get("teacher_clip_alignment", {"enabled": False})
+    )
+    if checkpoint_alignment != current_alignment:
+        raise ValueError(
+            "Checkpoint Teacher clip alignment settings differ from current config. "
+            "Start a new run for this target-alignment ablation."
         )
     model.assert_trainability_contract()
 
@@ -714,6 +762,20 @@ def train_direct_teacher_distillation(
     if attention_config.enabled:
         print("Attention distillation mode: query_chunked")
         print("Attention distillation query_chunk_size: {}".format(attention_config.query_chunk_size))
+    alignment_config = dict(config.get("teacher_clip_alignment", {}))
+    baseline_id = str(config.get("experiment", {}).get("baseline_id", ""))
+    if baseline_id == "I" and not bool(alignment_config.get("enabled", False)):
+        raise ValueError("Baseline-I requires Teacher clip alignment")
+    if baseline_id != "I" and bool(alignment_config.get("enabled", False)):
+        raise ValueError("Teacher clip alignment is reserved for Baseline-I")
+    if bool(alignment_config.get("enabled", False)):
+        print("Teacher clip alignment: ENABLED")
+        print("method={}".format(alignment_config.get("method")))
+        print(
+            "metadata={}".format(
+                _project_path(str(alignment_config.get("metadata_path")).format(split="train"))
+            )
+        )
     dataset = _build_dataset(config, "train")
     _print_same_clip_examples(dataset)
     loader = build_direct_teacher_distillation_dataloader(

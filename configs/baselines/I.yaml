@@ -1,13 +1,17 @@
 base_config: E.yaml
 experiment:
-  name: baseline_I_affine_disparity_distillation
+  name: baseline_I_teacher_crossclip_scale_alignment
   baseline_id: I
   training_required: true
-  implementation_status: ready_for_server_dry_run
-loss:
-  depth_mode: clip_shared_affine_disparity
-  depth_robust_loss: smooth_l1
-  affine_detach: true
+  implementation_status: code_complete_awaiting_server_validation
+teacher_clip_alignment:
+  enabled: true
+  method: adjacent_overlap_median_scale
+  anchor: first_clip
+  metadata_path: "/public/home/2024141520249/Documents/Projects/vggtofast3r/data/teacher_cache_crossclip_base_raw_448x560/teacher_clip_alignment_{split}.json"
+  expected_overlap_frames: 8
+  eps: 1.0e-6
+  minimum_valid_pixels_per_frame: 256
 training:
   output_dir: ./outputs/baseline_I
   resume: null

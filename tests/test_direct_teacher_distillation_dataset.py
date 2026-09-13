@@ -7,6 +7,10 @@ import pytest
 import torch
 
 from cache.generate_crossclip_teacher_cache import _resolve_start_index
+from cache.teacher_clip_alignment import (
+    TeacherClipAlignmentIndex,
+    build_teacher_clip_alignment,
+)
 from datasets.crossclip_teacher_dataset import (
     CROSSCLIP_CACHE_FORMAT_VERSION,
     LOCAL_CAMERA_COORDINATE_SYSTEM,
@@ -210,6 +214,37 @@ def test_aligned_cache_is_rejected_by_direct_training(tmp_path) -> None:
     dataset = DirectTeacherDistillationDataset(rgb, tmp_path, BASE_CHECKPOINT)
     with pytest.raises(RuntimeError, match="raw teacher cache"):
         dataset[0]
+
+
+def test_fixed_alignment_metadata_scales_loader_depth_and_w2c_translation(tmp_path) -> None:
+    rgb = _FakeRGBDataset([_sequence("sequence_a", 24)])
+    _write_cache(tmp_path, rgb, 0)
+    second_path = _write_cache(tmp_path, rgb, 1)
+    with np.load(second_path, allow_pickle=False) as cache:
+        arrays = {key: cache[key].copy() for key in cache.files}
+    arrays["depth"] *= 0.5
+    arrays["extrinsics"][..., :3, 3] = np.asarray([1.0, 2.0, 3.0])
+    np.savez(second_path, **arrays)
+    metadata = build_teacher_clip_alignment(
+        tmp_path, minimum_valid_pixels_per_frame=1
+    )
+    alignment = TeacherClipAlignmentIndex(metadata)
+    dataset = DirectTeacherDistillationDataset(
+        rgb,
+        tmp_path,
+        BASE_CHECKPOINT,
+        teacher_clip_alignment=alignment,
+    )
+    teacher = dataset[1]["teacher"]
+    assert teacher["alignment_scale"].item() == pytest.approx(2.0)
+    torch.testing.assert_close(teacher["depth"], torch.ones_like(teacher["depth"]))
+    expected_translation = torch.tensor([2.0, 4.0, 6.0]).expand(16, 3)
+    torch.testing.assert_close(teacher["extrinsics"][..., :3, 3], expected_translation)
+    identity = torch.eye(3).expand(16, 3, 3)
+    torch.testing.assert_close(teacher["extrinsics"][..., :3, :3], identity)
+    torch.testing.assert_close(teacher["intrinsics"], identity)
+    torch.testing.assert_close(teacher["confidence"], torch.ones_like(teacher["confidence"]))
+    assert teacher["valid_mask"].all()
 
 
 def test_collate_contains_one_teacher_without_point_maps(tmp_path) -> None:
