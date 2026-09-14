@@ -140,6 +140,23 @@ def test_j_dataset_is_ordered_same_sequence_and_cache_free() -> None:
     )
 
 
+def test_j_online_collate_supports_configurable_batch_size() -> None:
+    dataset = FullOnlineTeacherDistillationDataset(_FakeRGBDataset(), 4, 6)
+
+    class _FakeTeacherRGB:
+        def load_images(self, index: int):
+            record = dataset.rgb_dataset.clips[index]
+            paths = [record.sequence["teacher_frame_paths"][i] for i in record.frame_indices]
+            return torch.zeros(32, 3, 4, 6), paths
+
+    dataset.teacher_rgb_dataset = _FakeTeacherRGB()
+    batch = direct_teacher_distillation_collate([dataset[0], dataset[1]])
+    assert batch["images"].shape == (2, 32, 3, 4, 6)
+    assert batch["teacher_images"].shape == (2, 32, 3, 4, 6)
+    assert batch["absolute_frame_ids"].shape == (2, 32)
+    assert batch["sequence_id"] == batch["teacher_sequence_id"]
+
+
 def test_j_dataset_builder_never_enters_cache_builder(monkeypatch) -> None:
     config = load_config("configs/baselines/J.yaml")
     monkeypatch.setattr(trainer, "make_scared_rgb_dataset", lambda *_args: _FakeRGBDataset())
@@ -205,14 +222,14 @@ def test_full_online_teacher_runs_once_and_returns_all_supervision(monkeypatch) 
 
     teacher_model = _FakeTeacher().eval()
     teacher_model.requires_grad_(False)
-    ids = torch.arange(32).reshape(1, 32)
+    ids = torch.arange(64).reshape(2, 32)
     with torch.no_grad():
         supervision, attention, audit = _forward_full_online_teacher(
             teacher_model,
-            torch.zeros(1, 32, 3, 4, 6),
+            torch.zeros(2, 32, 3, 4, 6),
             ids,
-            torch.tensor([0]),
-            ["sequence"],
+            torch.tensor([0, 32]),
+            ["sequence-a", "sequence-b"],
             device=torch.device("cpu"),
             amp_enabled=False,
             amp_dtype=torch.float16,
@@ -223,12 +240,12 @@ def test_full_online_teacher_runs_once_and_returns_all_supervision(monkeypatch) 
             minimum_valid_fraction=0.001,
         )
     assert teacher_model.calls == audit["teacher_forward_count"] == 1
-    assert supervision["depth"].shape == (1, 32, 2, 3)
-    assert supervision["confidence"].shape == (1, 32, 2, 3)
-    assert supervision["intrinsics"].shape == (1, 32, 3, 3)
-    assert supervision["extrinsics"].shape == (1, 32, 3, 4)
+    assert supervision["depth"].shape == (2, 32, 2, 3)
+    assert supervision["confidence"].shape == (2, 32, 2, 3)
+    assert supervision["intrinsics"].shape == (2, 32, 3, 3)
+    assert supervision["extrinsics"].shape == (2, 32, 3, 4)
     assert torch.equal(supervision["absolute_frame_ids"], ids)
-    assert attention[4]["q"].shape[:2] == (1, 32)
+    assert attention[4]["q"].shape[:2] == (2, 32)
     assert torch.all(supervision["depth"] == 2.0)
     assert torch.all(attention[4]["q"] == 2.0)
     assert not any(value.requires_grad for value in supervision.values() if isinstance(value, torch.Tensor))

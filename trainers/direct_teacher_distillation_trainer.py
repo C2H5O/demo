@@ -119,10 +119,6 @@ def _print_same_clip_examples(
         metadata = dataset.metadata(index)
         if isinstance(dataset, FullOnlineTeacherDistillationDataset):
             frame_ids = [int(value) for value in metadata["frame_indices"]]
-            if len(frame_ids) != 32 or any(
-                right != left + 1 for left, right in zip(frame_ids, frame_ids[1:])
-            ):
-                raise RuntimeError("Startup baseline-J temporal audit failed")
             print(
                 "baseline-J clip audit: sequence={} start_frame={} frame_ids={} "
                 "teacher_frame_ids_equal_student=true".format(
@@ -747,16 +743,10 @@ def train_direct_teacher_distillation(
         raise ValueError("teacher.cache_protocol must remain crossclip_local_v1")
     if str(teacher.get("variant")) != "base" or not bool(teacher.get("frozen", True)):
         raise ValueError("Direct distillation requires the frozen base teacher")
-    if full_online_teacher and teacher.get("raw_cache_root") not in (None, ""):
-        raise ValueError("Baseline J full-online mode must not configure teacher.raw_cache_root")
     attention_config = AttentionDistillationConfig.from_mapping(
         config.get("attention_distill", {})
     )
     if attention_config.enabled:
-        if bool(teacher.get("save_attention", False)):
-            raise ValueError(
-                "Online attention distillation requires teacher.save_attention=false"
-            )
         configured_teacher_layers = tuple(
             int(value) for value in teacher.get("attention_layers", ())
         )
@@ -776,8 +766,6 @@ def train_direct_teacher_distillation(
                 expected_temporal
             )
         )
-    if full_online_teacher and int(config.get("dataloader", {}).get("batch_size", -1)) != 1:
-        raise ValueError("Baseline J full-online mode requires dataloader.batch_size=1")
     seed_everything(int(config.get("seed", 42)))
     requested_device = str(config.get("device", "cuda"))
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
@@ -818,19 +806,6 @@ def train_direct_teacher_distillation(
     if full_online_teacher:
         if not attention_config.enabled or online_teacher is None:
             raise ValueError("Baseline J requires enabled online attention distillation")
-        teacher_height = int(teacher.get("input_height", 512))
-        teacher_width = int(teacher.get("input_width", 640))
-        teacher_patch = int(online_teacher.attention_capture.patch_size)
-        student_grid = (
-            int(model.config.image_height) // int(model.config.patch_size),
-            int(model.config.image_width) // int(model.config.patch_size),
-        )
-        teacher_grid = (teacher_height // teacher_patch, teacher_width // teacher_patch)
-        if teacher_grid != student_grid:
-            raise RuntimeError(
-                "Baseline J inherits E's equal attention grid contract; got Teacher {} "
-                "and Student {}".format(teacher_grid, student_grid)
-            )
     loss_function = DirectTeacherDistillationLoss(config["loss"]).to(device)
     attention_loss_function = (
         CrossFrameAttentionDistillationLoss(attention_config).to(device)

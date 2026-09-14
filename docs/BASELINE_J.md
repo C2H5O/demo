@@ -41,6 +41,12 @@ probabilities are computed outside Student activation checkpoint recomputation.
 The frame offsets, temperatures, divergence, query chunk, reduction, and weight
 are unchanged.
 
+`dataloader.batch_size` is user-configurable. The shipped value of `1` is only
+a conservative memory default for the full-online Teacher plus Student workload;
+the trainer does not impose an exact batch size. Likewise, unused cache-path
+settings do not block full-online startup, and different Teacher/Student patch
+grids are handled by the existing patch-overlap spatial aligner.
+
 ## Commands
 
 Minimal backward dry run:

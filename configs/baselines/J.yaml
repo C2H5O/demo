@@ -34,6 +34,8 @@ attention_distill:
   teacher_probability_outside_checkpoint: true
 
 dataloader:
+  # Conservative default only. Set this freely to any positive batch size that
+  # fits the available accelerator memory.
   batch_size: 1
 
 training:
