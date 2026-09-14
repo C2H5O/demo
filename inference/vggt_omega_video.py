@@ -29,7 +29,12 @@ class VGGTOmegaSequenceFrames:
         self.patch_size = int(patch_size)
         if not self.paths:
             raise ValueError("Cannot preprocess an empty VGGT-Omega sequence")
-        module = importlib.import_module("vggt_omega.utils.load_fn")
+        try:
+            module = importlib.import_module("vggt_omega.utils.load_fn")
+        except ImportError as error:
+            raise RuntimeError(
+                "VGGT-Omega preprocessing is not importable. Install its source as an editable package."
+            ) from error
         self._load_and_preprocess_images = module.load_and_preprocess_images
         self.last_shape = None
 
@@ -78,6 +83,7 @@ def infer_vggt_omega_video(
     amp=True,
     max_windows=None,
     inspect_window=None,
+    emit_window=None,
 ) -> dict:
     """Run dense VGGT-Omega with the student's exact VDA window/stitching code."""
     return infer_vda_video(
@@ -87,6 +93,7 @@ def infer_vggt_omega_video(
         device=device,
         amp=amp,
         max_windows=max_windows,
+        emit_window=emit_window,
         forward_model=_forward_vggt_omega,
         inspect_window=inspect_window,
         prediction_label="VGGT-Omega",

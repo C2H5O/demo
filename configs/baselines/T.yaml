@@ -39,3 +39,10 @@ vggt_omega_baseline_vda_evaluation:
   window_scale_diagnostic: true
   amp: true
   output: ./outputs/baseline_T/evaluation_test_vda.json
+
+vggt_omega_baseline_visualization:
+  output_dir: ./outputs/baseline_T/visualization
+  min_depth: 0.1
+  max_depth: 10.0
+  adaptive_percentiles: [5.0, 95.0]
+  point_stride: 4

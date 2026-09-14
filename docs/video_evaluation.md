@@ -107,5 +107,7 @@ depth and blended predicted intrinsics, and saves native poses separately per
 window. It does not fabricate a merged global cloud. Camera-window files also
 contain original frame IDs, including repeated anchors and padding.
 
-The Teacher visualization remains an explicit single cached 16-frame clip;
+The legacy Teacher visualization remains an explicit single cached 16-frame
+clip. Baseline T also provides an online VGGT-Omega visualizer that reads raw
+SCARED test RGB and uses the same VDA window/stitching path as evaluation;
 training, losses, optimizers and teacher-cache protocols are unchanged.

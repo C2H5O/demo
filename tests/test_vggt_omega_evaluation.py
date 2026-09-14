@@ -12,6 +12,10 @@ from evaluation.teacher_scale_diagnostics import TeacherWindowScaleDiagnostics
 from inference.student_video import KEYFRAMES, infer_vda_video
 from inference.vggt_omega_video import VGGTOmegaSequenceFrames
 from evaluation.evaluate_crossclip_projection import evaluate_vggt_omega_online
+from visualization.vggt_omega_video import (
+    _visualization_dataset,
+    export_vggt_omega_video,
+)
 
 
 class IndexedFrames:
@@ -176,3 +180,149 @@ def test_teacher_evaluator_reuses_sequence_metrics_and_reports_required_shape(mo
     assert result["input_resolution_hw"] == [8, 12]
     assert result["input_resolutions_hw"] == [[8, 12]]
     assert result["evaluation_resolution_hw"] == [4, 6]
+
+
+def test_online_teacher_visualizer_exports_native_depth_and_window_cameras(
+    monkeypatch, tmp_path
+):
+    frame_paths = []
+    for frame_id in (10, 11):
+        path = tmp_path / "frame_{:06d}.png".format(frame_id)
+        Image.new("RGB", (8, 6), color=(frame_id, 0, 0)).save(path)
+        frame_paths.append(path)
+
+    class Dataset:
+        sequences = [
+            {
+                "sequence_id": "dataset_8/keyframe_1",
+                "dataset_id": 8,
+                "frame_paths": frame_paths,
+            }
+        ]
+
+    class FakeFrames:
+        def __init__(self, paths, **kwargs):
+            self.paths = list(paths)
+            self.calls = []
+
+        def __len__(self):
+            return len(self.paths)
+
+        def load_indices(self, indices):
+            self.calls.append(list(indices))
+            return torch.full((len(indices), 3, 6, 8), 0.5)
+
+        def metadata(self):
+            return {
+                "implementation": "official-fake",
+                "observed_input_shape_hw": [6, 8],
+            }
+
+    def fake_infer(model, frames, emit, **kwargs):
+        kwargs["emit_window"](
+            [0, 1],
+            {
+                "intrinsics": np.tile(np.eye(3, dtype=np.float32), (2, 1, 1)),
+                "extrinsics": np.tile(
+                    np.eye(4, dtype=np.float32)[:3], (2, 1, 1)
+                ),
+            },
+        )
+        emit(
+            0,
+            np.ones((len(frames), 6, 8), dtype=np.float32),
+            np.tile(np.eye(3, dtype=np.float32), (len(frames), 1, 1)),
+        )
+        return {
+            "output_frame_count": len(frames),
+            "window_count": 1,
+            "model_input_frame_count": 32,
+            "model_forward_seconds": 1.0,
+            "timing_scope": "synthetic",
+        }
+
+    monkeypatch.setattr(
+        "visualization.vggt_omega_video._visualization_dataset",
+        lambda config, eval_config, split: Dataset(),
+    )
+    monkeypatch.setattr("visualization.vggt_omega_video.VGGTOmegaSequenceFrames", FakeFrames)
+    monkeypatch.setattr(
+        "visualization.vggt_omega_video._evaluation_model",
+        lambda *args: nn.Identity().eval(),
+    )
+    monkeypatch.setattr("visualization.vggt_omega_video.infer_vggt_omega_video", fake_infer)
+
+    config = tmp_path / "visualization.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "device": "cpu",
+                "teacher": {"pretrained_checkpoint": "unused"},
+                "dataset": {},
+                "vggt_omega_baseline_vda_evaluation": {
+                    "rgb_root": str(tmp_path),
+                    "preprocessing": {
+                        "image_resolution": 512,
+                        "mode": "balanced",
+                        "patch_size": 16,
+                    },
+                },
+                "vggt_omega_baseline_visualization": {
+                    "output_dir": str(tmp_path / "output"),
+                    "point_stride": 2,
+                },
+            }
+        )
+    )
+
+    output = export_vggt_omega_video(config)
+
+    assert len(list((output / "depth").glob("*.npy"))) == 2
+    assert len(list((output / "pointcloud_local").glob("*.ply"))) == 2
+    assert len(list((output / "camera_windows").glob("*.npz"))) == 1
+    metadata = yaml.safe_load((output / "metadata.json").read_text())
+    assert metadata["source"] == "vggt_omega_online"
+    assert metadata["teacher_cache_used"] is False
+    assert metadata["model_input_shape_hw"] == [6, 8]
+    assert metadata["complete_sequence"] is True
+    with np.load(output / "camera_windows" / "window_000000.npz") as window:
+        assert window["frame_positions"].tolist() == [0, 1]
+        assert window["absolute_frame_ids"].tolist() == [10, 11]
+
+
+def test_online_visualizer_uses_raw_test_rgb_root(monkeypatch):
+    captured = {}
+
+    class Dataset:
+        sequences = [
+            {"sequence_id": "dataset_8/keyframe_1", "dataset_id": 8},
+            {"sequence_id": "dataset_9/keyframe_1", "dataset_id": 9},
+        ]
+
+    def make_dataset(dataset_config, split):
+        captured.update(dataset_config)
+        captured["split"] = split
+        return Dataset()
+
+    monkeypatch.setattr("visualization.vggt_omega_video.make_scared_rgb_dataset", make_dataset)
+    _visualization_dataset(
+        {
+            "dataset": {
+                "root": "/processed",
+                "legacy_scared_root": "/legacy",
+                "canonical_root": "/canonical",
+            }
+        },
+        {"rgb_root": "/raw/scared", "frame_source": "auto"},
+        "test",
+    )
+
+    assert captured["root"] == "/raw/scared"
+    assert captured["legacy_scared_root"] == "/raw/scared"
+    assert captured["canonical_root"] is None
+    assert captured["clip_length"] == 1
+    assert captured["sample_stride"] == 1
+    assert captured["window_stride"] == 1
+    assert captured["drop_incomplete_clip"] is False
+    assert captured["highlight"] == {"enabled": False}
+    assert captured["split"] == "test"

@@ -206,9 +206,13 @@ python visualize_crossclip_projection.py \
 python visualize_da3_small_baseline.py \
   --config configs/vggtoda3.yaml --sequence-index 0
 
-# Teacher visualization still reads a single existing cache clip.
+# Cached Teacher visualization remains a single existing 16-frame clip.
 python visualize_crossclip_projection.py \
   --config configs/vggtoda3.yaml --source teacher --split test --clip-index 0
+
+# Online VGGT-Omega Teacher on one complete raw SCARED test sequence (Baseline T).
+python visualize_vggt_omega_baseline.py \
+  --config configs/baselines/T.yaml --sequence-index 0
 ```
 
 `--protocol vda` is optional and is the only evaluation protocol.
@@ -248,6 +252,12 @@ There is no global merged PLY for fused sequences: affine disparity correction
 cannot be applied to camera poses as a rigid/similarity transform. See
 [the evaluation protocol](docs/video_evaluation.md) for exact metric definitions,
 source links, and differences from upstream implementations.
+
+The Baseline-T VGGT-Omega visualizer reads raw SCARED RGB directly, runs the
+same online 32-frame VDA windows and stitching as the formal evaluator, and
+records `teacher_cache_used: false` in `metadata.json`. Its `depth/` arrays and
+camera-local PLYs use the Teacher's native preprocessed resolution; each
+`camera_windows/window_*.npz` retains the independent native window poses.
 
 ## Diagnostics
 
