@@ -213,17 +213,106 @@ class DirectTeacherDistillationDataset(Dataset):
         return result
 
 
+class FullOnlineTeacherDistillationDataset(Dataset):
+    """Load one ordinary RGB clip for both Student and a cache-free Teacher."""
+
+    def __init__(
+        self,
+        rgb_dataset: Any,
+        teacher_input_height: int,
+        teacher_input_width: int,
+    ) -> None:
+        self.rgb_dataset = rgb_dataset
+        self.teacher_input_height = int(teacher_input_height)
+        self.teacher_input_width = int(teacher_input_width)
+        if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
+            raise ValueError("Teacher input dimensions must be positive")
+        if (
+            int(rgb_dataset.clip_length),
+            int(rgb_dataset.sample_stride),
+            int(rgb_dataset.window_stride),
+        ) != (32, 1, 8):
+            raise ValueError(
+                "Baseline J requires ordinary 32-frame clips with sample_stride=1 "
+                "and the existing window_stride=8"
+            )
+        self.teacher_rgb_dataset = TeacherClipInputDataset(
+            rgb_dataset,
+            teacher_input_height=self.teacher_input_height,
+            teacher_input_width=self.teacher_input_width,
+        )
+        if not len(rgb_dataset):
+            raise RuntimeError("No complete 32-frame training clips were discovered")
+
+    def __len__(self) -> int:
+        return len(self.rgb_dataset)
+
+    def metadata(self, index: int) -> Dict[str, Any]:
+        return clip_metadata(self.rgb_dataset, index)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        sample = self.rgb_dataset[index]
+        metadata = self.metadata(index)
+        images = sample["images"]
+        if images.ndim != 4 or tuple(images.shape[:2]) != (32, 3):
+            raise RuntimeError(
+                "Baseline J Student RGB must have shape [32,3,H,W]; got {}".format(
+                    tuple(images.shape)
+                )
+            )
+        absolute_ids = sample["frame_indices"].to(torch.long)
+        expected_ids = torch.tensor(metadata["frame_indices"], dtype=torch.long)
+        if tuple(absolute_ids.shape) != (32,) or not torch.equal(
+            absolute_ids.cpu(), expected_ids
+        ):
+            raise RuntimeError("Baseline J RGB frame IDs do not match clip metadata")
+        if any(
+            int(right) != int(left) + 1
+            for left, right in zip(absolute_ids[:-1], absolute_ids[1:])
+        ):
+            raise RuntimeError("Baseline J requires temporally ordered consecutive frame IDs")
+
+        teacher_images, teacher_paths = self.teacher_rgb_dataset.load_images(index)
+        expected_teacher_shape = (
+            32,
+            3,
+            self.teacher_input_height,
+            self.teacher_input_width,
+        )
+        if tuple(teacher_images.shape) != expected_teacher_shape:
+            raise RuntimeError(
+                "Baseline J Teacher RGB must have shape {}; got {}".format(
+                    expected_teacher_shape, tuple(teacher_images.shape)
+                )
+            )
+        expected_teacher_paths = [str(value) for value in metadata["teacher_frame_paths"]]
+        if teacher_paths != expected_teacher_paths:
+            raise RuntimeError("Baseline J Teacher frame paths do not match Student clip metadata")
+
+        highlight = sample.get(
+            "highlight_masks",
+            torch.zeros(32, 1, *images.shape[-2:], dtype=torch.bool),
+        ).bool()
+        clean = sample.get("inpainted_images", images.clamp(0.0, 1.0))
+        return {
+            "images": images,
+            "clean_images": clean,
+            "highlight_masks": highlight,
+            "absolute_frame_ids": absolute_ids,
+            "teacher_absolute_frame_ids": absolute_ids.clone(),
+            "clip_start": sample["clip_start"].to(torch.long),
+            "sequence_id": str(metadata["sequence_id"]),
+            "teacher_sequence_id": str(metadata["sequence_id"]),
+            "teacher_images": teacher_images,
+            "teacher_frame_paths": teacher_paths,
+        }
+
+
 def direct_teacher_distillation_collate(
     samples: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     if not samples:
         raise ValueError("Cannot collate an empty direct-distillation batch")
-    teacher: Dict[str, Any] = {
-        key: torch.stack([sample["teacher"][key] for sample in samples])
-        for key in TEACHER_TENSOR_KEYS
-    }
-    teacher["sequence_id"] = [sample["teacher"]["sequence_id"] for sample in samples]
-    teacher["cache_path"] = [sample["teacher"]["cache_path"] for sample in samples]
     batch = {
         "images": torch.stack([sample["images"] for sample in samples]),
         "clean_images": torch.stack([sample["clean_images"] for sample in samples]),
@@ -231,8 +320,18 @@ def direct_teacher_distillation_collate(
         "absolute_frame_ids": torch.stack([sample["absolute_frame_ids"] for sample in samples]),
         "clip_start": torch.stack([sample["clip_start"] for sample in samples]),
         "sequence_id": [sample["sequence_id"] for sample in samples],
-        "teacher": teacher,
     }
+    cached_flags = ["teacher" in sample for sample in samples]
+    if any(cached_flags) and not all(cached_flags):
+        raise RuntimeError("Cached Teacher availability differs within a batch")
+    if all(cached_flags):
+        teacher: Dict[str, Any] = {
+            key: torch.stack([sample["teacher"][key] for sample in samples])
+            for key in TEACHER_TENSOR_KEYS
+        }
+        teacher["sequence_id"] = [sample["teacher"]["sequence_id"] for sample in samples]
+        teacher["cache_path"] = [sample["teacher"]["cache_path"] for sample in samples]
+        batch["teacher"] = teacher
     online_flags = ["teacher_images" in sample for sample in samples]
     if any(online_flags) and not all(online_flags):
         raise RuntimeError("Online Teacher RGB availability differs within a batch")
@@ -240,6 +339,14 @@ def direct_teacher_distillation_collate(
         batch["teacher_images"] = torch.stack(
             [sample["teacher_images"] for sample in samples]
         )
+        batch["teacher_absolute_frame_ids"] = torch.stack(
+            [sample.get("teacher_absolute_frame_ids", sample["absolute_frame_ids"])
+             for sample in samples]
+        )
+        batch["teacher_sequence_id"] = [
+            sample.get("teacher_sequence_id", sample["sequence_id"])
+            for sample in samples
+        ]
     return batch
 
 
@@ -270,6 +377,7 @@ def build_direct_teacher_distillation_dataloader(
 
 __all__ = [
     "DirectTeacherDistillationDataset",
+    "FullOnlineTeacherDistillationDataset",
     "build_direct_teacher_distillation_dataloader",
     "direct_teacher_distillation_collate",
 ]

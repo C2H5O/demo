@@ -184,8 +184,10 @@ def compute_camera_distillation_loss(
         raise ValueError("Student and teacher intrinsics shapes differ")
     if tuple(student_extrinsics.shape) != tuple(teacher_extrinsics.shape):
         raise ValueError("Student and teacher extrinsics shapes differ")
-    if student_intrinsics.shape[1:] != (16, 3, 3):
-        raise ValueError("Intrinsics must have shape [B,16,3,3]")
+    if student_intrinsics.ndim != 4 or student_intrinsics.shape[-2:] != (3, 3):
+        raise ValueError("Intrinsics must have shape [B,T,3,3]")
+    if student_intrinsics.shape[1] < 2:
+        raise ValueError("Camera distillation requires at least two frames")
     student_relative = relative_w2c_from_reference(student_extrinsics.float())
     teacher_relative = relative_w2c_from_reference(teacher_extrinsics.float())
     student_rotation = student_relative[..., :3, :3]

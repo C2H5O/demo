@@ -18,8 +18,10 @@ from datasets.crossclip_teacher_dataset import (
 )
 from datasets.direct_teacher_distillation_dataset import (
     DirectTeacherDistillationDataset,
+    FullOnlineTeacherDistillationDataset,
     build_direct_teacher_distillation_dataloader,
 )
+from datasets.scared_clip_dataset import make_scared_rgb_dataset
 from losses.direct_teacher_distillation_loss import DirectTeacherDistillationLoss
 from losses.regularizer_diagnostics import loss_share_logs, regularizer_diagnostics
 from losses.attention_distillation_loss import (
@@ -28,6 +30,7 @@ from losses.attention_distillation_loss import (
 )
 from models.student.da3_small_student import DA3SmallStudent
 from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
+from models.teacher.output_adapter import adapt_teacher_distillation_outputs
 from utils.checkpoint import (
     DIRECT_TEACHER_DISTILLATION_PROTOCOL,
     atomic_torch_save,
@@ -60,10 +63,30 @@ def _project_path(value: str | Path) -> Path:
     return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
 
 
+def _teacher_is_full_online(config: Mapping[str, Any]) -> bool:
+    teacher = config.get("teacher", {})
+    return (
+        str(teacher.get("mode", "cache")).lower() == "full_online"
+        and not bool(teacher.get("use_cache", True))
+    )
+
+
 def _build_dataset(
     config: Dict[str, Any], split: str
-) -> DirectTeacherDistillationDataset:
+) -> DirectTeacherDistillationDataset | FullOnlineTeacherDistillationDataset:
     teacher = config["teacher"]
+    if _teacher_is_full_online(config):
+        rgb = make_scared_rgb_dataset(config["dataset"], split)
+        dataset = FullOnlineTeacherDistillationDataset(
+            rgb,
+            teacher_input_height=int(teacher.get("input_height", 512)),
+            teacher_input_width=int(teacher.get("input_width", 640)),
+        )
+        print(
+            "ordinary online sampling: length=32 sample_stride=1 start_stride=8 "
+            "clips={} teacher_cache_used=false".format(len(dataset))
+        )
+        return dataset
     raw_root = teacher.get("raw_cache_root")
     if not raw_root:
         raise ValueError("teacher.raw_cache_root must be configured")
@@ -89,10 +112,24 @@ def _build_dataset(
 
 
 def _print_same_clip_examples(
-    dataset: DirectTeacherDistillationDataset, limit: int = 3
+    dataset: DirectTeacherDistillationDataset | FullOnlineTeacherDistillationDataset,
+    limit: int = 3,
 ) -> None:
     for index in range(min(limit, len(dataset))):
         metadata = dataset.metadata(index)
+        if isinstance(dataset, FullOnlineTeacherDistillationDataset):
+            frame_ids = [int(value) for value in metadata["frame_indices"]]
+            if len(frame_ids) != 32 or any(
+                right != left + 1 for left, right in zip(frame_ids, frame_ids[1:])
+            ):
+                raise RuntimeError("Startup baseline-J temporal audit failed")
+            print(
+                "baseline-J clip audit: sequence={} start_frame={} frame_ids={} "
+                "teacher_frame_ids_equal_student=true".format(
+                    metadata["sequence_id"], metadata["clip_start"], frame_ids
+                )
+            )
+            continue
         with np.load(str(dataset.cache_paths[index]), allow_pickle=False) as cache:
             teacher_start = int(cache["clip_start"].item())
             teacher_ids = [int(value) for value in cache["absolute_frame_ids"].tolist()]
@@ -307,6 +344,118 @@ def _compute_online_teacher_attention_loss(
     return total, logs
 
 
+def _forward_full_online_teacher(
+    teacher_model: VGGTOmegaTeacher,
+    teacher_images: torch.Tensor,
+    absolute_frame_ids: torch.Tensor,
+    clip_start: torch.Tensor,
+    sequence_ids: list[str],
+    *,
+    device: torch.device,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+    teacher_input_shape: tuple[int, int],
+    supervision_shape: tuple[int, int],
+    min_depth: float,
+    max_depth: float,
+    minimum_valid_fraction: float,
+) -> tuple[Dict[str, Any], Dict[int, Dict[str, Any]], Dict[str, Any]]:
+    """Run exactly one frozen VGGT-Omega forward for all J supervision."""
+    expected = (32, 3, *teacher_input_shape)
+    if tuple(teacher_images.shape[1:]) != expected:
+        raise RuntimeError(
+            "Baseline J Teacher input must have shape [B,{}]; got {}".format(
+                ",".join(str(value) for value in expected), tuple(teacher_images.shape)
+            )
+        )
+    if tuple(absolute_frame_ids.shape[1:]) != (32,):
+        raise RuntimeError("Baseline J Teacher/Student frame IDs must have shape [B,32]")
+    if torch.is_grad_enabled():
+        raise RuntimeError("Full-online Teacher helper must run with gradients disabled")
+
+    images = teacher_images.to(device, non_blocking=True)
+    started = time.perf_counter()
+    forward_count_before = getattr(teacher_model, "prediction_forward_count", None)
+    with torch.autocast(
+        device_type=device.type,
+        enabled=amp_enabled,
+        dtype=amp_dtype,
+    ):
+        raw_outputs = teacher_model(images)
+    forward_count_after = getattr(teacher_model, "prediction_forward_count", None)
+    if (
+        forward_count_before is not None
+        and forward_count_after is not None
+        and int(forward_count_after) - int(forward_count_before) != 1
+    ):
+        raise RuntimeError("Baseline J expected exactly one VGGT-Omega prediction forward")
+    if "attention" not in raw_outputs:
+        raise RuntimeError("Full-online VGGT-Omega forward did not return attention Q/K")
+    attention = raw_outputs.pop("attention")
+    teacher = adapt_teacher_distillation_outputs(
+        raw_outputs,
+        teacher_input_shape,
+        supervision_shape,
+        min_depth=min_depth,
+        max_depth=max_depth,
+    )
+    del raw_outputs, images
+    if any(
+        value.requires_grad
+        for value in teacher.values()
+        if isinstance(value, torch.Tensor)
+    ) or any(
+        feature[name].requires_grad
+        for feature in attention.values()
+        for name in ("q", "k")
+    ):
+        raise RuntimeError("Full-online Teacher supervision unexpectedly requires gradients")
+    if any(
+        int(feature["metadata"].get("num_frames", -1)) != 32
+        for feature in attention.values()
+    ):
+        raise RuntimeError("Full-online Teacher attention was not captured from 32 frames")
+
+    valid_fraction = teacher["valid_mask"].flatten(2).float().mean(2)
+    if bool((valid_fraction < float(minimum_valid_fraction)).any()):
+        raise RuntimeError(
+            "Full-online Teacher valid fraction fell below {}: {}".format(
+                minimum_valid_fraction, valid_fraction.detach().cpu().tolist()
+            )
+        )
+    teacher["absolute_frame_ids"] = absolute_frame_ids.detach()
+    teacher["clip_start"] = clip_start.detach()
+    teacher["sequence_id"] = list(sequence_ids)
+    audit = {
+        "teacher_forward_count": 1,
+        "teacher_input_shape": list(teacher_images.shape),
+        "teacher_depth_shape": list(teacher["depth"].shape),
+        "teacher_attention_layers": sorted(int(layer) for layer in attention),
+        "teacher_forward_seconds": time.perf_counter() - started,
+    }
+    return teacher, attention, audit
+
+
+def _compute_attention_loss_from_online_features(
+    teacher_features: Mapping[int, Mapping[str, Any]],
+    student_features: Mapping[int, Mapping[str, Any]],
+    loss_function: CrossFrameAttentionDistillationLoss,
+) -> tuple[torch.Tensor, Dict[str, float]]:
+    """Consume Q/K already produced by the same full-online Teacher forward."""
+    started = time.perf_counter()
+    first_student = next(iter(student_features.values()))["q"]
+    first_teacher = next(iter(teacher_features.values()))["q"]
+    if first_teacher.shape[:2] != first_student.shape[:2]:
+        raise RuntimeError("Teacher/Student attention batch or frame counts differ")
+    with torch.autocast(device_type=first_student.device.type, enabled=False):
+        loss, logs = loss_function(teacher_features, student_features)
+    logs = dict(logs)
+    logs["loss/attention"] = float(loss.detach().cpu())
+    logs["stats/online_teacher_chunks"] = 1.0
+    logs["timing/online_teacher_attention_seconds"] = time.perf_counter() - started
+    return loss, logs
+
+
 def _audit_attention_backward(
     attention_loss: torch.Tensor,
     model: DA3SmallStudent,
@@ -426,16 +575,19 @@ def _audit_attention_backward(
 def _move_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
     moved = dict(batch)
     for key in (
-        "images", "clean_images", "highlight_masks", "absolute_frame_ids", "clip_start"
+        "images", "clean_images", "highlight_masks", "absolute_frame_ids", "clip_start",
+        "teacher_absolute_frame_ids",
     ):
-        moved[key] = batch[key].to(device, non_blocking=True)
-    teacher = dict(batch["teacher"])
-    for key in (
-        "depth", "confidence", "valid_mask", "intrinsics", "extrinsics",
-        "absolute_frame_ids", "clip_start",
-    ):
-        teacher[key] = batch["teacher"][key].detach().to(device, non_blocking=True)
-    moved["teacher"] = teacher
+        if key in batch:
+            moved[key] = batch[key].to(device, non_blocking=True)
+    if "teacher" in batch:
+        teacher = dict(batch["teacher"])
+        for key in (
+            "depth", "confidence", "valid_mask", "intrinsics", "extrinsics",
+            "absolute_frame_ids", "clip_start",
+        ):
+            teacher[key] = batch["teacher"][key].detach().to(device, non_blocking=True)
+        moved["teacher"] = teacher
     return moved
 
 
@@ -479,8 +631,27 @@ def _check_resume_contract(
     checkpoint: Dict[str, Any], config: Dict[str, Any], model: DA3SmallStudent
 ) -> None:
     require_training_objective(checkpoint, DIRECT_TEACHER_DISTILLATION_PROTOCOL)
-    require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
     checkpoint_config = checkpoint.get("config", {})
+    checkpoint_full_online = _teacher_is_full_online(checkpoint_config)
+    current_full_online = _teacher_is_full_online(config)
+    if checkpoint_full_online != current_full_online:
+        raise ValueError("Resume checkpoint Teacher mode differs from current config")
+    if not current_full_online:
+        require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
+    else:
+        checkpoint_teacher = checkpoint_config.get("teacher", {})
+        current_teacher = config.get("teacher", {})
+        for field in ("mode", "use_cache", "input_height", "input_width"):
+            if checkpoint_teacher.get(field) != current_teacher.get(field):
+                raise ValueError(
+                    "Resume checkpoint full-online Teacher setting differs: {}".format(field)
+                )
+        temporal_fields = ("clip_length", "sample_stride", "window_stride")
+        for field in temporal_fields:
+            if checkpoint_config.get("dataset", {}).get(field) != config.get("dataset", {}).get(field):
+                raise ValueError(
+                    "Resume checkpoint temporal setting differs: {}".format(field)
+                )
     if (
         checkpoint_config.get("experiment", {}).get("objective_protocol")
         != DIRECT_TEACHER_DISTILLATION_PROTOCOL
@@ -525,7 +696,8 @@ def _check_resume_contract(
         "teacher_layers", "student_layers", "attention_type",
         "spatial_alignment", "common_grid", "head_aggregation", "divergence",
         "temperature_teacher", "temperature_student", "weight", "frame_offsets",
-        "query_chunk_size", "eps",
+        "query_chunk_size", "eps", "pair_chunk_size",
+        "teacher_probability_outside_checkpoint",
     )
     attention_mismatches = {}
     if checkpoint_attention_enabled != current_attention_enabled:
@@ -564,10 +736,19 @@ def train_direct_teacher_distillation(
             )
         )
     teacher = config.get("teacher", {})
-    if str(teacher.get("cache_protocol")) != CROSSCLIP_CACHE_PROTOCOL:
+    full_online_teacher = _teacher_is_full_online(config)
+    teacher_mode = str(teacher.get("mode", "cache")).lower()
+    teacher_uses_cache = bool(teacher.get("use_cache", True))
+    if (teacher_mode == "full_online") != (not teacher_uses_cache):
+        raise ValueError(
+            "teacher.mode=full_online and teacher.use_cache=false must be configured together"
+        )
+    if not full_online_teacher and str(teacher.get("cache_protocol")) != CROSSCLIP_CACHE_PROTOCOL:
         raise ValueError("teacher.cache_protocol must remain crossclip_local_v1")
     if str(teacher.get("variant")) != "base" or not bool(teacher.get("frozen", True)):
-        raise ValueError("Direct distillation requires the frozen base teacher cache")
+        raise ValueError("Direct distillation requires the frozen base teacher")
+    if full_online_teacher and teacher.get("raw_cache_root") not in (None, ""):
+        raise ValueError("Baseline J full-online mode must not configure teacher.raw_cache_root")
     attention_config = AttentionDistillationConfig.from_mapping(
         config.get("attention_distill", {})
     )
@@ -584,14 +765,19 @@ def train_direct_teacher_distillation(
                 "teacher.attention_layers must match attention_distill.teacher_layers"
             )
     dataset_config = config.get("dataset", {})
+    expected_temporal = (32, 1, 8) if full_online_teacher else (16, 1, 8)
     if (
         int(dataset_config.get("clip_length", -1)),
         int(dataset_config.get("sample_stride", -1)),
         int(dataset_config.get("window_stride", -1)),
-    ) != (16, 1, 8):
+    ) != expected_temporal:
         raise ValueError(
-            "Dataset must use 16 consecutive frames and cache sampling stride 8"
+            "Dataset temporal settings must be {} for this Teacher mode".format(
+                expected_temporal
+            )
         )
+    if full_online_teacher and int(config.get("dataloader", {}).get("batch_size", -1)) != 1:
+        raise ValueError("Baseline J full-online mode requires dataloader.batch_size=1")
     seed_everything(int(config.get("seed", 42)))
     requested_device = str(config.get("device", "cuda"))
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
@@ -618,8 +804,8 @@ def train_direct_teacher_distillation(
                 "save_attention": True,
                 "attention_layers": list(attention_config.teacher_layers),
                 "attention_cache_dtype": attention_config.teacher_output_dtype,
-                "attention_output_device": "source",
-                "attention_only": True,
+                "attention_output_device": "cpu" if full_online_teacher else "source",
+                "attention_only": not full_online_teacher,
             }
         )
         online_teacher = VGGTOmegaTeacher.from_config(
@@ -629,6 +815,22 @@ def train_direct_teacher_distillation(
         if any(parameter.requires_grad for parameter in online_teacher.parameters()):
             raise RuntimeError("Online VGGT-Omega Teacher is not fully frozen")
         teacher_amp_enabled, teacher_amp_dtype = _teacher_amp_settings(teacher, device)
+    if full_online_teacher:
+        if not attention_config.enabled or online_teacher is None:
+            raise ValueError("Baseline J requires enabled online attention distillation")
+        teacher_height = int(teacher.get("input_height", 512))
+        teacher_width = int(teacher.get("input_width", 640))
+        teacher_patch = int(online_teacher.attention_capture.patch_size)
+        student_grid = (
+            int(model.config.image_height) // int(model.config.patch_size),
+            int(model.config.image_width) // int(model.config.patch_size),
+        )
+        teacher_grid = (teacher_height // teacher_patch, teacher_width // teacher_patch)
+        if teacher_grid != student_grid:
+            raise RuntimeError(
+                "Baseline J inherits E's equal attention grid contract; got Teacher {} "
+                "and Student {}".format(teacher_grid, student_grid)
+            )
     loss_function = DirectTeacherDistillationLoss(config["loss"]).to(device)
     attention_loss_function = (
         CrossFrameAttentionDistillationLoss(attention_config).to(device)
@@ -694,14 +896,20 @@ def train_direct_teacher_distillation(
             loader.generator.set_state(checkpoint["loader_generator_state"])
 
     stats = model.parameter_statistics()
+    clip_length = int(dataset_config["clip_length"])
+    if full_online_teacher:
+        print(
+            "baseline-J training mode: clip_length=32 teacher_mode=full_online "
+            "teacher_cache=false teacher_frozen=true teacher_frames=32 student_frames=32"
+        )
     print(
-        "VGGT-DA3 direct setup: clips={} batch={} frames=16 input=448x560 "
-        "cache_sampling_stride=8 trainable={:,} backbone_trainable={:,} "
+        "VGGT-DA3 direct setup: clips={} batch={} frames={} input=448x560 "
+        "sampling_stride=8 trainable={:,} backbone_trainable={:,} "
         "backbone_lora_trainable={:,} lora_modules={} depth_trainable={:,} "
         "camera_encoder_trainable={:,} camera_decoder_trainable={:,} "
         "ray_trainable={:,} attention_distill={} attention_source={} "
         "online_teacher_batch={} attention_weight={}".format(
-            len(dataset), config["dataloader"]["batch_size"], stats["trainable"],
+            len(dataset), config["dataloader"]["batch_size"], clip_length, stats["trainable"],
             stats["backbone_trainable"], stats["backbone_lora_trainable"],
             stats["lora_modules"], stats["depth_head_trainable"],
             stats["camera_encoder_trainable"], stats["camera_decoder_trainable"],
@@ -769,6 +977,58 @@ def train_direct_teacher_distillation(
             timing_events["h2d_start"] = _record_cuda_event(timing_enabled)
             batch = _move_batch(cpu_batch, device)
             timing_events["h2d_end"] = _record_cuda_event(timing_enabled)
+            full_online_attention: Optional[Dict[int, Dict[str, Any]]] = None
+            full_online_audit: Dict[str, Any] = {}
+            if full_online_teacher:
+                if online_teacher is None or "teacher_images" not in batch:
+                    raise RuntimeError("Baseline J full-online Teacher inputs are unavailable")
+                if not torch.equal(
+                    batch["absolute_frame_ids"], batch["teacher_absolute_frame_ids"]
+                ):
+                    raise RuntimeError("Baseline J Teacher and Student frame IDs differ")
+                if batch["sequence_id"] != batch["teacher_sequence_id"]:
+                    raise RuntimeError("Baseline J Teacher and Student sequence IDs differ")
+                with torch.no_grad():
+                    online_supervision, full_online_attention, full_online_audit = (
+                        _forward_full_online_teacher(
+                            online_teacher,
+                            batch["teacher_images"],
+                            batch["teacher_absolute_frame_ids"],
+                            batch["clip_start"],
+                            batch["teacher_sequence_id"],
+                            device=device,
+                            amp_enabled=teacher_amp_enabled,
+                            amp_dtype=teacher_amp_dtype,
+                            teacher_input_shape=(
+                                int(teacher.get("input_height", 512)),
+                                int(teacher.get("input_width", 640)),
+                            ),
+                            supervision_shape=(
+                                int(model.config.image_height),
+                                int(model.config.image_width),
+                            ),
+                            min_depth=float(teacher.get("min_depth", 0.1)),
+                            max_depth=float(teacher.get("max_depth", 150.0)),
+                            minimum_valid_fraction=float(
+                                teacher.get("minimum_valid_fraction", 0.001)
+                            ),
+                        )
+                    )
+                batch["teacher"] = online_supervision
+                if dry_run:
+                    print(
+                        "baseline-J dry-run input audit: sequence_id={} start_frame={} "
+                        "frame_ids={} teacher_input_shape={} student_input_shape={} "
+                        "teacher_depth_shape={} teacher_forward_count=1 "
+                        "teacher_frame_ids_equal_student=true".format(
+                            batch["sequence_id"],
+                            batch["clip_start"].detach().cpu().tolist(),
+                            batch["absolute_frame_ids"].detach().cpu().tolist(),
+                            full_online_audit["teacher_input_shape"],
+                            list(batch["images"].shape),
+                            full_online_audit["teacher_depth_shape"],
+                        )
+                    )
             timing_events["forward_start"] = _record_cuda_event(timing_enabled)
             prediction, retried, finite = _forward_with_fp32_retry(
                 model, batch["images"], amp_enabled, amp_dtype
@@ -785,18 +1045,33 @@ def train_direct_teacher_distillation(
                 baseline_loss, last_logs = loss_function(prediction, batch)
                 attention_loss = baseline_loss.new_zeros(())
                 if attention_loss_function is not None:
-                    if online_teacher is None or "teacher_images" not in batch:
-                        raise RuntimeError("Online Teacher attention inputs are unavailable")
-                    attention_loss, attention_logs = _compute_online_teacher_attention_loss(
-                        online_teacher,
-                        batch["teacher_images"],
-                        prediction["attention"],
-                        attention_loss_function,
-                        attention_config,
-                        device,
-                        teacher_amp_enabled,
-                        teacher_amp_dtype,
-                    )
+                    if full_online_teacher:
+                        if full_online_attention is None:
+                            raise RuntimeError("Baseline J same-forward Teacher Q/K are unavailable")
+                        attention_loss, attention_logs = (
+                            _compute_attention_loss_from_online_features(
+                                full_online_attention,
+                                prediction["attention"],
+                                attention_loss_function,
+                            )
+                        )
+                        attention_logs["stats/teacher_forward_count"] = 1.0
+                        attention_logs["timing/full_online_teacher_forward_seconds"] = float(
+                            full_online_audit["teacher_forward_seconds"]
+                        )
+                    else:
+                        if online_teacher is None or "teacher_images" not in batch:
+                            raise RuntimeError("Online Teacher attention inputs are unavailable")
+                        attention_loss, attention_logs = _compute_online_teacher_attention_loss(
+                            online_teacher,
+                            batch["teacher_images"],
+                            prediction["attention"],
+                            attention_loss_function,
+                            attention_config,
+                            device,
+                            teacher_amp_enabled,
+                            teacher_amp_dtype,
+                        )
                     last_logs.update(attention_logs)
                 loss = baseline_loss + attention_config.weight * attention_loss
                 last_logs["loss/baseline"] = float(baseline_loss.detach().cpu())
@@ -805,6 +1080,11 @@ def train_direct_teacher_distillation(
                     (attention_config.weight * attention_loss).detach().cpu()
                 )
                 last_logs["loss/total"] = float(loss.detach().cpu())
+            if full_online_attention is not None:
+                # Q/K have already been reduced into the unchanged attention
+                # loss; release the detached Teacher copies before backward.
+                del full_online_attention
+                full_online_attention = None
             last_logs.update(loss_share_logs(last_logs))
             if dry_run or (diagnostics_every and batch_index % diagnostics_every == 0):
                 last_logs.update(regularizer_diagnostics(
@@ -888,9 +1168,12 @@ def train_direct_teacher_distillation(
                     for key, value in prediction.items()
                 }
                 print(
-                    "VGGT-DA3 direct dry run passed: shapes={} gradients={} "
-                    "ray_forward_count={}".format(
-                        shapes, group_gradients, model._ray_forward_count
+                    "VGGT-DA3 direct dry run passed: shapes={} teacher_depth_shape={} "
+                    "gradients={} ray_forward_count={}".format(
+                        shapes,
+                        list(batch["teacher"]["depth"].shape),
+                        group_gradients,
+                        model._ray_forward_count,
                     )
                 )
                 finish_timing(

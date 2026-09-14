@@ -1,0 +1,48 @@
+# Baseline J inherits Baseline E exactly, then changes only temporal length and
+# the source of Teacher supervision.
+base_config: E.yaml
+
+experiment:
+  name: baseline_J_32frame-full-online-teacher
+  baseline_id: J
+  training_required: true
+  implementation_status: ready_for_server_dry_run
+  hypothesis: >-
+    Baseline E with ordinary 32-frame training clips and one frozen full-online
+    VGGT-Omega forward for every Teacher supervision signal.
+
+dataset:
+  clip_length: 32
+  sample_stride: 1
+  window_stride: 8
+
+teacher:
+  mode: full_online
+  use_cache: false
+  raw_cache_root: null
+  cache_checkpoint_identity: null
+  frozen: true
+  freeze_backbone: true
+  freeze_heads: true
+  input_height: 512
+  input_width: 640
+
+attention_distill:
+  enabled: true
+  teacher_source: online
+  pair_chunk_size: 2
+  teacher_probability_outside_checkpoint: true
+
+dataloader:
+  batch_size: 1
+
+training:
+  output_dir: ./outputs/baseline_J
+  resume: null
+
+vda_evaluation:
+  checkpoint: ./outputs/baseline_J/last.pt
+  output: ./outputs/baseline_J/evaluation_test.json
+
+visualization:
+  output_dir: ./outputs/baseline_J/visualization

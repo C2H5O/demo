@@ -162,7 +162,7 @@ def _load_full_pretrained(config: DA3SmallConfig) -> tuple[nn.Module, Dict[str, 
 
 
 class DA3SmallStudent(nn.Module):
-    """Joint 16-view DA3-Small depth/camera student in W2C convention."""
+    """Joint multi-view DA3-Small depth/camera student in W2C convention."""
 
     def __init__(
         self,
@@ -418,8 +418,8 @@ class DA3SmallStudent(nn.Module):
         if images.ndim != 5 or images.shape[1] < 1 or tuple(images.shape[2:]) != (3, 448, 560):
             raise ValueError("DA3 student requires [B,T,3,448,560], got {}".format(tuple(images.shape)))
         frames = images.shape[1]
-        if (self.training or self.attention_capture is not None) and frames != 16:
-            raise ValueError("DA3 training/attention capture requires [B,16,3,448,560]")
+        if (self.training or self.attention_capture is not None) and frames < 2:
+            raise ValueError("DA3 training/attention capture requires at least two frames")
         if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
             raise ValueError("DA3 dataset RGB must be finite in [0,1]")
         normalized = (images - self.imagenet_mean) / self.imagenet_std
