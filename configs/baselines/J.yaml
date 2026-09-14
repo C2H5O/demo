@@ -13,7 +13,7 @@ experiment:
 
 dataset:
   clip_length: 32
-  sample_stride: 1
+  sample_stride: 2
   window_stride: 8
 
 teacher:

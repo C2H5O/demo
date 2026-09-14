@@ -83,8 +83,13 @@ def _build_dataset(
             teacher_input_width=int(teacher.get("input_width", 640)),
         )
         print(
-            "ordinary online sampling: length=32 sample_stride=1 start_stride=8 "
-            "clips={} teacher_cache_used=false".format(len(dataset))
+            "ordinary online sampling: length={} sample_stride={} start_stride={} "
+            "clips={} teacher_cache_used=false".format(
+                int(dataset.rgb_dataset.clip_length),
+                int(dataset.rgb_dataset.sample_stride),
+                int(dataset.rgb_dataset.window_stride),
+                len(dataset),
+            )
         )
         return dataset
     raw_root = teacher.get("raw_cache_root")
@@ -755,12 +760,22 @@ def train_direct_teacher_distillation(
                 "teacher.attention_layers must match attention_distill.teacher_layers"
             )
     dataset_config = config.get("dataset", {})
-    expected_temporal = (32, 1, 8) if full_online_teacher else (16, 1, 8)
-    if (
+    configured_temporal = (
         int(dataset_config.get("clip_length", -1)),
         int(dataset_config.get("sample_stride", -1)),
         int(dataset_config.get("window_stride", -1)),
-    ) != expected_temporal:
+    )
+    if full_online_teacher:
+        valid_temporal = (
+            configured_temporal[0] == 32
+            and configured_temporal[1] > 0
+            and configured_temporal[2] == 8
+        )
+        expected_temporal = "clip_length=32, sample_stride>0, window_stride=8"
+    else:
+        valid_temporal = configured_temporal == (16, 1, 8)
+        expected_temporal = (16, 1, 8)
+    if not valid_temporal:
         raise ValueError(
             "Dataset temporal settings must be {} for this Teacher mode".format(
                 expected_temporal
@@ -874,17 +889,24 @@ def train_direct_teacher_distillation(
     clip_length = int(dataset_config["clip_length"])
     if full_online_teacher:
         print(
-            "baseline-J training mode: clip_length=32 teacher_mode=full_online "
-            "teacher_cache=false teacher_frozen=true teacher_frames=32 student_frames=32"
+            "baseline-J training mode: clip_length={} sample_stride={} "
+            "window_stride={} teacher_mode=full_online teacher_cache=false "
+            "teacher_frozen=true teacher_frames=32 student_frames=32".format(
+                int(dataset.rgb_dataset.clip_length),
+                int(dataset.rgb_dataset.sample_stride),
+                int(dataset.rgb_dataset.window_stride),
+            )
         )
     print(
         "VGGT-DA3 direct setup: clips={} batch={} frames={} input=448x560 "
-        "sampling_stride=8 trainable={:,} backbone_trainable={:,} "
+        "sample_stride={} start_stride={} trainable={:,} backbone_trainable={:,} "
         "backbone_lora_trainable={:,} lora_modules={} depth_trainable={:,} "
         "camera_encoder_trainable={:,} camera_decoder_trainable={:,} "
         "ray_trainable={:,} attention_distill={} attention_source={} "
         "online_teacher_batch={} attention_weight={}".format(
-            len(dataset), config["dataloader"]["batch_size"], clip_length, stats["trainable"],
+            len(dataset), config["dataloader"]["batch_size"], clip_length,
+            int(dataset.rgb_dataset.sample_stride), int(dataset.rgb_dataset.window_stride),
+            stats["trainable"],
             stats["backbone_trainable"], stats["backbone_lora_trainable"],
             stats["lora_modules"], stats["depth_head_trainable"],
             stats["camera_encoder_trainable"], stats["camera_decoder_trainable"],

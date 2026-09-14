@@ -7,7 +7,8 @@ layer mapping, attention objective, angular soft-highlight behavior, direct
 depth/camera distillation, smoothness term, all loss weights, optimizer, data
 split, and VDA evaluation protocol. It changes only:
 
-1. the training clip length from 16 to 32 frames; and
+1. the training clip length from 16 to 32 sampled frames, with temporal
+   sampling controlled by `dataset.sample_stride`; and
 2. cached depth/camera/confidence plus online attention into one full-online
    frozen VGGT-Ω forward.
 
@@ -15,17 +16,24 @@ split, and VDA evaluation protocol. It changes only:
 
 ```text
 one sequence, start t
-  -> [I_t, I_{t+1}, ..., I_{t+31}]
+  -> [I_t, I_{t+sample_stride}, ..., I_{t+31*sample_stride}]
   -> the same ordered frame IDs feed both branches
      -> frozen VGGT-Ω, one forward: depth/confidence/camera/attention
      -> trainable DA3 Student
   -> unchanged Baseline E losses and weights
 ```
 
-The sampler keeps Baseline E's `sample_stride=1` and `window_stride=8`. It does
-not assign key/overlap/new roles and does not implement a `2+8+22` inference
-window. Teacher cache paths are disabled in the J configuration and are never
-consulted by the J dataset or training path.
+The sampler always emits 32 frames. `dataset.sample_stride` is configurable and
+`dataset.window_stride` remains 8, so the current J configuration uses
+`clip_length=32`, `sample_stride=2`, and `window_stride=8`; a clip starting at
+`t` therefore contains `[t, t+2, t+4, ..., t+62]`. Setting only
+`dataset.sample_stride` back to `1` restores `[t, t+1, ..., t+31]`, while
+`sample_stride=4` covers `[t, t+4, ..., t+124]`. The next window still starts at
+`t+8`. Teacher and Student read exactly the same sampled frame IDs from the
+same `record.frame_indices`. The sampler does not assign key/overlap/new roles
+and does not implement a `2+8+22` inference window. Teacher cache paths are
+disabled in the J configuration and are never consulted by the J dataset or
+training path.
 
 The Teacher reads the corresponding native `teacher_rgb` frames, applies the
 same CPU bicubic resize used by the latest Baseline E path (`1024x1280` to

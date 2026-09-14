@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from copy import deepcopy
 
+import pytest
 import torch
 
 import models.teacher.output_adapter as output_adapter
@@ -42,14 +43,18 @@ def _sequence(length: int = 48) -> dict:
 
 class _FakeRGBDataset:
     clip_length = 32
-    sample_stride = 1
     window_stride = 8
 
-    def __init__(self) -> None:
-        sequence = _sequence()
+    def __init__(self, sample_stride: int = 1) -> None:
+        self.sample_stride = sample_stride
+        sequence = _sequence(length=80)
         self.sequences = [sequence]
         self.clips = [
-            ClipRecord(sequence, tuple(range(start, start + 32)), start)
+            ClipRecord(
+                sequence,
+                tuple(start + step * sample_stride for step in range(32)),
+                start,
+            )
             for start in (0, 8, 16)
         ]
 
@@ -102,7 +107,7 @@ def test_j_config_inherits_e_losses_models_and_evaluation() -> None:
     for field in teacher_architecture_fields:
         assert baseline_j["teacher"][field] == baseline_e["teacher"][field]
     assert baseline_j["dataset"]["clip_length"] == 32
-    assert baseline_j["dataset"]["sample_stride"] == 1
+    assert baseline_j["dataset"]["sample_stride"] == 2
     assert baseline_j["dataset"]["window_stride"] == 8
     assert baseline_j["dataloader"]["batch_size"] == 1
     assert baseline_j["attention_distill"]["pair_chunk_size"] == 2
@@ -140,6 +145,31 @@ def test_j_dataset_is_ordered_same_sequence_and_cache_free() -> None:
     )
 
 
+def test_j_dataset_supports_configured_stride_two_and_keeps_teacher_aligned() -> None:
+    dataset = FullOnlineTeacherDistillationDataset(_FakeRGBDataset(sample_stride=2), 4, 6)
+
+    class _FakeTeacherRGB:
+        def load_images(self, index: int):
+            record = dataset.rgb_dataset.clips[index]
+            paths = [record.sequence["teacher_frame_paths"][i] for i in record.frame_indices]
+            return torch.zeros(32, 3, 4, 6), paths
+
+    dataset.teacher_rgb_dataset = _FakeTeacherRGB()
+    sample = dataset[0]
+    assert sample["absolute_frame_ids"].tolist() == list(range(100, 164, 2))
+    assert torch.equal(
+        sample["absolute_frame_ids"], sample["teacher_absolute_frame_ids"]
+    )
+    assert sample["teacher_frame_paths"] == [
+        "frame_{:06d}.png".format(index) for index in range(0, 64, 2)
+    ]
+
+
+def test_j_dataset_rejects_nonpositive_sample_stride() -> None:
+    with pytest.raises(ValueError, match="positive sample_stride"):
+        FullOnlineTeacherDistillationDataset(_FakeRGBDataset(sample_stride=0), 4, 6)
+
+
 def test_j_online_collate_supports_configurable_batch_size() -> None:
     dataset = FullOnlineTeacherDistillationDataset(_FakeRGBDataset(), 4, 6)
 
@@ -159,7 +189,11 @@ def test_j_online_collate_supports_configurable_batch_size() -> None:
 
 def test_j_dataset_builder_never_enters_cache_builder(monkeypatch) -> None:
     config = load_config("configs/baselines/J.yaml")
-    monkeypatch.setattr(trainer, "make_scared_rgb_dataset", lambda *_args: _FakeRGBDataset())
+    monkeypatch.setattr(
+        trainer,
+        "make_scared_rgb_dataset",
+        lambda *_args: _FakeRGBDataset(sample_stride=2),
+    )
 
     def forbidden_cache_builder(*_args, **_kwargs):
         raise AssertionError("Baseline J must not inspect or build a Teacher cache dataset")

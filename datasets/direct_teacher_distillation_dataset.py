@@ -227,14 +227,23 @@ class FullOnlineTeacherDistillationDataset(Dataset):
         self.teacher_input_width = int(teacher_input_width)
         if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
             raise ValueError("Teacher input dimensions must be positive")
-        if (
-            int(rgb_dataset.clip_length),
-            int(rgb_dataset.sample_stride),
-            int(rgb_dataset.window_stride),
-        ) != (32, 1, 8):
+        clip_length = int(rgb_dataset.clip_length)
+        sample_stride = int(rgb_dataset.sample_stride)
+        window_stride = int(rgb_dataset.window_stride)
+        if clip_length != 32:
             raise ValueError(
-                "Baseline J requires ordinary 32-frame clips with sample_stride=1 "
-                "and the existing window_stride=8"
+                "Baseline J requires ordinary 32-frame clips; got clip_length={}"
+                .format(clip_length)
+            )
+        if sample_stride <= 0:
+            raise ValueError(
+                "Baseline J requires a positive sample_stride; got {}"
+                .format(sample_stride)
+            )
+        if window_stride != 8:
+            raise ValueError(
+                "Baseline J requires the existing window_stride=8; got {}"
+                .format(window_stride)
             )
         self.teacher_rgb_dataset = TeacherClipInputDataset(
             rgb_dataset,
@@ -266,11 +275,15 @@ class FullOnlineTeacherDistillationDataset(Dataset):
             absolute_ids.cpu(), expected_ids
         ):
             raise RuntimeError("Baseline J RGB frame IDs do not match clip metadata")
+        sample_stride = int(self.rgb_dataset.sample_stride)
         if any(
-            int(right) != int(left) + 1
+            int(right) != int(left) + sample_stride
             for left, right in zip(absolute_ids[:-1], absolute_ids[1:])
         ):
-            raise RuntimeError("Baseline J requires temporally ordered consecutive frame IDs")
+            raise RuntimeError(
+                "Baseline J frame IDs do not match configured sample_stride={}"
+                .format(sample_stride)
+            )
 
         teacher_images, teacher_paths = self.teacher_rgb_dataset.load_images(index)
         expected_teacher_shape = (
