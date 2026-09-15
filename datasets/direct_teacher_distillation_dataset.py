@@ -63,8 +63,11 @@ def _load_same_clip_teacher(
             cache["absolute_frame_ids"].tolist(), dtype=torch.long
         )
         student_ids = student_absolute_ids.detach().cpu().to(torch.long)
-        if tuple(student_ids.shape) != (16,) or tuple(teacher_ids.shape) != (16,):
-            raise RuntimeError("Student and teacher absolute IDs must both contain 16 frames")
+        temporal_length = int(student_ids.numel())
+        if student_ids.ndim != 1 or tuple(teacher_ids.shape) != (temporal_length,):
+            raise RuntimeError(
+                "Student and teacher absolute IDs must contain the same temporal length"
+            )
         if not torch.equal(student_ids, teacher_ids):
             raise RuntimeError(
                 "Student absolute_frame_ids {} != teacher absolute_frame_ids {} for {}".format(
@@ -81,11 +84,11 @@ def _load_same_clip_teacher(
                 )
             )
         expected_shapes = {
-            "depth": (16,) + cache_shape,
-            "confidence": (16,) + cache_shape,
-            "valid_mask": (16,) + cache_shape,
-            "intrinsics": (16, 3, 3),
-            "extrinsics": (16, 3, 4),
+            "depth": (temporal_length,) + cache_shape,
+            "confidence": (temporal_length,) + cache_shape,
+            "valid_mask": (temporal_length,) + cache_shape,
+            "intrinsics": (temporal_length, 3, 3),
+            "extrinsics": (temporal_length, 3, 4),
         }
         wrong = {
             key: tuple(cache[key].shape)
@@ -137,8 +140,8 @@ class DirectTeacherDistillationDataset(Dataset):
             if self.online_teacher_attention
             else None
         )
-        if int(rgb_dataset.clip_length) != 16 or int(rgb_dataset.sample_stride) != 1:
-            raise ValueError("Direct distillation requires consecutive 16-frame RGB clips")
+        if int(rgb_dataset.clip_length) < 2 or int(rgb_dataset.sample_stride) <= 0:
+            raise ValueError("Direct distillation requires at least two sampled RGB frames")
         if int(rgb_dataset.window_stride) not in (1, 8):
             raise ValueError("RGB candidates must use window_stride 1 or 8")
         self.rgb_indices: List[int] = []
@@ -178,8 +181,9 @@ class DirectTeacherDistillationDataset(Dataset):
         sample = self.rgb_dataset[rgb_index]
         metadata = clip_metadata(self.rgb_dataset, rgb_index)
         images = sample["images"]
-        if images.ndim != 4 or tuple(images.shape[:2]) != (16, 3):
-            raise RuntimeError("Student RGB must have shape [16,3,H,W]")
+        temporal_length = int(self.rgb_dataset.clip_length)
+        if images.ndim != 4 or tuple(images.shape[:2]) != (temporal_length, 3):
+            raise RuntimeError("Student RGB must have shape [T,3,H,W]")
         absolute_ids = sample["frame_indices"].to(torch.long)
         teacher = _load_same_clip_teacher(
             self.cache_paths[index],
@@ -190,7 +194,7 @@ class DirectTeacherDistillationDataset(Dataset):
         )
         highlight = sample.get(
             "highlight_masks",
-            torch.zeros(16, 1, *images.shape[-2:], dtype=torch.bool),
+            torch.zeros(temporal_length, 1, *images.shape[-2:], dtype=torch.bool),
         ).bool()
         clean = sample.get("inpainted_images", images.clamp(0.0, 1.0))
         result = {
@@ -204,13 +208,115 @@ class DirectTeacherDistillationDataset(Dataset):
         }
         if self.teacher_rgb_dataset is not None:
             teacher_images, _ = self.teacher_rgb_dataset.load_images(rgb_index)
-            if tuple(teacher_images.shape) != (16, 3, 1024, 1280):
+            if tuple(teacher_images.shape) != (temporal_length, 3, 1024, 1280):
                 raise RuntimeError(
-                    "Online VGGT-Omega RGB must have shape [16,3,1024,1280]; got {}"
+                    "Online VGGT-Omega RGB must have shape [T,3,1024,1280]; got {}"
                     .format(tuple(teacher_images.shape))
                 )
             result["teacher_images"] = teacher_images
         return result
+
+
+class FullOnlineTeacherDistillationDataset(Dataset):
+    """Load one ordinary RGB clip for both Student and a cache-free Teacher."""
+
+    def __init__(
+        self,
+        rgb_dataset: Any,
+        teacher_input_height: int,
+        teacher_input_width: int,
+    ) -> None:
+        self.rgb_dataset = rgb_dataset
+        self.teacher_input_height = int(teacher_input_height)
+        self.teacher_input_width = int(teacher_input_width)
+        if self.teacher_input_height <= 0 or self.teacher_input_width <= 0:
+            raise ValueError("Teacher input dimensions must be positive")
+        clip_length = int(rgb_dataset.clip_length)
+        sample_stride = int(rgb_dataset.sample_stride)
+        window_stride = int(rgb_dataset.window_stride)
+        if clip_length < 2:
+            raise ValueError("Full-online distillation requires at least two frames")
+        if sample_stride <= 0:
+            raise ValueError(
+                "Full-online distillation requires a positive sample_stride; got {}"
+                .format(sample_stride)
+            )
+        if window_stride <= 0:
+            raise ValueError("Full-online distillation requires a positive window_stride")
+        # Teacher RGB is independently decoded by the established cache-input
+        # dataset. The full-online B/C/D protocol validates its native
+        # 1024x1280 size before training starts.
+        self.teacher_rgb_dataset = TeacherClipInputDataset(rgb_dataset)
+        if not len(rgb_dataset):
+            raise RuntimeError("No complete full-online training clips were discovered")
+
+    def __len__(self) -> int:
+        return len(self.rgb_dataset)
+
+    def metadata(self, index: int) -> Dict[str, Any]:
+        return clip_metadata(self.rgb_dataset, index)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        sample = self.rgb_dataset[index]
+        metadata = self.metadata(index)
+        images = sample["images"]
+        temporal_length = int(self.rgb_dataset.clip_length)
+        if images.ndim != 4 or tuple(images.shape[:2]) != (temporal_length, 3):
+            raise RuntimeError(
+                "Full-online Student RGB must have shape [T,3,H,W]; got {}".format(
+                    tuple(images.shape)
+                )
+            )
+        absolute_ids = sample["frame_indices"].to(torch.long)
+        expected_ids = torch.tensor(metadata["frame_indices"], dtype=torch.long)
+        if tuple(absolute_ids.shape) != (temporal_length,) or not torch.equal(
+            absolute_ids.cpu(), expected_ids
+        ):
+            raise RuntimeError("Full-online RGB frame IDs do not match clip metadata")
+        sample_stride = int(self.rgb_dataset.sample_stride)
+        if any(
+            int(right) != int(left) + sample_stride
+            for left, right in zip(absolute_ids[:-1], absolute_ids[1:])
+        ):
+            raise RuntimeError(
+                "Full-online frame IDs do not match configured sample_stride={}"
+                .format(sample_stride)
+            )
+
+        teacher_images, teacher_paths = self.teacher_rgb_dataset.load_images(index)
+        expected_teacher_shape = (
+            temporal_length,
+            3,
+            self.teacher_input_height,
+            self.teacher_input_width,
+        )
+        if tuple(teacher_images.shape) != expected_teacher_shape:
+            raise RuntimeError(
+                "Full-online Teacher RGB must have shape {}; got {}".format(
+                    expected_teacher_shape, tuple(teacher_images.shape)
+                )
+            )
+        expected_teacher_paths = [str(value) for value in metadata["teacher_frame_paths"]]
+        if teacher_paths != expected_teacher_paths:
+            raise RuntimeError("Full-online Teacher frame paths do not match Student clip metadata")
+
+        highlight = sample.get(
+            "highlight_masks",
+            torch.zeros(temporal_length, 1, *images.shape[-2:], dtype=torch.bool),
+        ).bool()
+        clean = sample.get("inpainted_images", images.clamp(0.0, 1.0))
+        return {
+            "images": images,
+            "clean_images": clean,
+            "highlight_masks": highlight,
+            "absolute_frame_ids": absolute_ids,
+            "teacher_absolute_frame_ids": absolute_ids.clone(),
+            "clip_start": sample["clip_start"].to(torch.long),
+            "sequence_id": str(metadata["sequence_id"]),
+            "teacher_sequence_id": str(metadata["sequence_id"]),
+            "teacher_images": teacher_images,
+            "teacher_frame_paths": teacher_paths,
+        }
 
 
 def direct_teacher_distillation_collate(
@@ -218,12 +324,6 @@ def direct_teacher_distillation_collate(
 ) -> Dict[str, Any]:
     if not samples:
         raise ValueError("Cannot collate an empty direct-distillation batch")
-    teacher: Dict[str, Any] = {
-        key: torch.stack([sample["teacher"][key] for sample in samples])
-        for key in TEACHER_TENSOR_KEYS
-    }
-    teacher["sequence_id"] = [sample["teacher"]["sequence_id"] for sample in samples]
-    teacher["cache_path"] = [sample["teacher"]["cache_path"] for sample in samples]
     batch = {
         "images": torch.stack([sample["images"] for sample in samples]),
         "clean_images": torch.stack([sample["clean_images"] for sample in samples]),
@@ -231,8 +331,18 @@ def direct_teacher_distillation_collate(
         "absolute_frame_ids": torch.stack([sample["absolute_frame_ids"] for sample in samples]),
         "clip_start": torch.stack([sample["clip_start"] for sample in samples]),
         "sequence_id": [sample["sequence_id"] for sample in samples],
-        "teacher": teacher,
     }
+    cached_flags = ["teacher" in sample for sample in samples]
+    if any(cached_flags) and not all(cached_flags):
+        raise RuntimeError("Cached Teacher availability differs within a batch")
+    if all(cached_flags):
+        teacher: Dict[str, Any] = {
+            key: torch.stack([sample["teacher"][key] for sample in samples])
+            for key in TEACHER_TENSOR_KEYS
+        }
+        teacher["sequence_id"] = [sample["teacher"]["sequence_id"] for sample in samples]
+        teacher["cache_path"] = [sample["teacher"]["cache_path"] for sample in samples]
+        batch["teacher"] = teacher
     online_flags = ["teacher_images" in sample for sample in samples]
     if any(online_flags) and not all(online_flags):
         raise RuntimeError("Online Teacher RGB availability differs within a batch")
@@ -240,6 +350,14 @@ def direct_teacher_distillation_collate(
         batch["teacher_images"] = torch.stack(
             [sample["teacher_images"] for sample in samples]
         )
+        batch["teacher_absolute_frame_ids"] = torch.stack(
+            [sample.get("teacher_absolute_frame_ids", sample["absolute_frame_ids"])
+             for sample in samples]
+        )
+        batch["teacher_sequence_id"] = [
+            sample.get("teacher_sequence_id", sample["sequence_id"])
+            for sample in samples
+        ]
     return batch
 
 
@@ -270,6 +388,7 @@ def build_direct_teacher_distillation_dataloader(
 
 __all__ = [
     "DirectTeacherDistillationDataset",
+    "FullOnlineTeacherDistillationDataset",
     "build_direct_teacher_distillation_dataloader",
     "direct_teacher_distillation_collate",
 ]
