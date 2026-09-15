@@ -1,4 +1,4 @@
-"""Frozen base VGGT-Omega loading for offline teacher-cache inference."""
+"""Frozen VGGT-Omega loading for cache generation or online supervision."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _checkpoint_state(path: Path) -> Dict[str, torch.Tensor]:
 
 
 class VGGTOmegaTeacher(nn.Module):
-    """Frozen pretrained teacher for offline labels or online attention Q/K."""
+    """Frozen pretrained teacher for offline labels or one-pass online outputs."""
 
     def __init__(
         self,
@@ -44,6 +44,7 @@ class VGGTOmegaTeacher(nn.Module):
         self.model = model
         self.attention_capture = attention_capture
         self.attention_only = bool(attention_only)
+        self.prediction_forward_count = 0
 
     @classmethod
     def from_config(
@@ -97,6 +98,7 @@ class VGGTOmegaTeacher(nn.Module):
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         if self.attention_only:
             raise RuntimeError("Attention-only Teacher cannot run prediction heads")
+        self.prediction_forward_count += 1
         if self.attention_capture is None:
             return self.model(images)
         self.attention_capture.begin(images)

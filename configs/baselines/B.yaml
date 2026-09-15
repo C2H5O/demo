@@ -4,6 +4,19 @@ experiment:
   baseline_id: B
   training_required: true
   implementation_status: ready_for_server_dry_run
+dataset:
+  clip_length: 32
+  sample_stride: 2
+teacher:
+  mode: full_online
+  use_cache: false
+  raw_cache_root: null
+  cache_checkpoint_identity: null
+  frozen: true
+  freeze_backbone: true
+  freeze_heads: true
+  input_height: 1024
+  input_width: 1280
 attention_distill:
   enabled: false
   weight: 0.0
@@ -12,7 +25,8 @@ loss:
   highlight_cone_full_angle_degrees: 10.0
   highlight_softness: 0.0005
 training:
-  output_dir: ./outputs/baseline_B
+  epochs: 3
+  output_dir: ./outputs/baseline_B_online32_s2_3ep
   resume: null
 vda_evaluation:
   checkpoint: ./outputs/baseline_B/last.pt
