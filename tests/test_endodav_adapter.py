@@ -7,6 +7,8 @@ from torch import nn
 
 from endodaveval.endodav import (
     ModelForwardTimer,
+    _checkpoint_uses_temporal_lora,
+    _weights_for_model,
     disp_to_depth,
     infer_official_full_video,
     official_constructor_kwargs,
@@ -34,6 +36,39 @@ def test_official_constructor_contract_is_fixed(tmp_path: Path) -> None:
     assert kwargs["inv_sigmoid"] is False
     assert kwargs["temporal_lora"] is False
     assert kwargs["out_sigmoid"] is False
+
+
+def test_checkpoint_temporal_lora_and_metadata_contract(tmp_path: Path) -> None:
+    temporal_key = (
+        "head.motion_modules.0.temporal_transformer."
+        "transformer_blocks.0.ff.net.2.lora_A"
+    )
+    state = {
+        "height": 256,
+        "width": 320,
+        "use_stereo": False,
+        "model.weight": torch.ones(1),
+        temporal_key: torch.ones(1),
+    }
+
+    assert _checkpoint_uses_temporal_lora(state) is True
+    kwargs = official_constructor_kwargs(tmp_path, temporal_lora=True)
+    assert kwargs["temporal_lora"] is True
+
+    weights, unexpected = _weights_for_model(
+        state, ["model.weight", temporal_key]
+    )
+    assert set(weights) == {"model.weight", temporal_key}
+    assert unexpected == []
+
+
+def test_unknown_checkpoint_tensor_still_fails_strict_contract() -> None:
+    weights, unexpected = _weights_for_model(
+        {"model.weight": torch.ones(1), "unknown.weight": torch.ones(1)},
+        ["model.weight"],
+    )
+    assert set(weights) == {"model.weight"}
+    assert unexpected == ["unknown.weight"]
 
 
 def test_official_disp_to_depth_then_reciprocal_has_expected_semantics() -> None:

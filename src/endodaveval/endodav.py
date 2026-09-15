@@ -19,14 +19,18 @@ from endodaveval.config import INTERNAL_MODEL_RESOLUTION_HW
 OFFICIAL_REPOSITORY = "https://github.com/Zanue/EndoDAV"
 AUDITED_OFFICIAL_COMMIT = "8a9681b43d9b3b1600ba5f389e1ef69120af37cf"
 OFFICIAL_DEPTH_RANGE = (0.1, 150.0)
+OFFICIAL_CHECKPOINT_METADATA_KEYS = frozenset({"height", "width", "use_stereo"})
+TEMPORAL_LORA_KEY_PREFIX = "head.motion_modules."
 
 
 class AdapterError(RuntimeError):
     pass
 
 
-def official_constructor_kwargs(pretrained_path: Path) -> Dict[str, Any]:
-    """Exact paper-evaluation model settings, including upstream false defaults."""
+def official_constructor_kwargs(
+    pretrained_path: Path, *, temporal_lora: bool = False
+) -> Dict[str, Any]:
+    """Exact paper-evaluation model settings for the selected checkpoint."""
     return {
         "encoder": "vits",
         "features": 64,
@@ -38,7 +42,7 @@ def official_constructor_kwargs(pretrained_path: Path) -> Dict[str, Any]:
         "residual_block_indexes": [],
         "include_cls_token": True,
         "inv_sigmoid": False,
-        "temporal_lora": False,
+        "temporal_lora": bool(temporal_lora),
         "disable_conv_head": True,
         "out_sigmoid": False,
     }
@@ -80,6 +84,32 @@ def _state_dict(value: Any) -> Mapping[str, torch.Tensor]:
     return value
 
 
+def _checkpoint_uses_temporal_lora(state: Mapping[str, Any]) -> bool:
+    """Detect the optional temporal-LoRA modules encoded by official weights."""
+    return any(
+        key.startswith(TEMPORAL_LORA_KEY_PREFIX)
+        and (key.endswith(".lora_A") or key.endswith(".lora_B"))
+        for key in state
+    )
+
+
+def _weights_for_model(
+    state: Mapping[str, Any], model_keys: Sequence[str]
+) -> Tuple[Dict[str, torch.Tensor], Sequence[str]]:
+    """Match official weights while ignoring only documented scalar metadata."""
+    expected = set(model_keys)
+    weights: Dict[str, torch.Tensor] = {}
+    unexpected = []
+    for key, value in state.items():
+        if key in OFFICIAL_CHECKPOINT_METADATA_KEYS:
+            continue
+        if key not in expected or not isinstance(value, torch.Tensor):
+            unexpected.append(key)
+            continue
+        weights[key] = value
+    return weights, unexpected
+
+
 def load_official_model(
     repository: Path,
     checkpoint: Path,
@@ -95,6 +125,8 @@ def load_official_model(
         raise AdapterError("EndoDAV depth_model.pth is missing: {}".format(checkpoint))
     if not base_checkpoint.is_file():
         raise AdapterError("VDA-S checkpoint is missing: {}".format(base_checkpoint))
+    state = _state_dict(torch.load(str(checkpoint), map_location="cpu"))
+    temporal_lora = _checkpoint_uses_temporal_lora(state)
     with _repository_import_path(repository):
         module = importlib.import_module("models.endodav")
     module_path = Path(str(module.__file__)).resolve()
@@ -107,11 +139,15 @@ def load_official_model(
     constructor = getattr(module, "endodav", None)
     if constructor is None:
         raise AdapterError("Official models.endodav.endodav is unavailable")
-    model = constructor(**official_constructor_kwargs(pretrained_path))
-    state = _state_dict(torch.load(str(checkpoint), map_location="cpu"))
-    incompatible = model.load_state_dict(state, strict=False)
+    model = constructor(
+        **official_constructor_kwargs(
+            pretrained_path, temporal_lora=temporal_lora
+        )
+    )
+    weights, unexpected = _weights_for_model(state, model.state_dict().keys())
+    incompatible = model.load_state_dict(weights, strict=False)
     missing = list(incompatible.missing_keys)
-    unexpected = list(incompatible.unexpected_keys)
+    unexpected = list(unexpected) + list(incompatible.unexpected_keys)
     if missing or unexpected:
         raise AdapterError(
             "EndoDAV checkpoint mismatch; missing keys: {}; unexpected keys: {}".format(

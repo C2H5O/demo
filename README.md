@@ -16,10 +16,13 @@ adapter never adds an external VDA window.  Its network resolution remains
 
 The model configuration is locked to `vits`, `ssb`, rank 4,
 `image_shape=(224, 280)`, no residual blocks, class token enabled, convolution
-head disabled, and the official false defaults for inverse sigmoid, temporal
-LoRA and output sigmoid.  The VDA-S base checkpoint is loaded by the official
-constructor and `depth_model.pth` is checked for missing and unexpected keys.
-No official source file is copied or modified.
+head disabled, and the official false defaults for inverse sigmoid and output
+sigmoid.  Temporal LoRA is enabled exactly when the checkpoint contains the
+official `head.motion_modules.*.lora_A/lora_B` weights.  The VDA-S base
+checkpoint is loaded by the official constructor.  The documented official
+checkpoint metadata (`height`, `width`, and `use_stereo`) is ignored like the
+upstream evaluator, while missing model weights or any other unexpected tensor
+keys still fail loudly.  No official source file is copied or modified.
 
 For comparison, official normalized disparity is converted with the upstream
 `disp_to_depth(..., 0.1, 150.0)` formula.  The resulting depth is converted
