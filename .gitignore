@@ -9,5 +9,3 @@ outputs/
 predictions/
 *.pth
 *.pt
-
-\n

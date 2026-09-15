@@ -143,5 +143,3 @@ def matched_frame_ids(record: SequenceRecord, require_all: bool = True) -> Tuple
     if not matched:
         raise DiscoveryError("No matched RGB/GT frame IDs for {}".format(record.sequence_id))
     return matched
-
-\n

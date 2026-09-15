@@ -18,5 +18,3 @@ def main() -> None:
     args = parser().parse_args()
     result = run_pipeline(args.config, args.stage, args.limit_sequences)
     print("completed {} for {} sequence(s)".format(args.stage, result["sequence_count"]))
-
-\n

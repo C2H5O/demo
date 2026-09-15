@@ -63,5 +63,3 @@ def test_empty_projection_is_zero_like_vda() -> None:
         torch.ones_like(depth, dtype=torch.bool),
     )
     assert error == 0
-
-\n

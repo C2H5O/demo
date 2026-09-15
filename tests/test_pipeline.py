@@ -113,5 +113,3 @@ def test_config_rejects_non_reference_evaluation_grid(tmp_path: Path) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(ConfigError, match="256x320"):
         load_config(path)
-
-\n

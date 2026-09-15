@@ -77,5 +77,3 @@ def test_repository_validation_is_read_only(tmp_path: Path) -> None:
     validate_official_repository(tmp_path)
     after = {path: path.read_bytes() for path in files}
     assert after == before
-
-\n

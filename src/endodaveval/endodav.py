@@ -228,5 +228,3 @@ def infer_official_full_video(model, frames: np.ndarray, device: str):
             "disk decode, evaluation resize, GT, metrics, TAE and JSON export"
         ),
     }
-
-\n

@@ -47,5 +47,3 @@ def test_sequence_global_float64_scale_shift_and_spatial_metrics() -> None:
     assert result["metrics"]["delta1_acc"] == pytest.approx(1.0)
     assert set(aligned) == {0, 1}
     assert result["evaluation_shape_hxw"] == [256, 320]
-
-\n

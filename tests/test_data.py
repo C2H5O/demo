@@ -23,5 +23,3 @@ def test_discovers_datasets_8_9_and_matches_numeric_frame_ids(tmp_path: Path) ->
     assert [record.dataset_id for record in records] == [8, 9]
     assert all(matched_frame_ids(record) == (2, 10) for record in records)
     assert all(record.ground_truth_directory.name == "depth" for record in records)
-
-\n
