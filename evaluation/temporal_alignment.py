@@ -179,7 +179,11 @@ def evaluate_tae(sequence, spool, spatial_result, eval_config):
     """Evaluate one sequence with VDA's fixed bidirectional denominator."""
     cfg = eval_config.get("tae", {})
     if not cfg.get("enabled", True):
-        return _metadata(status="disabled", tae=None)
+        return _metadata(
+            status="disabled",
+            tae=None,
+            evaluation_resolution_hw=[spool.height, spool.width],
+        )
 
     directory, cameras = camera_index(sequence, eval_config)
     paths = sequence["frame_paths"]
@@ -238,6 +242,7 @@ def evaluate_tae(sequence, spool, spatial_result, eval_config):
             evaluated_pair_count=0,
             skipped_frames=skipped,
             camera_directory=str(directory),
+            evaluation_resolution_hw=[spool.height, spool.width],
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -272,6 +277,7 @@ def evaluate_tae(sequence, spool, spatial_result, eval_config):
         evaluated_pair_count=pair_count,
         skipped_frames=skipped,
         camera_directory=str(directory),
+        evaluation_resolution_hw=[spool.height, spool.width],
         camera_source="SCARED frame_data KL and camera-pose",
         scared_raw_pose_convention="world_to_camera",
         vda_pose_convention="camera_to_world",

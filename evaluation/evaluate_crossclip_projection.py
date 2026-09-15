@@ -31,6 +31,31 @@ TRAINED_STUDENT_SOURCE = "trained_student_checkpoint"
 OFFICIAL_DA3_SMALL_SOURCE = "official_da3_small"
 
 
+def _evaluation_resolution(
+    config: Dict[str, Any], eval_config: Dict[str, Any]
+) -> Tuple[int, int, int, int]:
+    """Return model-input and evaluation grids without conflating them."""
+    model_input_height = int(config["dataset"]["image_height"])
+    model_input_width = int(config["dataset"]["image_width"])
+    evaluation_height = int(
+        eval_config.get("evaluation_height", model_input_height)
+    )
+    evaluation_width = int(eval_config.get("evaluation_width", model_input_width))
+    if min(
+        model_input_height,
+        model_input_width,
+        evaluation_height,
+        evaluation_width,
+    ) <= 0:
+        raise ValueError("Model-input and evaluation resolutions must be positive")
+    return (
+        model_input_height,
+        model_input_width,
+        evaluation_height,
+        evaluation_width,
+    )
+
+
 def select_protocol(config: Dict[str, Any], override: Optional[str] = None) -> str:
     value = override or str(config.get("evaluation", {}).get("protocol", "vda"))
     protocol = value.strip().lower()
@@ -221,15 +246,21 @@ def evaluate_vda(
                     raise FileNotFoundError("TAE dataset cameras missing in {}: {}".format(directory, missing[:20]))
     model = _evaluation_model(checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
-    height = int(config["dataset"]["image_height"])
-    width = int(config["dataset"]["image_width"])
+    (
+        model_input_height,
+        model_input_width,
+        evaluation_height,
+        evaluation_width,
+    ) = _evaluation_resolution(config, eval_config)
     remaining = limit_clips
     sequence_results = []
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
         frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
-        spool = vda_core._SequencePredictionSpool(output.parent, len(frames), height, width)
+        spool = vda_core._SequencePredictionSpool(
+            output.parent, len(frames), evaluation_height, evaluation_width
+        )
         try:
             def emit(start, disparities, intrinsics):
                 spool.add(range(start, start + len(disparities)), disparities)
@@ -246,6 +277,13 @@ def evaluate_vda(
             item["temporal"] = evaluate_tae(temporal_sequence, spool, item, eval_config)
             item["metrics"]["tae"] = item["temporal"]["tae"]
             item["inference"] = timing
+            native_shapes = sorted(spool.native_prediction_resolutions_hw)
+            item["native_prediction_resolution_hw"] = (
+                list(native_shapes[0]) if len(native_shapes) == 1 else None
+            )
+            item["native_prediction_resolutions_hw"] = [
+                list(shape) for shape in native_shapes
+            ]
             sequence_results.append(item)
         finally:
             spool.close()
@@ -284,10 +322,26 @@ def evaluate_vda(
         "timing_scope": sequence_results[0]["inference"]["timing_scope"],
         "warmup_excluded": False, "amp": amp, "device": str(device),
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
-        "torch_version": torch.__version__, "input_resolution_hw": [height, width],
+        "torch_version": torch.__version__,
+        "input_resolution_hw": [model_input_height, model_input_width],
+        "model_input_resolution_hw": [model_input_height, model_input_width],
+        "evaluation_resolution_hw": [evaluation_height, evaluation_width],
         "window_limit": limit_clips,
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }
+    native_shapes = sorted(
+        {
+            tuple(shape)
+            for item in sequence_results
+            for shape in item["native_prediction_resolutions_hw"]
+        }
+    )
+    result["native_prediction_resolution_hw"] = (
+        list(native_shapes[0]) if len(native_shapes) == 1 else None
+    )
+    result["native_prediction_resolutions_hw"] = [
+        list(shape) for shape in native_shapes
+    ]
     output.write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
     print("wrote full-sequence VDA + TAE evaluation: {}".format(output))
     return result

@@ -20,4 +20,6 @@ vda_evaluation:
 visualization:
   output_dir: ./outputs/baseline_A/visualization
 da3_small_baseline_vda_evaluation:
+  evaluation_height: 256
+  evaluation_width: 320
   output: ./outputs/baseline_A/evaluation_test.json
