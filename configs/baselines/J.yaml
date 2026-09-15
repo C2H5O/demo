@@ -44,6 +44,8 @@ training:
 
 vda_evaluation:
   checkpoint: ./outputs/baseline_J/last.pt
+  evaluation_height: 256
+  evaluation_width: 320
   output: ./outputs/baseline_J/evaluation_test.json
 
 visualization:

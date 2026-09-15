@@ -148,12 +148,22 @@ class _SequencePredictionSpool:
             shape=(frame_count, height, width),
         )
         self.counts = np.zeros(frame_count, dtype=np.uint16)
+        self.native_prediction_resolutions_hw = set()
 
     def add(self, frame_indices: Sequence[int], disparities: np.ndarray) -> None:
         cv2 = _opencv()
+        disparities = np.asarray(disparities)
+        if disparities.ndim != 3:
+            raise ValueError(
+                "Expected predicted disparities with shape [frames, height, width], "
+                "found {}".format(disparities.shape)
+            )
+        self.native_prediction_resolutions_hw.add(tuple(disparities.shape[-2:]))
         for offset, frame_index in enumerate(frame_indices):
             resized = cv2.resize(
-                disparities[offset], (self.width, self.height)
+                disparities[offset],
+                (self.width, self.height),
+                interpolation=cv2.INTER_LINEAR,
             ).astype(np.float32, copy=False)
             self.sums[frame_index] += resized
             self.counts[frame_index] += 1
