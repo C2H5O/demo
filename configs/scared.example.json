@@ -1,0 +1,32 @@
+{
+  "dataset": {
+    "root": "/path/to/scared",
+    "dataset_ids": [8, 9],
+    "frame_sources": ["left", "left_finalpass", "rgb_data"],
+    "ground_truth_directory": "data/depth",
+    "ground_truth_scale": 0.001,
+    "ground_truth_channel": 0
+  },
+  "endodav": {
+    "repository": "/path/to/EndoDAV",
+    "checkpoint": "/path/to/depth_model.pth",
+    "pretrained_path": "/path/to/pretrained_model",
+    "device": "cuda:0",
+    "cuda_visible_devices": "0"
+  },
+  "evaluation": {
+    "height": 256,
+    "width": 320,
+    "min_depth": 0.001,
+    "max_depth": 100.0,
+    "require_all_frames": true,
+    "tae": {
+      "enabled": true,
+      "require_all_pairs": true,
+      "frame_data_relative_directory": "data/frame_data",
+      "pose_translation_scale": 0.001
+    },
+    "result_file": "evaluation_vda.json"
+  },
+  "output_root": "./outputs/scared_endodav_vda"
+}

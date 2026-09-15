@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "endodaveval"
+version = "0.1.0"
+description = "Official EndoDAV inference with unified SCARED VDA spatial and TAE evaluation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  "numpy>=1.23,<2",
+  "opencv-python>=4.7,<5",
+  "torch>=2.0",
+]
+
+[project.scripts]
+endodaveval = "endodaveval.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+\n

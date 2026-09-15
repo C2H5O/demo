@@ -1,0 +1,5 @@
+numpy>=1.23,<2
+opencv-python>=4.7,<5
+torch>=2.0
+
+\n

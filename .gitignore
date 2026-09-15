@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+configs/*.local.json
+external/
+outputs/
+predictions/
+*.pth
+*.pt
+
+\n
