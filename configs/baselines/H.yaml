@@ -15,13 +15,13 @@ training:
   output_dir: ./outputs/baseline_H
   resume: null
 vda_evaluation:
-  checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt
+  checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/baseline_C/ours.pt
   output: ./outputs/baseline_H/evaluation_test.json
 visualization:
   output_dir: ./outputs/baseline_H/visualization
 inference:
   acceleration: role_layer_spatial_kv
-  source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt
+  source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/baseline_C/ours.pt
 kv_sampling:
   enabled: true
   method: role_layer_spatial_kv

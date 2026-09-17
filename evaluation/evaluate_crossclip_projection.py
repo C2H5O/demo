@@ -24,7 +24,10 @@ from inference.kv_sampling import resolve_kv_sampling
 from inference.student_video import WINDOW, infer_student_video, sequence_frames
 
 from models.student.da3_small_student import DA3SmallStudent
-from utils.checkpoint import require_student_cache_protocol
+from utils.checkpoint import (
+    require_merged_student_checkpoint,
+    require_student_cache_protocol,
+)
 from utils.config import ensure_dir, load_config
 
 
@@ -56,6 +59,7 @@ def _load_model(
     if not isinstance(checkpoint, dict):
         raise ValueError("Cross-clip checkpoint must contain model and config")
     require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
+    require_merged_student_checkpoint(checkpoint)
     model_config = checkpoint.get("config", {}).get("student", config["student"])
     state = checkpoint.get("model")
     if not isinstance(state, dict):
