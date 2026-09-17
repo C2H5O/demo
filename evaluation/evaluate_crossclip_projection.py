@@ -29,7 +29,10 @@ from inference.vggt_omega_video import (
 
 from models.student.da3_small_student import DA3SmallStudent
 from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
-from utils.checkpoint import require_student_cache_protocol
+from utils.checkpoint import (
+    require_merged_student_checkpoint,
+    require_student_cache_protocol,
+)
 from utils.config import ensure_dir, load_config
 
 
@@ -62,6 +65,7 @@ def _load_model(
     if not isinstance(checkpoint, dict):
         raise ValueError("Cross-clip checkpoint must contain model and config")
     require_student_cache_protocol(checkpoint, CROSSCLIP_CACHE_PROTOCOL)
+    require_merged_student_checkpoint(checkpoint)
     model_config = checkpoint.get("config", {}).get("student", config["student"])
     state = checkpoint.get("model")
     if not isinstance(state, dict):
