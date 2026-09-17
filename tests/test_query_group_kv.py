@@ -188,6 +188,33 @@ def test_standard_groups_use_one_batched_sdpa_and_restore_token_order() -> None:
     torch.testing.assert_close(actual, oracle)
 
 
+def test_restore_uses_sdpa_output_dtype_under_autocast() -> None:
+    query = torch.arange(8, dtype=torch.float32).reshape(1, 1, 4, 2)
+    key = query.clone()
+    value = query.clone()
+    query_indices = [torch.tensor([[0, 1]]), torch.tensor([[2, 3]])]
+    provider_indices = [torch.tensor([[0, 2]]), torch.tensor([[1, 3]])]
+
+    def autocast_like_kernel(q, k, v, **kwargs):
+        return q.to(torch.bfloat16)
+
+    actual, calls = grouped_scaled_dot_product_attention(
+        autocast_like_kernel,
+        query,
+        key,
+        value,
+        query_indices,
+        provider_indices,
+        batched_sdpa=True,
+    )
+
+    assert actual.dtype == torch.bfloat16
+    torch.testing.assert_close(actual, query.to(torch.bfloat16))
+    assert calls == [
+        {"group_count": 2, "query_tokens_per_group": 2, "kv_tokens_per_group": 2}
+    ]
+
+
 @pytest.mark.parametrize("strategy", ("first", "middle", "saddle_balanced"))
 def test_real_da3_global_layers_use_qg_full_spatial_batched_sdpa(strategy) -> None:
     model, _ = tiny_da3(strategy, depth=12)

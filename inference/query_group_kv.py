@@ -181,7 +181,10 @@ def grouped_scaled_dot_product_attention(
         else:
             batches.extend([[group] for group in group_ids])
 
-    output = torch.empty_like(query)
+    # Under CUDA autocast SDPA may return bf16/fp16 even when its Q tensor is
+    # fp32. Restore into the kernel's output dtype, matching native SDPA, rather
+    # than assuming that Q and the attended result share a dtype.
+    output = None
     calls = []
     batch, heads, _, channels = query.shape
     for group_ids in batches:
@@ -199,6 +202,12 @@ def grouped_scaled_dot_product_attention(
             grouped_v.reshape(batch * group_count, heads, kv_tokens, channels),
             **kwargs,
         ).reshape(batch, group_count, heads, query_tokens, channels)
+        if output is None:
+            output = torch.empty(
+                query.shape, dtype=attended.dtype, device=attended.device
+            )
+        elif output.dtype != attended.dtype:
+            raise RuntimeError("Grouped SDPA shape classes returned different dtypes")
         flat_indices = q_index.flatten(1)
         flat_values = attended.permute(0, 2, 1, 3, 4).reshape(
             batch, heads, group_count * query_tokens, channels
@@ -217,4 +226,6 @@ def grouped_scaled_dot_product_attention(
                 "kv_tokens_per_group": kv_tokens,
             }
         )
+    if output is None:
+        raise RuntimeError("Query grouping produced no SDPA calls")
     return output, calls
