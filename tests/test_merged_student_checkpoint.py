@@ -11,6 +11,7 @@ from utils.checkpoint import (
 )
 from utils.config import load_config
 import utils.merge_student_checkpoint as merge_checkpoint
+import evaluation.evaluate_crossclip_projection as crossclip_evaluation
 
 
 def _checkpoint(key: str = "network.backbone.weight") -> dict:
@@ -68,6 +69,55 @@ def test_selected_merged_checkpoint_is_used_without_remerging(
         merge_checkpoint.ensure_merged_student_checkpoint(selected, {})
         == selected.resolve()
     )
+
+
+def test_evaluator_routes_selected_training_checkpoint_through_auto_merge(
+    tmp_path, monkeypatch
+) -> None:
+    selected = tmp_path / "last.pt"
+    merged = tmp_path / "ours.pt"
+    output = tmp_path / "evaluation.json"
+    config = {
+        "device": "cpu",
+        "inference": {"acceleration": "none"},
+        "student": {"checkpoint": "base.safetensors"},
+        "vda_evaluation": {
+            "checkpoint": str(selected),
+            "output": str(output),
+            "split": "test",
+            "tae": {"enabled": False},
+        },
+    }
+    monkeypatch.setattr(crossclip_evaluation, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        crossclip_evaluation,
+        "_dataset_and_ground_truth",
+        lambda *args: (
+            object(),
+            {"sequence": {"dataset_id": 1, "frame_paths": []}},
+            {"sequence": object()},
+            [],
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        crossclip_evaluation,
+        "ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded_config: calls.append((checkpoint, loaded_config))
+        or merged,
+    )
+
+    class ModelLoadReached(RuntimeError):
+        pass
+
+    def stop_at_model_load(checkpoint, loaded_config, device, model_source):
+        assert checkpoint == merged
+        raise ModelLoadReached
+
+    monkeypatch.setattr(crossclip_evaluation, "_evaluation_model", stop_at_model_load)
+    with pytest.raises(ModelLoadReached):
+        crossclip_evaluation.evaluate_vda(tmp_path / "config.yaml")
+    assert calls == [(selected, config)]
 
 
 @pytest.mark.parametrize("cached_source_sha", ("source-sha", "stale-sha"))
