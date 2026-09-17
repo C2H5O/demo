@@ -28,7 +28,7 @@ def _find_project_root(script_path: Path) -> Path:
         searched.append(candidate)
         if (
             (candidate / "models" / "student" / "da3_small_student.py").is_file()
-            and (candidate / "configs" / "baselines" / "J.yaml").is_file()
+            and (candidate / "utils" / "checkpoint.py").is_file()
         ):
             return candidate
     raise RuntimeError(
