@@ -19,7 +19,7 @@ training:
   output_dir: ./outputs/baseline_E
   resume: null
 vda_evaluation:
-  checkpoint: ./outputs/baseline_E/last.pt
+  checkpoint: ./outputs/baseline_E/ours.pt
   output: ./outputs/baseline_E/evaluation_test.json
 visualization:
   output_dir: ./outputs/baseline_E/visualization
