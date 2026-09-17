@@ -34,6 +34,7 @@ from utils.checkpoint import (
     require_student_cache_protocol,
 )
 from utils.config import ensure_dir, load_config
+from utils.merge_student_checkpoint import ensure_merged_student_checkpoint
 
 
 TRAINED_STUDENT_SOURCE = "trained_student_checkpoint"
@@ -272,7 +273,11 @@ def evaluate_vda(
                            if extract_frame_id(p) not in cameras]
                 if missing:
                     raise FileNotFoundError("TAE dataset cameras missing in {}: {}".format(directory, missing[:20]))
-    model = _evaluation_model(checkpoint, config, device, model_source)
+    inference_checkpoint = checkpoint
+    if model_source == TRAINED_STUDENT_SOURCE:
+        assert checkpoint is not None
+        inference_checkpoint = ensure_merged_student_checkpoint(checkpoint, config)
+    model = _evaluation_model(inference_checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
     (
         model_input_height,
@@ -362,6 +367,11 @@ def evaluate_vda(
         **VDA_TAE_METADATA,
         "config": str(config_path), "model_source": model_source,
         "checkpoint": str(checkpoint) if checkpoint is not None else str(config["student"]["checkpoint"]),
+        "inference_checkpoint": (
+            str(inference_checkpoint)
+            if inference_checkpoint is not None
+            else str(config["student"]["checkpoint"])
+        ),
         "split": split, "metrics": metrics, "metric_aggregation": "macro mean over evaluated sequences",
         "sequence_count": len(sequence_results), "expected_sequence_count": len(sequences),
         "tae_sequence_count": len(temporal),
