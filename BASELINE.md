@@ -1,7 +1,7 @@
 # Baseline H = QG-K20
 
 Baseline H is a training-free Query-Grouped K/V inference experiment using the
-same final Student weights as Baseline J. It does not use highlight detection,
+selected Baseline-J epoch-15 Student weights. It does not use highlight detection,
 content descriptors, Teacher inference, spatial token pruning, or TAE.
 
 ```text
@@ -87,10 +87,10 @@ input window, or K too small for a group's mandatory unique frames are rejected.
 
 ## Weights, metrics, and timing
 
-H selects Baseline J's final immutable training checkpoint:
+H selects the immutable Baseline-J epoch-15 training checkpoint:
 
 ```text
-/public/home/2024141520249/Documents/Projects/vggtoda3/outputs/baseline_J/last.pt
+/public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
 ```
 
 The shared evaluator reuses its matching sibling `ours.pt` or performs the

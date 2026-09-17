@@ -60,7 +60,7 @@
     "validation_status": "runtime_pending",
     "source_baseline": "J",
     "source_weights_branch": "codex/baseline-J",
-    "source_weights_project": "vggtoda3",
+    "source_weights_project": "vggtoda3-baseline-J",
     "inference_algorithm": "query_group_kv_group8_k20_temporal_uniform_full_spatial_batched_sdpa"
   }
 ]

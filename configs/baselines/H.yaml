@@ -4,6 +4,7 @@ experiment:
   name: baseline_H_QG_K20
   baseline_id: H
   source_weights_branch: codex/baseline-J
+  source_weights_project: vggtoda3-baseline-J
   training_required: false
   implementation_status: implemented_runtime_validation_pending
 
@@ -12,9 +13,9 @@ training:
   resume: null
 
 vda_evaluation:
-  # Same final Student as Baseline J. The evaluator reuses a matching sibling
+  # Selected Baseline-J epoch-15 Student. The evaluator reuses a matching sibling
   # ours.pt or auto-merges this immutable training checkpoint when needed.
-  checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/baseline_J/last.pt
+  checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
   # Match the existing Baseline-J Dense comparison grid without changing the
   # Student's 448x560 model input or its native prediction resolution.
   evaluation_height: 256
@@ -28,7 +29,7 @@ visualization:
 
 inference:
   acceleration: query_group_kv
-  source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3/outputs/baseline_J/last.pt
+  source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
 
 kv_sampling:
   enabled: true
