@@ -36,6 +36,19 @@ TRAINED_STUDENT_SOURCE = "trained_student_checkpoint"
 OFFICIAL_DA3_SMALL_SOURCE = "official_da3_small"
 
 
+def _evaluation_resolution(
+    config: Dict[str, Any], eval_config: Dict[str, Any]
+) -> Tuple[int, int, int, int]:
+    """Keep model-input and metric grids explicit and independent."""
+    model_height = int(config["dataset"]["image_height"])
+    model_width = int(config["dataset"]["image_width"])
+    evaluation_height = int(eval_config.get("evaluation_height", model_height))
+    evaluation_width = int(eval_config.get("evaluation_width", model_width))
+    if min(model_height, model_width, evaluation_height, evaluation_width) <= 0:
+        raise ValueError("Model-input and evaluation resolutions must be positive")
+    return model_height, model_width, evaluation_height, evaluation_width
+
+
 def select_protocol(config: Dict[str, Any], override: Optional[str] = None) -> str:
     value = override or str(config.get("evaluation", {}).get("protocol", "vda"))
     protocol = value.strip().lower()
@@ -212,7 +225,8 @@ def evaluate_vda(
     if not gt_depths:
         raise RuntimeError("No sequences contain configured depth GT")
     tae_config = eval_config.get("tae", {})
-    if tae_config.get("enabled", True):
+    tae_enabled = bool(tae_config.get("enabled", True))
+    if tae_enabled:
         if config["dataset"].get("resize_mode", "resize") != "resize":
             raise ValueError("TAE currently requires full-FOV RGB with resize_mode=resize")
         # Fail before costly model inference if a required dataset pose is absent.
@@ -231,15 +245,18 @@ def evaluate_vda(
         inference_checkpoint = ensure_merged_student_checkpoint(checkpoint, config)
     model = _evaluation_model(inference_checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
-    height = int(config["dataset"]["image_height"])
-    width = int(config["dataset"]["image_width"])
+    model_height, model_width, evaluation_height, evaluation_width = (
+        _evaluation_resolution(config, eval_config)
+    )
     remaining = limit_clips
     sequence_results = []
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
         frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
-        spool = vda_core._SequencePredictionSpool(output.parent, len(frames), height, width)
+        spool = vda_core._SequencePredictionSpool(
+            output.parent, len(frames), evaluation_height, evaluation_width
+        )
         try:
             def emit(start, disparities, intrinsics):
                 spool.add(range(start, start + len(disparities)), disparities)
@@ -250,11 +267,14 @@ def evaluate_vda(
                 sequence, spool, int(eval_config.get("gt_depth_channel", 0)),
                 gt_depths[sequence_id],
                 require_all_gt=bool(eval_config.get("require_all_gt", True)) and limit_clips is None)
-            # A debug window limit evaluates temporal pairs only in its inferred prefix.
-            temporal_sequence = dict(sequence)
-            temporal_sequence["frame_paths"] = sequence["frame_paths"][:timing["output_frame_count"]]
-            item["temporal"] = evaluate_tae(temporal_sequence, spool, item, eval_config)
-            item["metrics"]["tae"] = item["temporal"]["tae"]
+            if tae_enabled:
+                # A debug window limit evaluates temporal pairs only in its inferred prefix.
+                temporal_sequence = dict(sequence)
+                temporal_sequence["frame_paths"] = sequence["frame_paths"][:timing["output_frame_count"]]
+                item["temporal"] = evaluate_tae(
+                    temporal_sequence, spool, item, eval_config
+                )
+                item["metrics"]["tae"] = item["temporal"]["tae"]
             item["inference"] = timing
             sequence_results.append(item)
         finally:
@@ -265,19 +285,33 @@ def evaluate_vda(
         raise RuntimeError("No sequence was evaluated")
     metrics = {name: float(np.mean([item["metrics"][name] for item in sequence_results]))
                for name in vda_core.VDA_METRIC_NAMES}
-    temporal = [item["metrics"]["tae"] for item in sequence_results if item["metrics"]["tae"] is not None]
-    metrics["tae"] = float(np.mean(temporal)) if temporal else None
+    temporal = (
+        [
+            item["metrics"]["tae"]
+            for item in sequence_results
+            if item["metrics"]["tae"] is not None
+        ]
+        if tae_enabled
+        else []
+    )
+    if tae_enabled:
+        metrics["tae"] = float(np.mean(temporal)) if temporal else None
     total_frames = sum(item["inference"]["output_frame_count"] for item in sequence_results)
     total_seconds = sum(item["inference"]["model_forward_seconds"] for item in sequence_results)
     pipeline_seconds = sum(item["inference"]["sequence_pipeline_seconds"] for item in sequence_results)
     peak_memory = [item["inference"]["peak_cuda_memory_allocated_bytes"] for item in sequence_results
                    if item["inference"]["peak_cuda_memory_allocated_bytes"] is not None]
+    peak_reserved = [item["inference"]["peak_cuda_memory_reserved_bytes"] for item in sequence_results
+                     if item["inference"]["peak_cuda_memory_reserved_bytes"] is not None]
     complete = not skipped and len(sequence_results) == len(sequences) and all(
         item["missing_prediction_count"] == 0 and item["inference"]["output_frame_count"] ==
         len(sequences[item["sequence_id"]]["frame_paths"]) for item in sequence_results)
     result = {
-        "protocol": "video-depth-anything-depth+video-depth-anything-tae-scared-v2",
-        **VDA_TAE_METADATA,
+        "protocol": (
+            "video-depth-anything-depth+video-depth-anything-tae-scared-v2"
+            if tae_enabled
+            else "video-depth-anything-depth-scared-v2"
+        ),
         "config": str(config_path), "model_source": model_source,
         "checkpoint": str(checkpoint) if checkpoint is not None else str(config["student"]["checkpoint"]),
         "inference_checkpoint": (
@@ -287,8 +321,6 @@ def evaluate_vda(
         ),
         "split": split, "metrics": metrics, "metric_aggregation": "macro mean over evaluated sequences",
         "sequence_count": len(sequence_results), "expected_sequence_count": len(sequences),
-        "tae_sequence_count": len(temporal),
-        "complete_tae_coverage": bool(temporal) and complete and all(item["temporal"]["status"] == "complete" for item in sequence_results),
         "complete_gt_coverage": complete,
         "full_test_set": split == "test" and limit_clips is None and complete,
         "inference_mode": "complete sequence, VDA 32-view windows with anchor alignment and 8-frame disparity blending",
@@ -302,16 +334,40 @@ def evaluate_vda(
         "kv_sampling": kv_config.as_dict(),
         "total_sequence_pipeline_seconds": pipeline_seconds,
         "pipeline_fps": total_frames / pipeline_seconds if pipeline_seconds else None,
+        "peak_cuda_memory_allocated": max(peak_memory) if peak_memory else None,
+        "peak_cuda_memory_reserved": max(peak_reserved) if peak_reserved else None,
+        # Preserve the established byte-explicit aliases for downstream readers.
         "peak_cuda_memory_allocated_bytes": max(peak_memory) if peak_memory else None,
+        "peak_cuda_memory_reserved_bytes": max(peak_reserved) if peak_reserved else None,
         "timing_scope": sequence_results[0]["inference"]["timing_scope"],
         "warmup_excluded": False, "amp": amp, "device": str(device),
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
-        "torch_version": torch.__version__, "input_resolution_hw": [height, width],
+        "torch_version": torch.__version__,
+        "input_resolution_hw": [model_height, model_width],
+        "model_input_resolution_hw": [model_height, model_width],
+        "evaluation_resolution_hw": [evaluation_height, evaluation_width],
         "window_limit": limit_clips,
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }
+    if tae_enabled:
+        result.update(
+            VDA_TAE_METADATA,
+            tae_sequence_count=len(temporal),
+            complete_tae_coverage=(
+                bool(temporal)
+                and complete
+                and all(
+                    item["temporal"]["status"] == "complete"
+                    for item in sequence_results
+                )
+            ),
+        )
     output.write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
-    print("wrote full-sequence VDA + TAE evaluation: {}".format(output))
+    print(
+        "wrote full-sequence {} evaluation: {}".format(
+            "VDA + TAE" if tae_enabled else "VDA", output
+        )
+    )
     return result
 
 

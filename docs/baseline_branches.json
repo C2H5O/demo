@@ -58,9 +58,9 @@
     "training_required": false,
     "implemented": true,
     "validation_status": "runtime_pending",
-    "source_baseline": "C",
-    "source_weights_branch": "feature/attention-distillation",
+    "source_baseline": "J",
+    "source_weights_branch": "codex/baseline-J",
     "source_weights_project": "vggtoda3",
-    "inference_algorithm": "role_layer_spatial_kv_first16_later_2_key_8_overlap_7x2_of_22_new_early_stride2_late_stride1"
+    "inference_algorithm": "query_group_kv_group8_k20_temporal_uniform_full_spatial_batched_sdpa"
   }
 ]

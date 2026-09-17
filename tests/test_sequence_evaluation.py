@@ -41,6 +41,10 @@ def make_scared(tmp_path, count=3):
 
 def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(tmp_path, monkeypatch):
     config, _ = make_scared(tmp_path)
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded: checkpoint,
+    )
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
                         lambda *args: ConstantPlane().eval())
     result = evaluate_vda(config)
@@ -60,6 +64,10 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
 
 def test_window_limit_never_claims_full_test_set(tmp_path, monkeypatch):
     config, _ = make_scared(tmp_path)
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded: checkpoint,
+    )
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
                         lambda *args: ConstantPlane().eval())
     result = evaluate_vda(config, limit_clips=1)
@@ -73,6 +81,10 @@ def test_missing_gt_never_claims_complete_coverage(tmp_path, monkeypatch):
         path.unlink()
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
                         lambda *args: ConstantPlane().eval())
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded: checkpoint,
+    )
     result = evaluate_vda(config)
     assert not result["full_test_set"] and not result["complete_gt_coverage"]
     assert len(result["skipped_sequences_without_gt"]) == 1

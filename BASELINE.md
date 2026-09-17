@@ -1,158 +1,127 @@
-# Baseline H
+# Baseline H = QG-K20
 
-Branch: `baseline-h`, created from G's implementation at `18b5640`.
-
-Selected configuration: `configs/baselines/H.yaml` (also `configs/baseline.yaml`).
-
-Training required: False. Implementation complete; runtime validation pending.
-
-H uses the existing attention-distillation checkpoint from the
-`feature/attention-distillation` run. It changes inference-time K/V selection
-only; training objectives, model weights, Q projection, heads, VDA stitching,
-evaluation metrics and output geometry are unchanged.
-
-## Standard later-window policy
-
-`inference/student_video.py` constructs each standard later VDA window as:
+Baseline H is a training-free Query-Grouped K/V inference experiment using the
+same final Student weights as Baseline J. It does not use highlight detection,
+content descriptors, Teacher inference, spatial token pruning, or TAE.
 
 ```text
-32 inputs = 2 key + 8 overlap + 22 new
+32-frame VDA window
+    ↓
+all frames retained as queries
+    ↓
+temporal query groups (default: 8 frames/group)
+    ↓
+each group attends to its own K=20 provider frames
+    ↓
+all patch tokens retained for every provider
+    ↓
+one batched grouped SDPA for the standard 32/8 layout
+    ↓
+full 32-frame depth and camera output
 ```
 
-The roles and absolute frame IDs are recorded in `WindowFrameMetadata`; the KV
-sampler does not infer them from an attention tensor. All eligible key and
-overlap frames remain providers. The 22 temporally ordered new frames are split
-into seven contiguous buckets with integer boundaries, producing sizes
-`[3,3,3,3,3,3,4]` for a full window. Every bucket contributes its two lowest
-`lightweight_highlight` scores. Stable ties prefer the earlier frame and the
-final selected list remains in temporal order.
+VDA window construction, anchors, overlap, disparity alignment, blending,
+emission order, and output frame count are unchanged.
+
+## Provider selection
+
+For every query group, the provider set first contains every unique real frame
+represented by that group. Remaining capacity is filled without RGB or model
+features:
+
+1. when `preserve_vda_history: true`, available `key` and `overlap` frames are
+   selected first;
+2. remaining slots are filled by deterministic temporal-uniform sampling over
+   the rest of the complete window;
+3. providers are unique and returned in temporal order.
+
+The standard window has four query groups of eight frames and 20 providers per
+group. A tail with fewer than 20 unique real frames uses all unique real frames;
+padding is never duplicated into K/V. Query and output frames are never removed.
+
+## Attention path
+
+`inference/query_group_kv.py` maps original VDA frame slots through DA3's
+reference-first internal permutation. For the standard configuration it forms:
 
 ```text
-2 key + 8 overlap + 14 selected new = 24 patch-KV provider frames
-8 unselected new = query/output plus special-token K/V, but no patch K/V
+Q: [B*4, heads, 8*tokens_per_frame, head_dim]
+K: [B*4, heads, (20*patch_tokens + special_tokens), head_dim]
+V: [B*4, heads, (20*patch_tokens + special_tokens), head_dim]
 ```
 
-Tail padding and duplicate source positions are filtered by the existing
-eligibility rules. A short tail keeps up to two eligible frames from every
-nonempty bucket and does not duplicate or redistribute frames.
+and invokes `scaled_dot_product_attention` once per configured global layer.
+The grouped output is scattered back to the exact original DA3 token layout.
+All provider patch tokens remain at native spatial resolution. With
+`keep_all_special_tokens: true`, special-token K/V from every frame is retained;
+setting it to false restricts special tokens to provider frames.
 
-The lightweight score remains the batched Torch-only proxy in
-`inference/lightweight_highlight.py`: FP32 average pooling followed by the ratio
-of pixels whose maximum RGB value is at least `0.90` and saturation is at most
-`0.20`. The complete eligible-new batch stays on its input device; only the
-small score vector is copied to the host once per window. PC-Depth, DINO, an
-extra descriptor network and per-frame detector calls are absent from this path.
-
-## First window
-
-The first window has 32 real `new` roles and no fabricated key/overlap history.
-It retains H's existing frame selection: split into 16 contiguous buckets and
-take one lowest-score frame per bucket. The selected 16 providers use their real
-`new` role, so block 5 applies stride 2 and blocks 7/9/11 retain all of their
-patches. All 32 frames remain queries and outputs.
-
-## Spatial patch K/V schedule
-
-The checked DA3-Small configuration has 12 encoder blocks. With `alt_start=4`,
-the flattened global-attention blocks are the real encoder block indices
-`[5,7,9,11]`. The configured `0-5` / `6-11` schedule therefore maps to:
-
-```text
-encoder block 5:
-  key stride 1; overlap stride 2; selected-new stride 2
-
-encoder blocks 7, 9, 11:
-  key stride 1; overlap stride 1; selected-new stride 1
-```
-
-Stride 2 uses original row-major patch indices from `grid[::2, ::2]`. Tokens
-retain the positions already applied by upstream normalization/RoPE; selected
-patches are not renumbered. `frame_slots_to_token_indices` maps original VDA
-slots through DA3's reference-view permutation and prepends every frame's full
-special-token range. The same final index tensor gathers K and V immediately
-before `torch.nn.functional.scaled_dot_product_attention`, while Q is passed
-through unchanged.
-
-For the official 448x560 input and patch size 14, `P=32x40=1280`. The checked
-checkpoint header contains one CLS token and no register-token tensor, so `S=1`.
-The adapter derives `S` from the instantiated encoder at runtime.
-
-| Window/layers | Dense Q tokens | Patch KV tokens | Special KV tokens | Total KV tokens | Retention |
-|---|---:|---:|---:|---:|---:|
-| standard later, block 5 | 40992 | 9600 | 32 | 9632 | 0.234973 |
-| standard later, blocks 7/9/11 | 40992 | 30720 | 32 | 30752 | 0.750195 |
-| first, block 5 | 40992 | 5120 | 32 | 5152 | 0.125683 |
-| first, blocks 7/9/11 | 40992 | 20480 | 32 | 20512 | 0.500390 |
-
-The actual SDPA layout is
-`Q [B,heads,32*(P+S),head_dim]` and
-`K/V [B,heads,layer_sparse_tokens,head_dim]`. SDPA returns the full Q shape, so
-the depth and camera heads still receive all 32 frame/token outputs.
+The adapter derives global layers from the instantiated encoder and `alt_start`.
+For the current 12-block DA3-Small (`alt_start=4`) they are `[5, 7, 9, 11]`.
+`apply_layers: null` applies QG to all of them; a list such as `[7, 9]` enables a
+layer ablation.
 
 ## Configuration
 
-`configs/baselines/H.yaml` selects:
+`configs/baselines/H.yaml` exposes the experiment controls directly:
 
 ```yaml
 kv_sampling:
   enabled: true
-  method: role_layer_spatial_kv
-  retention_ratio: 0.75
-  vda_role:
-    key_frames: 2
-    overlap_frames: 8
-    new_frames: 22
-    selected_new_frames: 14
-  new_frame_selection:
-    method: temporal_bucket_highlight
-    num_buckets: 7
-    keep_per_bucket: 2
-    score: lightweight_highlight
-    tie_break: frame_index
-  first_window:
-    method: bucket_highlight
-    num_frames: 16
-    num_buckets: 16
-  spatial_sampling:
-    enabled: true
-    early_layers: {start: 0, end: 5, key_stride: 1, overlap_stride: 2, new_stride: 2}
-    late_layers: {start: 6, end: 11, key_stride: 1, overlap_stride: 1, new_stride: 1}
-  special_tokens: {keep_all: true}
-  diagnostics: {print_once_per_sequence: true}
+  method: query_group
+  query_group_size: 8
+  kv_frames: 20
+  provider_selection: temporal_uniform
+  preserve_vda_history: true
+  keep_all_special_tokens: true
+  apply_layers: null
+  batched_sdpa: true
+  diagnostics: false
 ```
 
-The first completed window prints one bounded `KV sampling diagnostics` JSON
-object for the sequence. It includes the configured standard 24-provider policy,
-the observed first-window roles/providers, actual per-block sparse token counts,
-and both early/late standard token expectations. Debug configuration additionally
-retains selection scores, buckets, absolute IDs and observed SDPA shapes.
+`query_group_size`, `kv_frames`, history preference, special-token policy,
+target layers, and batched SDPA can be changed in YAML without code changes.
+The implementation does not require a 32-frame window or a group size of eight;
+only logically impossible settings such as nonpositive sizes, K larger than the
+input window, or K too small for a group's mandatory unique frames are rejected.
 
-The existing synchronized `model_forward_seconds` timer starts before
-`begin_window`, so lightweight scoring, score-vector transfer, bucket selection,
-token-index construction, K/V gather and model execution remain included.
-Diagnostics print after the synchronized model timing. Evaluation metric
-definitions are unchanged.
+## Weights, metrics, and timing
 
-## Checkpoint and validation commands
-
-The configured checkpoint remains:
+H selects Baseline J's final immutable training checkpoint:
 
 ```text
-/public/home/2024141520249/Documents/Projects/vggtoda3/outputs/vggtoda3_attention_distill/last.pt
+/public/home/2024141520249/Documents/Projects/vggtoda3/outputs/baseline_J/last.pt
 ```
 
-Run later from the baseline-H checkout:
+The shared evaluator reuses its matching sibling `ours.pt` or performs the
+existing strict auto-merge when absent. H does not train or modify Baseline J.
+The Dense comparison comes from the existing Baseline-J evaluation and is not
+rerun by H.
+
+H reports AbsRel, RMSE, delta1, model inference time/FPS, and peak CUDA allocated
+and reserved memory. `tae.enabled: false` prevents temporal alignment and TAE
+from running or appearing in the output. As in the existing Baseline-J Dense
+result, metrics are evaluated at 256x320 while the Student still receives and
+predicts at its native 448x560 grid. The synchronized model timer begins
+before provider construction and includes grouping, gathers, reshapes, grouped
+SDPA, output restoration, and all other model-forward work. RGB decoding, GT
+loading, metric computation, and serialization remain outside model FPS.
+
+## Commands
+
+Lightweight local checks only:
 
 ```bash
-python -m pytest tests/test_prefix_recent_kv.py tests/test_bucket_highlight_kv.py tests/test_vda_role_kv.py tests/test_highlight_kv.py -q
-
-CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/inference/H_debug.yaml --split test --protocol vda --limit-windows 2
-
-CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py --config configs/baselines/H.yaml --split test --protocol vda
-
-CUDA_VISIBLE_DEVICES=0 python visualize_crossclip_projection.py --config configs/baselines/H.yaml --source student --split test --sequence-index 0
+python -m pytest tests/test_query_group_kv.py tests/test_qg_evaluation.py -q
 ```
 
-This implementation turn ran Python compilation/config/index checks and
-`git diff --check`. It did not run pytest, model inference, training, full VDA
-evaluation, visualization, profiling, downloads or GPU debugging.
+Formal QG-K20 SCARED VDA evaluation from the Baseline-H checkout:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python evaluate_crossclip_projection.py \
+  --config configs/baselines/H.yaml \
+  --split test \
+  --protocol vda
+```
+
+This command runs only QG-K20. It does not rerun Dense and does not compute TAE.
