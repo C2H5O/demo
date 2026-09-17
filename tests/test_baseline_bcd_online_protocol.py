@@ -104,7 +104,7 @@ def test_baseline_protocol_and_ablation_contract() -> None:
     assert config["attention_distill"]["enabled"] is ATTENTION_ENABLED
     assert config["loss"]["highlight_mode"] == HIGHLIGHT_MODE
     assert config["vda_evaluation"]["checkpoint"] == (
-        "./outputs/baseline_{}/last.pt".format(BASELINE_ID)
+        "./outputs/baseline_{}/ours.pt".format(BASELINE_ID)
     )
 
 
