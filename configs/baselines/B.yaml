@@ -29,7 +29,7 @@ training:
   output_dir: ./outputs/baseline_B_online32_s2_3ep
   resume: null
 vda_evaluation:
-  checkpoint: ./outputs/baseline_B/ours.pt
+  checkpoint: ./outputs/baseline_B/last.pt
   output: ./outputs/baseline_B/evaluation_test.json
 visualization:
   output_dir: ./outputs/baseline_B/visualization
