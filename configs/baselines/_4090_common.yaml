@@ -22,6 +22,5 @@ training:
   resume: null
 attention_distill:
   online_teacher_batch_size: 1
-  query_chunk_size: 128
 inference:
   acceleration: none
