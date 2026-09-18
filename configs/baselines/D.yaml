@@ -7,6 +7,7 @@ experiment:
 dataset:
   clip_length: 32
   sample_stride: 2
+  window_stride: 8
 teacher:
   mode: full_online
   use_cache: false
@@ -29,7 +30,7 @@ training:
   output_dir: ./outputs/baseline_D_online32_s2_3ep_t512x640
   resume: null
 vda_evaluation:
-  checkpoint: ./outputs/baseline_D/last.pt
-  output: ./outputs/baseline_D/evaluation_test.json
+  checkpoint: ./outputs/baseline_D_online32_s2_3ep_t512x640/last.pt
+  output: ./outputs/baseline_D_online32_s2_3ep_t512x640/evaluation_test.json
 visualization:
-  output_dir: ./outputs/baseline_D/visualization
+  output_dir: ./outputs/baseline_D_online32_s2_3ep_t512x640/visualization
