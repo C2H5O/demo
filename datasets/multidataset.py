@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from datasets.precomputed_highlight import (
@@ -296,9 +297,14 @@ class CanonicalTemporalRGBDataset(Dataset):
 class TeacherClipInputDataset(Dataset):
     """Pair an RGB dataset's student-grid highlights with strict teacher RGB."""
 
-    def __init__(self, rgb_dataset: Any) -> None:
+    def __init__(
+        self,
+        rgb_dataset: Any,
+        output_shape: Tuple[int, int] = CANONICAL_TEACHER_SIZE,
+    ) -> None:
         self.rgb_dataset = rgb_dataset
         self.normalize_mode = "zero_one"
+        self.output_shape = tuple(int(value) for value in output_shape)
 
     def __len__(self) -> int:
         return len(self.rgb_dataset)
@@ -309,7 +315,18 @@ class TeacherClipInputDataset(Dataset):
         sequence = record.sequence
         teacher_paths = sequence.get("teacher_frame_paths", sequence["frame_paths"])
         paths = [str(teacher_paths[item]) for item in record.frame_indices]
-        return torch.stack([load_teacher_rgb_tensor(path) for path in paths]), paths
+        def load(path: str) -> torch.Tensor:
+            image = load_teacher_rgb_tensor(path)
+            if tuple(image.shape[-2:]) == self.output_shape:
+                return image
+            return F.interpolate(
+                image.unsqueeze(0),
+                size=self.output_shape,
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+
+        return torch.stack([load(path) for path in paths]), paths
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         student = self.rgb_dataset[index]

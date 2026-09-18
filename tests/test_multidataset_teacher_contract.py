@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,6 +15,7 @@ from datasets.crossclip_teacher_dataset import (
 )
 from datasets.multidataset import (
     CanonicalTemporalRGBDataset,
+    TeacherClipInputDataset,
     discover_canonical_sequences,
     discover_processed_scared_sequences,
 )
@@ -56,6 +58,53 @@ def test_numpy_buffer_conversion_preserves_values_without_from_numpy() -> None:
     boolean = floats > 5
     assert torch.equal(tensor_from_numpy_buffer(floats), torch.arange(12).float().reshape(3, 4))
     assert torch.equal(tensor_from_numpy_buffer(boolean), torch.tensor(boolean.tolist()))
+
+
+def test_full_online_teacher_resize_happens_per_frame_on_cpu(tmp_path) -> None:
+    teacher = tmp_path / "teacher.png"
+    Image.new("RGB", (1280, 1024), color=(7, 8, 9)).save(teacher)
+    rgb_dataset = SimpleNamespace(
+        clips=[
+            SimpleNamespace(
+                sequence={
+                    "teacher_frame_paths": [str(teacher)],
+                    "frame_paths": [str(teacher)],
+                },
+                frame_indices=(0,),
+            )
+        ]
+    )
+    images, paths = TeacherClipInputDataset(
+        rgb_dataset, output_shape=(512, 640)
+    ).load_images(0)
+    assert images.shape == (1, 3, 512, 640)
+    assert images.device.type == "cpu"
+    assert paths == [str(teacher)]
+
+
+def test_online_teacher_canonicalization_uses_inference_grid_for_intrinsics() -> None:
+    shape = (1, 1, 512, 640)
+    local = torch.zeros(1, 1, 512, 640, 3)
+    local[..., 2] = 2.0
+    intrinsics = torch.eye(3).reshape(1, 1, 3, 3)
+    intrinsics[..., 0, 0] = 640.0
+    intrinsics[..., 1, 1] = 512.0
+    intrinsics[..., 0, 2] = 320.0
+    intrinsics[..., 1, 2] = 256.0
+    result = canonicalize_teacher_outputs({
+        "depth": torch.full(shape, 2.0),
+        "xyz_local": local,
+        "xyz_global": local.clone(),
+        "conf_local": torch.ones(shape),
+        "valid_mask": torch.ones(shape, dtype=torch.bool),
+        "intrinsics": intrinsics,
+        "extrinsics": torch.eye(4).reshape(1, 1, 4, 4)[..., :3, :],
+    })
+    assert result["depth"].shape == (1, 1, 448, 560)
+    assert result["intrinsics"][0, 0, 0, 0].item() == pytest.approx(560.0)
+    assert result["intrinsics"][0, 0, 1, 1].item() == pytest.approx(448.0)
+    assert result["intrinsics"][0, 0, 0, 2].item() == pytest.approx(280.0)
+    assert result["intrinsics"][0, 0, 1, 2].item() == pytest.approx(224.0)
 
 
 def test_native_teacher_canonicalization_scales_k_and_preserves_z_depth() -> None:
