@@ -150,6 +150,16 @@ def test_separable_noninteger_overlap_matches_dense_reference() -> None:
     torch.testing.assert_close(separable, dense)
 
 
+def test_equal_grid_alignment_is_an_exact_identity(monkeypatch) -> None:
+    values = torch.randn(2, 3, 4, 1280, 5)
+    monkeypatch.setattr(
+        "losses.attention_distillation_loss.F.avg_pool2d",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pooling")),
+    )
+    aligned = SpatialTokenAligner((32, 40), (32, 40))(values)
+    assert aligned is values
+
+
 def test_four_layer_js_loss_is_finite_positive_and_backpropagates_only_student() -> None:
     teacher = {
         teacher_layer: _feature(teacher_layer, (2, 4), 3, 4, requires_grad=True)

@@ -15,8 +15,8 @@ teacher:
   frozen: true
   freeze_backbone: true
   freeze_heads: true
-  input_height: 1024
-  input_width: 1280
+  input_height: 512
+  input_width: 640
 attention_distill:
   enabled: true
   weight: 0.1
@@ -26,7 +26,7 @@ loss:
   highlight_softness: 0.0005
 training:
   epochs: 3
-  output_dir: ./outputs/baseline_C_online32_s2_3ep
+  output_dir: ./outputs/baseline_C_online32_s2_3ep_t512x640
   resume: null
 vda_evaluation:
   checkpoint: ./outputs/baseline_C/last.pt

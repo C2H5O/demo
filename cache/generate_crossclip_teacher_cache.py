@@ -40,7 +40,9 @@ from models.teacher.vggt_omega_wrapper import VGGTOmegaTeacher
 from utils.config import load_config
 
 
-TEACHER_SHAPE = (1024, 1280)
+SOURCE_IMAGE_SHAPE = (1024, 1280)
+# Backward-compatible name for the immutable native cache-generation path.
+TEACHER_SHAPE = SOURCE_IMAGE_SHAPE
 SUPERVISION_SHAPE = (448, 560)
 
 
@@ -56,7 +58,7 @@ def attention_cache_bytes_per_clip(
 
 
 def canonicalize_teacher_outputs(adapted: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Project native teacher maps onto the immutable student/cache grid.
+    """Project Teacher-inference maps onto the immutable supervision grid.
 
     Continuous maps use a valid-aware bilinear sampling grid so invalid zeros do
     not bleed into valid geometry.  Binary masks use nearest-neighbour sampling.
@@ -64,10 +66,9 @@ def canonicalize_teacher_outputs(adapted: Dict[str, torch.Tensor]) -> Dict[str, 
     validator's camera-coordinate invariant exactly.
     """
     valid = adapted["valid_mask"].bool()
-    if tuple(valid.shape[-2:]) != TEACHER_SHAPE:
-        raise ValueError("teacher outputs must be native 1024x1280")
+    teacher_shape = tuple(int(value) for value in valid.shape[-2:])
     batch, frames = valid.shape[:2]
-    flat_valid = valid.reshape(batch * frames, 1, *TEACHER_SHAPE).float()
+    flat_valid = valid.reshape(batch * frames, 1, *teacher_shape).float()
 
     def continuous(value: torch.Tensor) -> torch.Tensor:
         channels_last = value.ndim == 5
@@ -75,7 +76,7 @@ def canonicalize_teacher_outputs(adapted: Dict[str, torch.Tensor]) -> Dict[str, 
             value = value.permute(0, 1, 4, 2, 3)
         if not channels_last:
             value = value.unsqueeze(2)
-        flat = value.reshape(batch * frames, value.shape[2], *TEACHER_SHAPE).float()
+        flat = value.reshape(batch * frames, value.shape[2], *teacher_shape).float()
         weight = F.interpolate(flat_valid, size=SUPERVISION_SHAPE, mode="bilinear", align_corners=False)
         sampled = F.interpolate(flat * flat_valid, size=SUPERVISION_SHAPE, mode="bilinear", align_corners=False) / weight.clamp_min(1.0e-6)
         sampled = torch.where(weight > 1.0e-6, sampled, torch.zeros_like(sampled))
@@ -96,7 +97,8 @@ def canonicalize_teacher_outputs(adapted: Dict[str, torch.Tensor]) -> Dict[str, 
     output["xyz_local"] = torch.where(output_valid[..., None], local, torch.zeros_like(local))
     output["xyz_global"] = torch.where(output_valid[..., None], output["xyz_global"], torch.zeros_like(output["xyz_global"]))
     output["confidence"] = torch.where(output_valid, output["confidence"], torch.zeros_like(output["confidence"]))
-    sx, sy = SUPERVISION_SHAPE[1] / TEACHER_SHAPE[1], SUPERVISION_SHAPE[0] / TEACHER_SHAPE[0]
+    sx = SUPERVISION_SHAPE[1] / teacher_shape[1]
+    sy = SUPERVISION_SHAPE[0] / teacher_shape[0]
     output["intrinsics"][..., 0, 0] *= sx
     output["intrinsics"][..., 1, 1] *= sy
     output["intrinsics"][..., 0, 2] *= sx

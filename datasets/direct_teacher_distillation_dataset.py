@@ -243,10 +243,13 @@ class FullOnlineTeacherDistillationDataset(Dataset):
             )
         if window_stride <= 0:
             raise ValueError("Full-online distillation requires a positive window_stride")
-        # Teacher RGB is independently decoded by the established cache-input
-        # dataset. The full-online B/C/D protocol validates its native
-        # 1024x1280 size before training starts.
-        self.teacher_rgb_dataset = TeacherClipInputDataset(rgb_dataset)
+        # Resize each decoded source frame on CPU before stacking the temporal
+        # clip, so full-online training never constructs or transfers a native
+        # 1024x1280 Teacher clip when inference uses a smaller grid.
+        self.teacher_rgb_dataset = TeacherClipInputDataset(
+            rgb_dataset,
+            output_shape=(self.teacher_input_height, self.teacher_input_width),
+        )
         if not len(rgb_dataset):
             raise RuntimeError("No complete full-online training clips were discovered")
 

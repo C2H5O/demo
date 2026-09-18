@@ -95,10 +95,10 @@ def test_baseline_protocol_and_ablation_contract() -> None:
     assert config["training"]["epochs"] == 3
     assert config["training"]["resume"] is None
     assert config["training"]["output_dir"] == (
-        "./outputs/baseline_{}_online32_s2_3ep".format(BASELINE_ID)
+        "./outputs/baseline_{}_online32_s2_3ep_t512x640".format(BASELINE_ID)
     )
-    assert config["teacher"]["input_height"] == 1024
-    assert config["teacher"]["input_width"] == 1280
+    assert config["teacher"]["input_height"] == 512
+    assert config["teacher"]["input_width"] == 640
     assert config["teacher"]["raw_cache_root"] is None
     assert config["teacher"]["cache_checkpoint_identity"] is None
     assert config["attention_distill"]["enabled"] is ATTENTION_ENABLED
@@ -124,7 +124,8 @@ def test_stride_two_dataset_keeps_teacher_and_student_ids_equal_without_cache() 
 
 
 def test_one_teacher_forward_reuses_raw_cache_adaptation_pipeline(monkeypatch) -> None:
-    monkeypatch.setattr(trainer, "TEACHER_SHAPE", (4, 6))
+    monkeypatch.setattr(trainer, "FULL_ONLINE_TEACHER_SHAPE", (4, 6))
+    monkeypatch.setattr(trainer, "TEACHER_PATCH_SIZE", 2)
     monkeypatch.setattr(trainer, "SUPERVISION_SHAPE", (2, 3))
     calls: list[str] = []
 
@@ -171,7 +172,12 @@ def test_one_teacher_forward_reuses_raw_cache_adaptation_pipeline(monkeypatch) -
                     4: {
                         "q": torch.ones(batch, frames, 1, 6, 2),
                         "k": torch.ones(batch, frames, 1, 6, 2),
-                        "metadata": {"num_frames": frames},
+                        "metadata": {
+                            "num_frames": frames,
+                            "patch_size": 2,
+                            "patch_grid_h": 2,
+                            "patch_grid_w": 3,
+                        },
                     }
                 }
             return output
@@ -196,6 +202,11 @@ def test_one_teacher_forward_reuses_raw_cache_adaptation_pipeline(monkeypatch) -
         )
     assert calls == ["adapt", "canonicalize"]
     assert teacher.prediction_forward_count == audit["teacher_forward_count"] == 1
+    assert audit["teacher_patch_grid"] == [2, 3]
+    assert audit["teacher_q_shape"] == [1, 32, 1, 6, 2]
+    assert audit["teacher_forward_ms"] >= 0.0
+    assert audit["teacher_adapt_ms"] >= 0.0
+    assert audit["teacher_canonicalize_ms"] >= 0.0
     assert torch.equal(supervision["absolute_frame_ids"], ids)
     assert (attention is not None) is ATTENTION_ENABLED
 
