@@ -215,6 +215,8 @@ class SpatialTokenAligner(nn.Module):
                     value.shape[-2], self.source_grid
                 )
             )
+        if self.source_grid == self.target_grid:
+            return value
         batch, frames, heads, _, head_dim = value.shape
         source_h, source_w = self.source_grid
         target_h, target_w = self.target_grid
