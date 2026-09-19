@@ -42,10 +42,16 @@ training:
   output_dir: ./outputs/baseline_J
   resume: null
 
+inference:
+  image_height: 224
+  image_width: 280
+
 vda_evaluation:
   checkpoint: ./outputs/baseline_J/last.pt
-  evaluation_height: 256
-  evaluation_width: 320
+  evaluation_height: 224
+  evaluation_width: 280
+  tae:
+    enabled: false
   output: ./outputs/baseline_J/evaluation_test.json
 
 visualization:

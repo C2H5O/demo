@@ -46,8 +46,9 @@ def _evaluation_resolution(
     config: Dict[str, Any], eval_config: Dict[str, Any]
 ) -> Tuple[int, int, int, int]:
     """Return model-input and evaluation grids without conflating them."""
-    model_input_height = int(config["dataset"]["image_height"])
-    model_input_width = int(config["dataset"]["image_width"])
+    inference_config = config.get("inference", {})
+    model_input_height = int(inference_config.get("image_height", config["dataset"]["image_height"]))
+    model_input_width = int(inference_config.get("image_width", config["dataset"]["image_width"]))
     evaluation_height = int(
         eval_config.get("evaluation_height", model_input_height)
     )
@@ -300,7 +301,8 @@ def evaluate_vda(
                 patch_size=int(preprocessing.get("patch_size", 16)),
             )
         else:
-            frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+            frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")),
+                                     inference_config={"image_height": model_input_height, "image_width": model_input_width})
         spool = vda_core._SequencePredictionSpool(
             output.parent, len(frames), evaluation_height, evaluation_width
         )

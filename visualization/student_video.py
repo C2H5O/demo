@@ -26,7 +26,8 @@ def export_student_video(config, dataset, sequence_index, output_root, source,
     baseline = source == OFFICIAL_DA3_SMALL_SOURCE
     eval_config = config.get("da3_small_baseline_vda_evaluation" if baseline else "vda_evaluation", {})
     visual = config.get("da3_small_baseline_visualization" if baseline else "visualization", {})
-    frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+    frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")),
+                             inference_config=config.get("inference"))
     output = ensure_dir(Path(output_root) / source / sequence["sequence_id"].replace("/", "_") / "full_sequence")
     directories = {name: ensure_dir(output / name) for name in
                    ("rgb", "depth", "depth_fixed", "depth_adaptive", "panels", "pointcloud_local", "camera_windows")}

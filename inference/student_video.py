@@ -14,6 +14,7 @@ from typing import Callable, Optional, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor
 
@@ -22,6 +23,7 @@ OVERLAP = 10
 BLEND = 8
 STEP = WINDOW - OVERLAP
 KEYFRAMES = [0, 12, 24, 25, 26, 27, 28, 29, 30, 31]
+_resolution_audit_printed = False
 
 
 class SequenceFrames:
@@ -37,17 +39,22 @@ class SequenceFrames:
 
     def __getitem__(self, index):
         if self.resize_mode == "precomputed":
-            return load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            image = load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            if image.shape[-2:] != (self.height, self.width):
+                image = F.interpolate(image.unsqueeze(0), size=(self.height, self.width),
+                                      mode="bicubic", align_corners=False).squeeze(0).clamp_(0, 1)
+            return image
         return load_rgb_tensor(self.paths[index], self.height, self.width,
                                self.resize_mode, "zero_one")
 
 
-def sequence_frames(sequence, dataset_config, *, raw_rgb=False):
+def sequence_frames(sequence, dataset_config, *, raw_rgb=False, inference_config=None):
+    inference_config = inference_config or {}
     precomputed = sequence.get("preprocessing_identity", "legacy_scared") != "legacy_scared"
     mode = "precomputed" if precomputed and not raw_rgb else dataset_config.get("resize_mode", "resize")
     return SequenceFrames(sequence["frame_paths"], resize_mode=mode,
-                          height=int(dataset_config.get("image_height", 448)),
-                          width=int(dataset_config.get("image_width", 560)))
+                          height=int(inference_config.get("image_height", dataset_config.get("image_height", 448))),
+                          width=int(inference_config.get("image_width", dataset_config.get("image_width", 560))))
 
 
 def align_disparity(current: np.ndarray, reference: np.ndarray):
@@ -190,6 +197,12 @@ def infer_vda_video(model, frames, emit: Callable, *, device, amp=True,
 def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
                         max_windows=None, emit_window=None) -> dict:
     """Run DA3 through the shared formal VDA temporal/stitching pipeline."""
+    global _resolution_audit_printed
+    if not _resolution_audit_printed and getattr(frames, "height", None) == 224 and getattr(frames, "width", None) == 280:
+        print("DA3 inference resolution audit: model_input = 224x280; patch_size = 14; "
+              "patch_grid = 16x20; patches_per_frame = 320; native_prediction = 224x280; "
+              "evaluation_grid = 224x280; window_length = 32")
+        _resolution_audit_printed = True
     return infer_vda_video(
         model,
         frames,
