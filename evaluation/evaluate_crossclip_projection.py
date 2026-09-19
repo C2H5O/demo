@@ -230,14 +230,16 @@ def evaluate_vda(
         inference_checkpoint = ensure_merged_student_checkpoint(checkpoint, config)
     model = _evaluation_model(inference_checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
-    height = int(config["dataset"]["image_height"])
-    width = int(config["dataset"]["image_width"])
+    inference_config = config["inference"]
+    height = int(eval_config["evaluation_height"])
+    width = int(eval_config["evaluation_width"])
     remaining = limit_clips
     sequence_results = []
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
-        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+        frames = sequence_frames(sequence, config["dataset"], inference_config,
+                                 raw_rgb=bool(eval_config.get("rgb_root")))
         spool = vda_core._SequencePredictionSpool(output.parent, len(frames), height, width)
         try:
             def emit(start, disparities, intrinsics):

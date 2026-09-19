@@ -29,7 +29,14 @@ training:
   output_dir: ./outputs/baseline_B_online32_s2_3ep
   resume: null
 vda_evaluation:
+  evaluation_height: 224
+  evaluation_width: 280
+  tae:
+    enabled: false
   checkpoint: ./outputs/baseline_B/last.pt
   output: ./outputs/baseline_B/evaluation_test.json
 visualization:
   output_dir: ./outputs/baseline_B/visualization
+inference:
+  image_height: 224
+  image_width: 280

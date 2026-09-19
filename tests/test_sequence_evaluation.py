@@ -30,13 +30,21 @@ def make_scared(tmp_path, count=3):
                 "camera-calibration": {"KL": [[100,0,3],[0,100,2],[0,0,1]]},
                 "camera-pose": np.eye(4).tolist()}))
     cfg = {"device": "cpu", "student": {"checkpoint": "unused"},
+           "inference": {"image_height": 4, "image_width": 6},
            "dataset": {"root": str(tmp_path), "clip_length": 16, "sample_stride": 1, "window_stride": 8,
                        "image_height": 4, "image_width": 6, "normalize_mode": "zero_one"},
            "vda_evaluation": {"rgb_root": str(tmp_path), "gt_root": str(tmp_path),
+                              "evaluation_height": 4, "evaluation_width": 6,
                               "checkpoint": "unused", "output": str(tmp_path / "result.json"), "split": "test"}}
     config = tmp_path / "config.yaml"
     config.write_text(yaml.safe_dump(cfg))
     return config, cfg
+
+
+@pytest.fixture(autouse=True)
+def bypass_checkpoint_merge_for_synthetic_model(monkeypatch):
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+                        lambda checkpoint, config: checkpoint)
 
 
 def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(tmp_path, monkeypatch):

@@ -3,7 +3,8 @@ import pytest
 import torch
 from torch import nn
 
-from inference.student_video import infer_student_video
+from inference.student_video import infer_student_video, sequence_frames
+from utils.config import load_config
 
 
 class DriftingModel(nn.Module):
@@ -31,6 +32,26 @@ def scene_frames(length):
         frame[1] = torch.arange(6).reshape(2, 3) / 10
         frames.append(frame)
     return frames
+
+
+def test_baseline_b_resolution_config_and_frame_decode(monkeypatch):
+    config = load_config("configs/baselines/B.yaml")
+    assert (config["dataset"]["image_height"], config["dataset"]["image_width"]) == (448, 560)
+    assert (config["student"]["image_height"], config["student"]["image_width"]) == (448, 560)
+    assert config["dataset"]["clip_length"] == 32
+    assert (config["inference"]["image_height"], config["inference"]["image_width"]) == (224, 280)
+    assert (config["vda_evaluation"]["evaluation_height"],
+            config["vda_evaluation"]["evaluation_width"]) == (224, 280)
+    assert config["vda_evaluation"]["tae"]["enabled"] is False
+    assert (224 // config["student"]["patch_size"],
+            280 // config["student"]["patch_size"]) == (16, 20)
+    def fake_load(path, height, width, resize_mode, normalize_mode):
+        assert (height, width) == (224, 280)
+        return torch.zeros(3, height, width)
+    monkeypatch.setattr("inference.student_video.load_rgb_tensor", fake_load)
+    frames = sequence_frames({"frame_paths": ["unused"]}, config["dataset"],
+                             config["inference"])
+    assert frames[0].shape == (3, 224, 280)
 
 
 @pytest.mark.parametrize("length", [1, 7, 16, 22, 24, 31, 32, 33, 44, 54, 55, 79])

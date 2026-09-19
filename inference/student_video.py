@@ -14,6 +14,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor
 
@@ -28,7 +29,7 @@ class SequenceFrames:
     """Lazy RGB decoding: accept all paths without retaining an entire video in RAM."""
 
     def __init__(self, paths: Sequence[str | Path], *, resize_mode: str = "resize",
-                 height: int = 448, width: int = 560):
+                 height: int = 224, width: int = 280):
         self.paths = list(paths)
         self.resize_mode, self.height, self.width = resize_mode, height, width
 
@@ -37,17 +38,21 @@ class SequenceFrames:
 
     def __getitem__(self, index):
         if self.resize_mode == "precomputed":
-            return load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            image = load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            if image.shape[-2:] != (self.height, self.width):
+                image = F.interpolate(image[None], size=(self.height, self.width),
+                                      mode="bilinear", align_corners=False)[0]
+            return image
         return load_rgb_tensor(self.paths[index], self.height, self.width,
                                self.resize_mode, "zero_one")
 
 
-def sequence_frames(sequence, dataset_config, *, raw_rgb=False):
+def sequence_frames(sequence, dataset_config, inference_config, *, raw_rgb=False):
     precomputed = sequence.get("preprocessing_identity", "legacy_scared") != "legacy_scared"
     mode = "precomputed" if precomputed and not raw_rgb else dataset_config.get("resize_mode", "resize")
     return SequenceFrames(sequence["frame_paths"], resize_mode=mode,
-                          height=int(dataset_config.get("image_height", 448)),
-                          width=int(dataset_config.get("image_width", 560)))
+                          height=int(inference_config["image_height"]),
+                          width=int(inference_config["image_width"]))
 
 
 def align_disparity(current: np.ndarray, reference: np.ndarray):
@@ -137,6 +142,13 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         depth = prediction["depth"][0].float().cpu().numpy()
         if depth.shape != (WINDOW, *images.shape[-2:]) or not np.isfinite(depth).all():
             raise FloatingPointError("Invalid DA3 sequence depth output")
+        if (not getattr(model, "_da3_resolution_audited", False)
+                and tuple(depth.shape[-2:]) == (224, 280)):
+            print("DA3 inference resolution audit:\n"
+                  "model_input = 224x280\npatch_size = 14\npatch_grid = 16x20\n"
+                  "patches_per_frame = 320\nnative_prediction = 224x280\n"
+                  "evaluation_grid = 224x280\nwindow_length = 32")
+            model._da3_resolution_audited = True
         disparity = 1.0 / np.maximum(depth, 1e-3)
         intrinsics = prediction["intrinsics"][0].float().cpu().numpy()
         if emit_window is not None:
