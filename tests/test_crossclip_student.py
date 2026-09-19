@@ -199,3 +199,51 @@ def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> 
     }
     assert output["depth"].shape == (1, 16, 448, 560)
     assert model._ray_forward_count == 0
+    with pytest.raises(ValueError, match="training/attention capture"):
+        model(torch.zeros(1, 16, 3, 224, 280))
+    model.eval()
+    with torch.no_grad():
+        inference = model(torch.zeros(1, 32, 3, 224, 280), include_global_points=False)
+    assert inference["depth"].shape == (1, 32, 224, 280)
+    assert inference["xyz_local"].shape == (1, 32, 224, 280, 3)
+    assert inference["intrinsics"][0, 0, 0, 0] == 280
+    assert inference["intrinsics"][0, 0, 1, 1] == 224
+    with pytest.raises(ValueError, match="DA3 inference requires"):
+        model(torch.zeros(1, 32, 3, 448, 280))
+
+
+def test_depth_head_wrapper_uses_runtime_16x20_patch_grid() -> None:
+    class Fuse(nn.Module):
+        def forward(self, x, residual=None, size=None):
+            return x if residual is None else x + residual
+
+    class Head(nn.Module):
+        patch_size = 14
+        intermediate_layer_idx = (0, 1, 2, 3)
+        pos_embed = False
+        activation = "positive"
+        conf_activation = "positive"
+
+        def __init__(self):
+            super().__init__()
+            self.norm = nn.Identity()
+            self.projects = nn.ModuleList(nn.Identity() for _ in range(4))
+            self.resize_layers = nn.ModuleList(nn.Identity() for _ in range(4))
+            self.scratch = nn.Module()
+            for name in ("layer1_rn", "layer2_rn", "layer3_rn", "layer4_rn",
+                         "output_conv1"):
+                setattr(self.scratch, name, nn.Identity())
+            for index in (1, 2, 3, 4):
+                setattr(self.scratch, f"refinenet{index}", Fuse())
+            self.scratch.output_conv2 = nn.Conv2d(1, 2, 1)
+
+        def _apply_activation_single(self, x, mode):
+            return x.abs() + 1
+
+    model = DA3SmallStudent(DA3SmallConfig(), network=_FakeNetwork())
+    model.network.head = Head()
+    tokens = [torch.ones(1, 320, 1) for _ in range(4)]
+    depth, confidence = model._depth_main_chunk(tokens, 224, 280)
+    assert depth.shape == confidence.shape == (1, 224, 280)
+    with pytest.raises(ValueError, match="runtime patch grid"):
+        model._depth_main_chunk([torch.ones(1, 321, 1)] * 4, 224, 280)

@@ -8,6 +8,8 @@ from PIL import Image
 from torch import nn
 
 from evaluation.evaluate_crossclip_projection import evaluate_vda
+from evaluation.evaluate_vda import _SequencePredictionSpool
+from inference.student_video import sequence_frames
 
 
 class ConstantPlane(nn.Module):
@@ -60,6 +62,59 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert result["mean_frame_inference_seconds"] == result["total_model_inference_seconds"] / 6
     assert json.loads((tmp_path / "result.json").read_text())["sequence_count"] == 2
     assert not list(tmp_path.glob(".vda_spool_*"))
+
+
+def test_independent_224_inference_and_metric_grid(tmp_path, monkeypatch):
+    config_path, config = make_scared(tmp_path, count=1)
+    config["inference"] = {"image_height": 224, "image_width": 280}
+    config["vda_evaluation"].update({"evaluation_height": 224,
+                                     "evaluation_width": 280, "tae": {"enabled": False}})
+    config_path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded: checkpoint)
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
+                        lambda *args: ConstantPlane().eval())
+    observed = []
+    original_forward = ConstantPlane.forward
+
+    def record(self, images, include_global_points=False):
+        observed.append(tuple(images.shape))
+        return original_forward(self, images, include_global_points)
+
+    monkeypatch.setattr(ConstantPlane, "forward", record)
+    result = evaluate_vda(config_path)
+    assert observed == [(1, 32, 3, 224, 280)] * 2
+    assert result["model_input_resolution_hw"] == [224, 280]
+    assert result["evaluation_resolution_hw"] == [224, 280]
+    assert all(item["inference"]["native_prediction_resolution_hw"] == (224, 280)
+               for item in result["sequences"])
+    assert set(result["metrics"]) == {"abs_relative_difference", "rmse_linear", "delta1_acc"}
+
+
+def test_precomputed_training_rgb_is_resized_only_for_inference(tmp_path):
+    image_path = tmp_path / "frame_000000.png"
+    Image.new("RGB", (560, 448), color=(128, 128, 128)).save(image_path)
+    sequence = {"frame_paths": [str(image_path)],
+                "preprocessing_identity": "canonical_student_rgb"}
+    frames = sequence_frames(
+        sequence, {"image_height": 448, "image_width": 560},
+        inference_height=224, inference_width=280)
+    assert frames[0].shape == (3, 224, 280)
+    assert (frames.height, frames.width) == (224, 280)
+
+
+def test_native_metric_grid_disparity_skips_interpolation(tmp_path, monkeypatch):
+    import evaluation.evaluate_vda as vda_module
+
+    spool = _SequencePredictionSpool(tmp_path, 1, 224, 280)
+    try:
+        monkeypatch.setattr(vda_module, "_opencv", lambda: pytest.fail("same grid must not resize"))
+        values = np.full((1, 224, 280), 0.5, dtype=np.float32)
+        spool.add([0], values)
+        np.testing.assert_array_equal(spool.prediction(0), values[0])
+    finally:
+        spool.close()
 
 
 def test_window_limit_never_claims_full_test_set(tmp_path, monkeypatch):

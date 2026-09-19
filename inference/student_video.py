@@ -14,6 +14,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor
 from inference.kv_sampling import KVSamplingConfig, WindowFrameMetadata
@@ -38,19 +39,31 @@ class SequenceFrames:
 
     def __getitem__(self, index):
         if self.resize_mode == "precomputed":
-            return load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            image = load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            if image.shape[-2:] != (self.height, self.width):
+                image = F.interpolate(
+                    image.unsqueeze(0), size=(self.height, self.width),
+                    mode="bicubic", align_corners=False, antialias=True,
+                ).squeeze(0).clamp_(0, 1)
+            return image
         return load_rgb_tensor(self.paths[index], self.height, self.width,
                                self.resize_mode, "zero_one")
 
 
-def sequence_frames(sequence, dataset_config, *, raw_rgb=False):
+def sequence_frames(sequence, dataset_config, *, raw_rgb=False,
+                    inference_height=None, inference_width=None):
     from evaluation.scared_gt import extract_frame_id
 
     precomputed = sequence.get("preprocessing_identity", "legacy_scared") != "legacy_scared"
     mode = "precomputed" if precomputed and not raw_rgb else dataset_config.get("resize_mode", "resize")
+    height = int(inference_height if inference_height is not None else
+                 dataset_config.get("image_height", 448))
+    width = int(inference_width if inference_width is not None else
+                dataset_config.get("image_width", 560))
+    if min(height, width) <= 0:
+        raise ValueError("Inference image dimensions must be positive")
     frames = SequenceFrames(sequence["frame_paths"], resize_mode=mode,
-                            height=int(dataset_config.get("image_height", 448)),
-                            width=int(dataset_config.get("image_width", 560)))
+                            height=height, width=width)
     frames.absolute_frame_ids = [extract_frame_id(path) for path in sequence["frame_paths"]]
     frames.absolute_id_source = "dataset_filename"
     return frames
@@ -85,6 +98,7 @@ class InferenceStats:
     alignment_fallback_count: int = 0
     peak_cuda_memory_allocated_bytes: int | None = None
     peak_cuda_memory_reserved_bytes: int | None = None
+    native_prediction_resolution_hw: tuple[int, int] | None = None
 
     def as_dict(self):
         n = self.output_frame_count
@@ -189,6 +203,7 @@ def _infer_student_video(model, frames, emit: Callable, *, device, amp,
         depth = prediction["depth"][0].float().cpu().numpy()
         if depth.shape != (WINDOW, *images.shape[-2:]) or not np.isfinite(depth).all():
             raise FloatingPointError("Invalid DA3 sequence depth output")
+        stats.native_prediction_resolution_hw = tuple(depth.shape[-2:])
         disparity = 1.0 / np.maximum(depth, 1e-3)
         intrinsics = prediction["intrinsics"][0].float().cpu().numpy()
         if emit_window is not None:

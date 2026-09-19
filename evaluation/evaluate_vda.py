@@ -150,11 +150,17 @@ class _SequencePredictionSpool:
         self.counts = np.zeros(frame_count, dtype=np.uint16)
 
     def add(self, frame_indices: Sequence[int], disparities: np.ndarray) -> None:
-        cv2 = _opencv()
+        cv2 = None
         for offset, frame_index in enumerate(frame_indices):
-            resized = cv2.resize(
-                disparities[offset], (self.width, self.height)
-            ).astype(np.float32, copy=False)
+            disparity = disparities[offset]
+            if disparity.shape == (self.height, self.width):
+                resized = disparity.astype(np.float32, copy=False)
+            else:
+                if cv2 is None:
+                    cv2 = _opencv()
+                resized = cv2.resize(
+                    disparity, (self.width, self.height), interpolation=cv2.INTER_LINEAR
+                ).astype(np.float32, copy=False)
             self.sums[frame_index] += resized
             self.counts[frame_index] += 1
 

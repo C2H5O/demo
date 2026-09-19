@@ -36,8 +36,9 @@ def test_h_selects_staggered_policy_and_qg_stays_explicitly_configurable() -> No
     assert config.apply_layers is None
     assert config.batched_sdpa is True
     assert raw["vda_evaluation"]["tae"]["enabled"] is False
-    assert raw["vda_evaluation"]["evaluation_height"] == 256
-    assert raw["vda_evaluation"]["evaluation_width"] == 320
+    assert (raw["inference"]["image_height"], raw["inference"]["image_width"]) == (224, 280)
+    assert raw["vda_evaluation"]["evaluation_height"] == 224
+    assert raw["vda_evaluation"]["evaluation_width"] == 280
 
 
 def test_each_query_group_has_own_temporal_k20_and_mandatory_frames() -> None:

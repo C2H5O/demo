@@ -40,8 +40,9 @@ def _evaluation_resolution(
     config: Dict[str, Any], eval_config: Dict[str, Any]
 ) -> Tuple[int, int, int, int]:
     """Keep model-input and metric grids explicit and independent."""
-    model_height = int(config["dataset"]["image_height"])
-    model_width = int(config["dataset"]["image_width"])
+    inference = config.get("inference", {})
+    model_height = int(inference.get("image_height", config["dataset"]["image_height"]))
+    model_width = int(inference.get("image_width", config["dataset"]["image_width"]))
     evaluation_height = int(eval_config.get("evaluation_height", model_height))
     evaluation_width = int(eval_config.get("evaluation_width", model_width))
     if min(model_height, model_width, evaluation_height, evaluation_width) <= 0:
@@ -250,10 +251,13 @@ def evaluate_vda(
     )
     remaining = limit_clips
     sequence_results = []
+    resolution_audit_printed = False
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
-        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+        frames = sequence_frames(
+            sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")),
+            inference_height=model_height, inference_width=model_width)
         spool = vda_core._SequencePredictionSpool(
             output.parent, len(frames), evaluation_height, evaluation_width
         )
@@ -262,6 +266,29 @@ def evaluate_vda(
                 spool.add(range(start, start + len(disparities)), disparities)
             timing = infer_student_video(model, frames, emit, device=device, amp=amp,
                                          max_windows=remaining, kv_sampling=kv_config)
+            if not resolution_audit_printed and isinstance(model, DA3SmallStudent):
+                patch_size = int(model.config.patch_size)
+                native = timing["native_prediction_resolution_hw"]
+                audit = {
+                    "model_input": f"{model_height}x{model_width}",
+                    "patch_size": patch_size,
+                    "patch_grid": f"{model_height // patch_size}x{model_width // patch_size}",
+                    "patches_per_frame": model_height * model_width // patch_size ** 2,
+                    "native_prediction": f"{native[0]}x{native[1]}",
+                    "evaluation_grid": f"{evaluation_height}x{evaluation_width}",
+                    "window_length": WINDOW,
+                }
+                print("DA3 inference resolution audit: " + json.dumps(audit), flush=True)
+                if kv_config.enabled and kv_config.method == "role_layer_spatial_kv":
+                    print("H sparse KV audit: " + json.dumps({
+                        "full_patches_per_frame": audit["patches_per_frame"],
+                        "stride2_patches_per_frame":
+                            (model_height // (2 * patch_size)) *
+                            (model_width // (2 * patch_size)),
+                        "block5": "sparse", "block7": "sparse",
+                        "block9": "dense", "block11": "dense",
+                    }), flush=True)
+                resolution_audit_printed = True
             spool.flush()
             item = vda_core._evaluate_sequence(
                 sequence, spool, int(eval_config.get("gt_depth_channel", 0)),
