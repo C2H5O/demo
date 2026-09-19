@@ -1,7 +1,7 @@
 base_config: _4090_common.yaml
 
 experiment:
-  name: baseline_H_QG_K20
+  name: baseline_H_staggered_spatial_kv
   baseline_id: H
   source_weights_branch: codex/baseline-J
   source_weights_project: vggtoda3-baseline-J
@@ -20,7 +20,7 @@ vda_evaluation:
   # Student's 448x560 model input or its native prediction resolution.
   evaluation_height: 256
   evaluation_width: 320
-  output: ./outputs/baseline_H/evaluation_qg_k20_test.json
+  output: ./outputs/baseline_H/evaluation_staggered_spatial_kv_test.json
   tae:
     enabled: false
 
@@ -28,20 +28,57 @@ visualization:
   output_dir: ./outputs/baseline_H/visualization
 
 inference:
-  acceleration: query_group_kv
+  acceleration: role_layer_spatial_kv
   source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
 
 kv_sampling:
   enabled: true
-  method: query_group
-  query_group_size: 8
-  kv_frames: 20
-  provider_selection: temporal_uniform
-  preserve_vda_history: true
-  keep_all_special_tokens: true
-  apply_layers: null
-  batched_sdpa: true
-  diagnostics: false
+  method: role_layer_spatial_kv
+  retention_ratio: 0.75
+  vda_role:
+    key_frames: 2
+    overlap_frames: 8
+    new_frames: 22
+    selected_new_frames: 14
+  new_frame_selection:
+    method: temporal_bucket_highlight
+    num_buckets: 7
+    keep_per_bucket: 2
+    score: lightweight_highlight
+    tie_break: frame_index
+  first_window:
+    method: bucket_highlight
+    num_frames: 16
+    num_buckets: 16
+  lightweight_highlight:
+    brightness_threshold: 0.90
+    saturation_threshold: 0.20
+    downsample_factor: 4
+  spatial_sampling:
+    enabled: true
+    pattern: staggered
+    early_layers:
+      start: 0
+      end: 7
+      key_stride: 1
+      overlap_stride: 2
+      new_stride: 2
+    late_layers:
+      start: 8
+      end: 11
+      key_stride: 1
+      overlap_stride: 1
+      new_stride: 1
+    staggered:
+      enabled: true
+      cycle: 4
+      layer_phase_offsets:
+        5: 0
+        7: 2
+  special_tokens:
+    keep_all: true
+  diagnostics:
+    print_once_per_sequence: true
   debug: false
   debug_max_windows: 3
   profile_attention: false

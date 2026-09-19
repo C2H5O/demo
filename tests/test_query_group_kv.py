@@ -18,14 +18,15 @@ from utils.config import load_config
 
 
 def current_h() -> KVSamplingConfig:
-    return KVSamplingConfig.from_mapping(
-        load_config("configs/baselines/H.yaml")["kv_sampling"]
-    )
+    # QG remains a standalone optional policy after H switches to staggered KV.
+    return KVSamplingConfig(enabled=True, method="query_group", diagnostics=False)
 
 
-def test_h_is_configurable_qg_k20_without_old_h_fields() -> None:
+def test_h_selects_staggered_policy_and_qg_stays_explicitly_configurable() -> None:
     raw = load_config("configs/baselines/H.yaml")
     config = current_h()
+    assert raw["kv_sampling"]["method"] == "role_layer_spatial_kv"
+    assert raw["kv_sampling"]["spatial_sampling"]["pattern"] == "staggered"
     assert config.method == "query_group"
     assert config.query_group_size == 8
     assert config.kv_frames == 20
@@ -37,15 +38,6 @@ def test_h_is_configurable_qg_k20_without_old_h_fields() -> None:
     assert raw["vda_evaluation"]["tae"]["enabled"] is False
     assert raw["vda_evaluation"]["evaluation_height"] == 256
     assert raw["vda_evaluation"]["evaluation_width"] == 320
-    text = Path("configs/baselines/H.yaml").read_text(encoding="utf-8")
-    for obsolete in (
-        "highlight",
-        "role_layer_spatial_kv",
-        "selected_new_frames",
-        "spatial_sampling",
-        "retention_ratio",
-    ):
-        assert obsolete not in text
 
 
 def test_each_query_group_has_own_temporal_k20_and_mandatory_frames() -> None:

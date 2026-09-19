@@ -1,5 +1,9 @@
-"""Scoped inference adapter for DA3 global-attention frame K/V policies."""
+"""Scoped DA3 global-attention KV gathering, after upstream normalization/RoPE.
 
+Reuse the original attention forward and intercept only its SDPA call, following
+the project's existing instance-local SDPA interception pattern. No checkpoint,
+module parameters, upstream source files or process-global functions are changed.
+"""
 from __future__ import annotations
 
 import json
@@ -13,39 +17,59 @@ import torch.nn.functional as F
 from torch.overrides import TorchFunctionMode
 
 from inference.kv_sampling import (
-    KVSamplingConfig,
-    WindowFrameMetadata,
-    select_kv_frames,
-)
-from inference.query_group_kv import (
-    build_group_token_indices,
-    build_query_group_providers,
-    grouped_scaled_dot_product_attention,
-    provider_token_indices,
+    KVSamplingConfig, WindowFrameMetadata, build_role_layer_patch_indices,
+    eligible_frame_slots, provider_spatial_plan, select_kv_frames, spatial_strides_for_layer,
 )
 from models.attention_capture import _blocks
+from inference.lightweight_highlight import compute_lightweight_highlight_scores
 
 
-def frame_slots_to_token_indices(
-    selected_slots,
-    *,
-    num_frames: int,
-    tokens_per_frame: int,
-    special_tokens: int,
-    reference_indices: torch.Tensor,
-    patch_indices_by_slot=None,
-) -> torch.Tensor:
-    """Compatibility helper for full-spatial shared-provider F/G policies."""
-    if patch_indices_by_slot is not None:
-        raise ValueError("Spatial token pruning is not supported by this adapter")
-    return provider_token_indices(
-        selected_slots,
-        num_frames=num_frames,
-        tokens_per_frame=tokens_per_frame,
-        special_tokens=special_tokens,
-        reference_indices=reference_indices,
-        keep_all_special_tokens=True,
-    )
+def frame_slots_to_token_indices(selected_slots, *, num_frames: int,
+                                  tokens_per_frame: int, special_tokens: int,
+                                  reference_indices: torch.Tensor,
+                                  patch_indices_by_slot=None) -> torch.Tensor:
+    """Map original window slots into DA3's [reference, remaining] token layout.
+
+    Return [B, K] indices: all frames' special-token prefixes, plus configured
+    original-grid patch tokens of each selected frame. These exact indices are
+    shared by K and V.
+    Positions have already been applied to full Q/K before these indices are used.
+    """
+    selected_slots = list(selected_slots)
+    if not selected_slots or len(selected_slots) != len(set(selected_slots)):
+        raise ValueError("Selected frame slots must be nonempty and unique")
+    if any(type(slot) is not int or not 0 <= slot < num_frames for slot in selected_slots):
+        raise ValueError("Selected frame slot outside token layout")
+    if not 0 <= special_tokens < tokens_per_frame:
+        raise ValueError("Token layout must contain a special prefix and nonempty patch range")
+    if reference_indices.ndim != 1 or reference_indices.dtype != torch.long:
+        raise ValueError("Reference indices must be a one-dimensional LongTensor")
+    device = reference_indices.device
+    patch_count = tokens_per_frame - special_tokens
+    if patch_indices_by_slot is None:
+        patch_indices_by_slot = {slot: tuple(range(patch_count)) for slot in selected_slots}
+    if set(patch_indices_by_slot) != set(selected_slots):
+        raise ValueError("Patch-index mapping must cover exactly the selected provider slots")
+    patch_parts = []
+    local_index_cache = {}
+    for slot in selected_slots:
+        offsets = tuple(patch_indices_by_slot[slot])
+        if (not offsets or len(offsets) != len(set(offsets))
+            or any(type(offset) is not int or not 0 <= offset < patch_count for offset in offsets)):
+            raise ValueError("Patch offsets must be nonempty unique original-grid indices")
+        internal = torch.where(slot < reference_indices, slot + 1, slot)
+        internal = torch.where(slot == reference_indices, 0, internal)
+        if offsets not in local_index_cache:
+            local_index_cache[offsets] = (
+                special_tokens + torch.tensor(offsets, dtype=torch.long, device=device)
+            )
+        local = local_index_cache[offsets]
+        patch_parts.append(internal[:, None] * tokens_per_frame + local[None, :])
+    patch_indices = torch.cat(patch_parts, dim=1)
+    special = (torch.arange(num_frames, device=device)[:, None] * tokens_per_frame
+               + torch.arange(special_tokens, device=device)).flatten()
+    special = special[None, :].expand(len(reference_indices), -1)
+    return torch.cat((special, patch_indices), dim=1)
 
 
 class _KVSDPAMode(TorchFunctionMode):
@@ -61,7 +85,20 @@ class _KVSDPAMode(TorchFunctionMode):
 
 
 class DA3KVAttention:
-    """Temporarily replace selected DA3 global SDPA calls during one sequence."""
+    """Temporary inference adapter with explicit per-window metadata.
+
+    Only selected global layers are wrapped, and every wrapper/hook is restored
+    even when inference raises. Dense without debug/profiling installs no hooks.
+    Every global layer uses the same provider frames within a window. H keeps
+    16 providers in its first window and 24 in standard later windows, while
+    patch K/V density follows the real DA3 encoder block index.
+    """
+
+    def __new__(cls, model, config: KVSamplingConfig, window_length: int):
+        if cls is DA3KVAttention and config.enabled and config.method == "query_group":
+            from inference.qg_kv_attention import DA3KVAttention as QGKVAttention
+            return QGKVAttention(model, config, window_length)
+        return super().__new__(cls)
 
     def __init__(self, model, config: KVSamplingConfig, window_length: int):
         self.model, self.config = model, config
@@ -69,61 +106,58 @@ class DA3KVAttention:
         self.encoder = getattr(getattr(model, "backbone", None), "pretrained", None)
         self.observing = config.enabled or config.debug or config.profile_attention
         self.stack = ExitStack()
-        self.layers: list[int] = []
+        self.layers = []
         self.shape_counts = Counter()
         self.audit_examples = []
-        self.kernel_call_counts = Counter()
         self.attention_seconds = 0.0
         self.profiled_calls = 0
+        self.diagnostic_printed = False
         self.metadata = None
-        self.events = []
+        self.highlight_processor = None
+        if config.enabled and config.method == "vda_role_highlight":
+            from datasets.highlight import HighlightDetectionConfig, SpecularHighlightProcessor
+            self.highlight_processor = SpecularHighlightProcessor(
+                HighlightDetectionConfig(**config.highlight_detection))
         if self.encoder is None:
             if self.observing:
-                raise RuntimeError("K/V sampling requires the real DA3 encoder")
+                raise RuntimeError("KV sampling requires the real DA3 backbone.pretrained encoder")
             return
-
         self.patch_size = int(self.encoder.patch_size)
         self.special_tokens = 1 + int(self.encoder.num_register_tokens)
         self.blocks = _blocks(self.encoder)
         alt_start = int(self.encoder.alt_start)
-        global_layers = [
-            layer
-            for layer in range(len(self.blocks))
-            if alt_start != -1 and layer >= alt_start and layer % 2 == 1
-        ]
-        if self.observing and (not global_layers or not 0 <= alt_start - 2 < len(self.blocks)):
-            raise RuntimeError("DA3 alt_start does not identify global attention")
-        if config.enabled and config.method == "query_group" and config.apply_layers is not None:
-            requested = list(dict.fromkeys(config.apply_layers))
-            if any(layer not in global_layers for layer in requested):
-                raise ValueError("apply_layers must contain DA3 global encoder blocks")
-            self.layers = requested
-        else:
-            self.layers = global_layers
+        self.layers = [i for i in range(len(self.blocks))
+                       if alt_start != -1 and i >= alt_start and i % 2 == 1]
+        if self.observing and (not self.layers or not 0 <= alt_start - 2 < len(self.blocks)):
+            raise RuntimeError("Unsupported DA3 global/reference-selection block layout")
+        if config.enabled and config.method == "role_layer_spatial_kv":
+            if len(self.blocks) != 12:
+                raise RuntimeError("Role/layer spatial KV requires the 12-block DA3-Small encoder")
+            for layer in self.layers:
+                spatial_strides_for_layer(layer, config.spatial_sampling)
 
     def __enter__(self):
         if not self.observing:
             return self
         if self.model.training or getattr(self.model, "attention_capture", None) is not None:
-            raise ValueError("K/V adapter requires eval mode without attention capture")
+            raise ValueError("KV adapter requires eval mode without training attention capture")
         try:
+            # Same reference-source hook convention as DA3AttentionCapture. The
+            # deterministic upstream selector is repeated solely to recover its
+            # permutation; it never chooses the KV frame set.
             source = self.blocks[int(self.encoder.alt_start) - 2]
             handle = source.register_forward_hook(self._capture_reference)
             self.stack.callback(handle.remove)
-            handle = self.model.backbone.register_forward_pre_hook(
-                self._backbone_input, with_kwargs=True
-            )
+            handle = self.model.backbone.register_forward_pre_hook(self._backbone_input, with_kwargs=True)
             self.stack.callback(handle.remove)
             for layer in self.layers:
                 attention = self.blocks[layer].attn
                 if type(attention).__module__ != "depth_anything_3.model.dinov2.layers.attention":
-                    raise RuntimeError(
-                        "Unsupported DA3 attention implementation at layer " + str(layer)
-                    )
+                    raise RuntimeError("Unsupported attention implementation at layer " + str(layer))
+                if not self.config.enabled and not attention.fused_attn:
+                    raise RuntimeError("Dense attention audit requires the existing SDPA path")
                 if self.config.enabled:
                     self._replace(attention, "fused_attn", True)
-                elif not attention.fused_attn:
-                    raise RuntimeError("Dense attention audit requires the SDPA path")
                 self._replace(attention, "forward", self._wrap(attention.forward, layer))
             return self
         except BaseException:
@@ -131,19 +165,22 @@ class DA3KVAttention:
             raise
 
     def __exit__(self, *exc):
-        self._clear_window()
+        self.metadata = None
+        self.token_indices = None
+        self.token_indices_by_layer = None
+        self.reference_indices = None
+        self.events = []
         return self.stack.__exit__(*exc)
 
-    def _replace(self, module, name, value) -> None:
+    def _replace(self, module, name, value):
+        """Restore class-dispatched methods as well as existing instance overrides."""
         existed = name in vars(module)
         previous = vars(module).get(name)
-
         def restore():
             if existed:
                 setattr(module, name, previous)
             else:
                 delattr(module, name)
-
         self.stack.callback(restore)
         setattr(module, name, value)
 
@@ -151,148 +188,123 @@ class DA3KVAttention:
         @wraps(original)
         def forward(*args, **kwargs):
             if self.metadata is None or self.model.training or torch.is_grad_enabled():
-                raise RuntimeError("K/V attention executed outside its inference window")
+                raise RuntimeError("KV attention executed outside its inference-window scope")
             with _KVSDPAMode(self, layer):
                 return original(*args, **kwargs)
-
         return forward
 
-    def begin_window(self, metadata: WindowFrameMetadata, images: torch.Tensor) -> None:
-        """Build provider sets inside the caller's synchronized model timer."""
-        if images.ndim != 5 or images.shape[1] != len(metadata.frame_positions):
-            raise ValueError("Window images and metadata must describe the same frames")
+    def begin_window(self, metadata: WindowFrameMetadata, images: torch.Tensor):
+        """Receive provenance from window construction, never infer roles in attention."""
         self.metadata = metadata
-        self.batch, self.frames = images.shape[:2]
-        self.grid_height = images.shape[-2] // self.patch_size if self.encoder is not None else 0
-        self.grid_width = images.shape[-1] // self.patch_size if self.encoder is not None else 0
-        self.patches = self.grid_height * self.grid_width
-        self.tokens_per_frame = self.special_tokens + self.patches if self.encoder is not None else 0
+        self.highlight_scores = None
+        self.selection_audit = {}
+        if self.config.enabled and self.config.method in {
+            "vda_role_bucket_highlight", "role_layer_spatial_kv"
+        }:
+            self.budget = self.config.frame_budget(len(metadata.frame_positions), first_window=metadata.first_window)
+            if images.ndim != 5 or images.shape[0] != 1 or images.shape[1] != len(metadata.frame_positions):
+                raise ValueError("Bucket highlight selection requires [1,F,3,H,W] matching metadata")
+            new_slots = [slot for slot in eligible_frame_slots(metadata)
+                         if metadata.frame_roles[slot] == "new"]
+            self.highlight_scores = {}
+            if new_slots:
+                indices = torch.tensor(new_slots, dtype=torch.long, device=images.device)
+                new_images = images[0].index_select(0, indices)
+                scores = compute_lightweight_highlight_scores(new_images, self.config.lightweight_highlight)
+                # One tiny score-vector host transfer per window, never RGB/masks.
+                # Selection stays inside the existing synchronized forward timer.
+                self.highlight_scores = dict(zip(new_slots, scores.detach().cpu().tolist()))
+        elif self.highlight_processor is not None:
+            if images.shape[0] != 1:
+                raise ValueError("Highlight window selection requires the sequence inference batch size of one")
+            # begin_window is inside synchronized inference timing. Detection,
+            # device-to-host copies, pixel ratios and ranking are all included.
+            self.highlight_scores = {
+                slot: float(self.highlight_processor.detect_mask_numpy(images[0, slot]).mean())
+                for slot in eligible_frame_slots(metadata) if metadata.frame_roles[slot] == "new"
+            }
+        self.selected = select_kv_frames(metadata, self.config, self.budget,
+                                         self.highlight_scores, self.selection_audit)
         self.calls, self.events = [], []
         self.reference_indices = None
         self.token_indices = None
-        self.query_indices = self.provider_indices = None
-        self.group_kernel_calls = {}
-        if not self.config.enabled:
-            return
-        if self.config.method == "query_group":
-            self.query_groups, self.provider_groups = build_query_group_providers(
-                metadata,
-                self.config.query_group_size,
-                self.config.kv_frames,
-                preserve_vda_history=self.config.preserve_vda_history,
-            )
-        else:
-            self.selected = select_kv_frames(metadata, self.config, self.budget)
+        self.token_indices_by_layer = None
+        self.batch, self.frames = images.shape[:2]
+        if self.frames != len(metadata.frame_positions):
+            raise RuntimeError("Metadata does not match model input frames")
+        if self.encoder is not None:
+            self.grid_height = images.shape[-2] // self.patch_size
+            self.grid_width = images.shape[-1] // self.patch_size
+            self.patches = self.grid_height * self.grid_width
+            self.tokens_per_frame = self.special_tokens + self.patches
 
-    def _backbone_input(self, module, args, kwargs) -> None:
+    def _backbone_input(self, module, args, kwargs):
         self.ref_strategy = kwargs.get("ref_view_strategy", "saddle_balanced")
         self.camera_conditioned = kwargs.get("cam_token") is not None
 
-    def _capture_reference(self, module, args, output) -> None:
+    def _capture_reference(self, module, args, output):
         from depth_anything_3.model.reference_view_selector import select_reference_view
         from depth_anything_3.utils.constants import THRESH_FOR_REF_SELECTION
 
         if self.frames >= THRESH_FOR_REF_SELECTION and not self.camera_conditioned:
             value = output.detach().reshape(self.batch, self.frames, *output.shape[1:])
-            self.reference_indices = select_reference_view(
-                value, strategy=self.ref_strategy
-            ).detach()
+            self.reference_indices = select_reference_view(value, strategy=self.ref_strategy).detach()
         else:
-            self.reference_indices = torch.zeros(
-                self.batch, dtype=torch.long, device=output.device
-            )
-        if not self.config.enabled:
-            return
-        if self.config.method == "query_group":
-            self.query_indices, self.provider_indices = build_group_token_indices(
-                self.query_groups,
-                self.provider_groups,
-                num_frames=self.frames,
-                tokens_per_frame=self.tokens_per_frame,
-                special_tokens=self.special_tokens,
-                reference_indices=self.reference_indices,
-                keep_all_special_tokens=self.config.keep_all_special_tokens,
-            )
-        else:
-            self.token_indices = frame_slots_to_token_indices(
-                self.selected,
-                num_frames=self.frames,
-                tokens_per_frame=self.tokens_per_frame,
-                special_tokens=self.special_tokens,
-                reference_indices=self.reference_indices,
-            )
+            self.reference_indices = torch.zeros(self.batch, dtype=torch.long, device=output.device)
+        if self.config.enabled:
+            self.token_indices_by_layer = {}
+            token_layout_cache = {}
+            for layer in self.layers:
+                patch_indices = None
+                if self.config.method == "role_layer_spatial_kv":
+                    patch_indices = build_role_layer_patch_indices(
+                        self.metadata, self.selected, layer, self.grid_height, self.grid_width,
+                        self.config.spatial_sampling)
+                signature = None if patch_indices is None else tuple(patch_indices.items())
+                if signature not in token_layout_cache:
+                    token_layout_cache[signature] = frame_slots_to_token_indices(
+                        self.selected, num_frames=self.frames,
+                        tokens_per_frame=self.tokens_per_frame,
+                        special_tokens=self.special_tokens,
+                        reference_indices=self.reference_indices,
+                        patch_indices_by_slot=patch_indices,
+                    )
+                self.token_indices_by_layer[layer] = token_layout_cache[signature]
+            # Compatibility surface for existing uniform-KV policies and their tests.
+            self.token_indices = self.token_indices_by_layer[self.layers[0]]
 
-    def attend(
-        self,
-        layer,
-        kernel,
-        query,
-        key,
-        value,
-        attn_mask=None,
-        dropout_p=0.0,
-        is_causal=False,
-        **kwargs,
-    ):
+    def attend(self, layer, kernel, query, key, value, attn_mask=None,
+               dropout_p=0.0, is_causal=False, **kwargs):
+        """Gather full-frame patch K/V before SDPA; leave full Q and its order intact."""
         expected = self.frames * self.tokens_per_frame
         if query.ndim != 4 or query.shape != key.shape or key.shape != value.shape:
-            raise RuntimeError("Expected full DA3 Q/K/V [B,H,F*tokens,D]")
+            raise RuntimeError("Expected full DA3 Q/K/V [B,heads,F*tokens,head_dim]")
         if query.shape[0] != self.batch or query.shape[-2] != expected:
-            raise RuntimeError("Global attention tokens do not match the VDA window")
-        if self.config.enabled and (attn_mask is not None or is_causal or dropout_p):
-            raise ValueError("Inference K/V sampling expects unmasked noncausal SDPA")
-
+            raise RuntimeError("Global attention token count does not match window metadata")
+        if self.config.enabled:
+            if attn_mask is not None or is_causal or dropout_p:
+                raise ValueError("VDA KV sampling expects unmasked, noncausal eval attention")
+            if self.token_indices_by_layer is None or layer not in self.token_indices_by_layer:
+                raise RuntimeError("DA3 reference permutation was not captured before global attention")
+            token_indices = self.token_indices_by_layer[layer]
+            indices = token_indices[:, None, :, None].expand(
+                self.batch, key.shape[1], -1, key.shape[-1])
+            key = torch.gather(key, dim=2, index=indices)
+            value = torch.gather(value, dim=2, index=indices)
+        expected_kv = (self.token_indices_by_layer[layer].shape[1] if self.config.enabled
+                       else self.frames * self.tokens_per_frame)
+        if key.shape[-2] != expected_kv or key.shape != value.shape:
+            raise RuntimeError("K/V gather did not preserve the shared selected-token budget")
+        self.calls.append((layer, int(query.shape[-2]), int(key.shape[-2])))
         event_pair = None
         if self.config.profile_attention:
             if query.is_cuda:
-                event_pair = (
-                    torch.cuda.Event(enable_timing=True),
-                    torch.cuda.Event(enable_timing=True),
-                )
+                event_pair = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
                 event_pair[0].record()
             else:
                 tick = time.perf_counter()
-
-        if self.config.enabled and self.config.method == "query_group":
-            if self.query_indices is None or self.provider_indices is None:
-                raise RuntimeError("DA3 reference permutation was not captured")
-            result, grouped_calls = grouped_scaled_dot_product_attention(
-                kernel,
-                query,
-                key,
-                value,
-                self.query_indices,
-                self.provider_indices,
-                batched_sdpa=self.config.batched_sdpa,
-                attn_mask=attn_mask,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-                **kwargs,
-            )
-            self.group_kernel_calls[layer] = grouped_calls
-            kv_tokens = self.provider_indices[0].shape[1]
-            self.kernel_call_counts[layer] += len(grouped_calls)
-        else:
-            if self.config.enabled:
-                if self.token_indices is None:
-                    raise RuntimeError("DA3 reference permutation was not captured")
-                indices = self.token_indices[:, None, :, None].expand(
-                    self.batch, key.shape[1], -1, key.shape[-1]
-                )
-                key = torch.gather(key, 2, indices)
-                value = torch.gather(value, 2, indices)
-            kv_tokens = key.shape[-2]
-            result = kernel(
-                query,
-                key,
-                value,
-                attn_mask=attn_mask,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-                **kwargs,
-            )
-            self.kernel_call_counts[layer] += 1
-
+        result = kernel(query, key, value, attn_mask=attn_mask,
+                        dropout_p=dropout_p, is_causal=is_causal, **kwargs)
         if self.config.profile_attention:
             if event_pair is not None:
                 event_pair[1].record()
@@ -302,76 +314,163 @@ class DA3KVAttention:
             self.profiled_calls += 1
         if result.shape != query.shape:
             raise RuntimeError("Attention must return every original query token")
-        self.calls.append((layer, int(query.shape[-2]), int(kv_tokens)))
         return result
 
-    def finish_window(self) -> None:
+    def finish_window(self):
+        """Audit actual SDPA dimensions after the caller's CUDA synchronization."""
         metadata = self.metadata
         if self.observing:
-            if sorted(layer for layer, _, _ in self.calls) != sorted(self.layers):
-                raise RuntimeError("Not every configured global layer executed once")
+            if sorted(layer for layer, _, _ in self.calls) != self.layers:
+                raise RuntimeError("Not every target global layer executed exactly one audited SDPA")
             self.shape_counts.update(self.calls)
-            self.attention_seconds += sum(
-                start.elapsed_time(end) / 1000 for start, end in self.events
-            )
-        if self.config.enabled and self.config.method == "query_group" and (
-            self.config.debug or self.config.diagnostics
-        ):
+            self.attention_seconds += sum(start.elapsed_time(end) / 1000 for start, end in self.events)
+        if self.encoder is not None:
+            q_tokens = self.frames * self.tokens_per_frame
+            layer_kv_tokens = {
+                layer: (int(self.token_indices_by_layer[layer].shape[1]) if self.config.enabled
+                        else q_tokens)
+                for layer in self.layers
+            }
+            unique_kv_tokens = set(layer_kv_tokens.values())
+            kv_tokens = next(iter(unique_kv_tokens)) if len(unique_kv_tokens) == 1 else None
+            layer_kv_patches = {
+                layer: count - self.frames * self.special_tokens
+                for layer, count in layer_kv_tokens.items()
+            }
+            unique_kv_patches = set(layer_kv_patches.values())
+            kv_patches = next(iter(unique_kv_patches)) if len(unique_kv_patches) == 1 else None
+            if not self.observing:
+                self.shape_counts.update((layer, q_tokens, kv_tokens) for layer in self.layers)
+            selected_roles = {role: [slot for slot in self.selected if metadata.frame_roles[slot] == role]
+                              for role in ("key", "overlap", "new")}
             audit = {
                 "window_id": metadata.window_id,
-                "first_window": metadata.first_window,
-                "query_groups": self.query_groups,
-                "provider_groups": self.provider_groups,
-                "provider_counts": [len(group) for group in self.provider_groups],
-                "provider_roles": [
-                    [metadata.frame_roles[slot] for slot in group]
-                    for group in self.provider_groups
-                ],
-                "keep_all_special_tokens": self.config.keep_all_special_tokens,
-                "batched_sdpa": self.config.batched_sdpa,
-                "sdpa_calls_by_layer": self.group_kernel_calls,
+                "window_slots": list(range(self.frames)),
+                "sequence_positions": list(metadata.frame_positions),
+                "absolute_frame_ids": list(metadata.absolute_frame_ids),
+                "absolute_id_source": metadata.absolute_id_source,
+                "frame_roles": list(metadata.frame_roles),
+                "is_padding": list(metadata.is_padding),
+                "role_counts": dict(Counter(metadata.frame_roles)),
+                "selected_kv_window_slots": self.selected,
+                "selected_kv_absolute_frame_ids": [metadata.absolute_frame_ids[slot] for slot in self.selected],
+                "selected_by_role": selected_roles,
+                "selected_role_counts": {role: len(slots) for role, slots in selected_roles.items()},
+                "total_kv_frame_count": len(self.selected),
+                "input_frame_count": self.frames,
+                "q_patch_token_count": self.frames * self.patches,
+                "kv_patch_token_count": kv_patches,
+                "kv_patch_token_count_by_layer": layer_kv_patches,
+                "special_tokens_per_frame": self.special_tokens,
+                "q_token_count": q_tokens, "kv_token_count": kv_tokens,
+                "kv_token_count_by_layer": layer_kv_tokens,
+                "frame_retention_ratio": len(self.selected) / self.frames,
+                "token_retention_ratio": kv_tokens / q_tokens if kv_tokens is not None else None,
+                "token_retention_ratio_by_layer": {
+                    layer: count / q_tokens for layer, count in layer_kv_tokens.items()
+                },
+                "token_count_source": "observed_sdpa_inputs" if self.observing else "encoder_layout_dense",
             }
-            if len(self.audit_examples) < self.config.debug_max_windows:
-                self.audit_examples.append(audit)
-            if self.config.diagnostics:
-                print("QG-KV audit: " + json.dumps(audit), flush=True)
-        self._clear_window()
+            if self.highlight_scores is not None:
+                audit["new_highlight_scores"] = self.highlight_scores
+                audit["new_candidate_count"] = len(self.highlight_scores)
+                audit["highlight_score_type"] = "highlight_pixels / all_RGB_pixels"
+                if self.config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
+                    audit["highlight_score_type"] = "gpu_brightness_low_saturation_ratio"
+                    audit.update(self.selection_audit)
+            if self.config.method == "role_layer_spatial_kv":
+                def spatial_sample(layer):
+                    plan = provider_spatial_plan(
+                        metadata, self.selected, layer, self.config.spatial_sampling)
+                    patches = build_role_layer_patch_indices(
+                        metadata, self.selected, layer, self.grid_height, self.grid_width,
+                        self.config.spatial_sampling)
+                    return [{**item, "patch_count": len(patches[item["provider_slot"]])}
+                            for item in plan[:12]]
 
-    def _clear_window(self) -> None:
+                audit["spatial_provider_sample_by_layer"] = {
+                    layer: spatial_sample(layer)
+                    for layer in self.layers
+                }
+            audit_limit = (self.config.debug_max_windows
+                           if self.config.debug and self.config.method in {
+                               "vda_role_bucket_highlight", "role_layer_spatial_kv"
+                           } else 2)
+            if len(self.audit_examples) < audit_limit:
+                self.audit_examples.append(audit)
+            if (self.config.method == "role_layer_spatial_kv" and not self.diagnostic_printed
+                and self.config.diagnostics.get("print_once_per_sequence") is True):
+                sparse_patches = len(range(0, self.grid_height, 2)) * len(
+                    range(0, self.grid_width, 2))
+                standard_early_tokens = (
+                    self.frames * self.special_tokens
+                    + self.config.key_frames * self.patches
+                    + (self.config.overlap_frames + self.config.selected_new_frames)
+                    * sparse_patches
+                )
+                standard_late_tokens = (
+                    self.frames * self.special_tokens
+                    + (self.config.key_frames + self.config.overlap_frames
+                       + self.config.selected_new_frames) * self.patches
+                )
+                schedules = {
+                    "early": {"encoder_blocks": [layer for layer in self.layers if layer <= 7],
+                              "strides": spatial_strides_for_layer(5, self.config.spatial_sampling)},
+                    "late": {"encoder_blocks": [layer for layer in self.layers if layer >= 8],
+                             "strides": spatial_strides_for_layer(9, self.config.spatial_sampling)},
+                }
+                diagnostic = {
+                    "configured_standard_window": {
+                        "window_frames": 32, "key": self.config.key_frames,
+                        "overlap": self.config.overlap_frames,
+                        "new_candidates": self.config.new_frames,
+                        "selected_new": self.config.selected_new_frames,
+                        "kv_provider_frames": (self.config.key_frames + self.config.overlap_frames
+                                               + self.config.selected_new_frames),
+                        "unselected_new": self.config.new_frames - self.config.selected_new_frames,
+                        "dense_kv_tokens": q_tokens,
+                        "early_sparse_kv_tokens": standard_early_tokens,
+                        "late_sparse_kv_tokens": standard_late_tokens,
+                        "early_retention_ratio": standard_early_tokens / q_tokens,
+                        "late_retention_ratio": standard_late_tokens / q_tokens,
+                    },
+                    "observed_window": {
+                        "window_id": metadata.window_id, "first_window": metadata.first_window,
+                        "role_counts": audit["role_counts"],
+                        "selected_role_counts": audit["selected_role_counts"],
+                        "kv_provider_frames": len(self.selected),
+                    },
+                    "layer_schedule": schedules,
+                    "spatial_provider_sample_by_layer": audit["spatial_provider_sample_by_layer"],
+                    "dense_kv_tokens": q_tokens,
+                    "sparse_kv_tokens_by_encoder_block": layer_kv_tokens,
+                    "retention_ratio_by_encoder_block": audit["token_retention_ratio_by_layer"],
+                }
+                print("KV sampling diagnostics: " + json.dumps(diagnostic, ensure_ascii=False), flush=True)
+                self.diagnostic_printed = True
+            if self.config.debug and metadata.window_id < self.config.debug_max_windows:
+                # Logging is outside model-forward timing. No GPU->CPU reference
+                # transfer is needed during the timed attention path.
+                audit = dict(audit)
+                audit["da3_reference_window_slots"] = self.reference_indices.cpu().tolist()
+                print("KV selection audit: " + json.dumps(audit, ensure_ascii=False), flush=True)
         self.metadata = None
-        self.reference_indices = None
         self.token_indices = None
-        self.query_indices = self.provider_indices = None
+        self.token_indices_by_layer = None
+        self.reference_indices = None
         self.events = []
 
-    def summary(self) -> dict:
-        kv_count_name = (
-            "kv_token_count_per_group"
-            if self.config.method == "query_group"
-            else "kv_token_count"
-        )
+    def summary(self):
+        """Bounded sequence-level shape audit and optional measured SDPA time."""
         return {
             "kv_sampling": self.config.as_dict(),
             "global_attention_layers": self.layers,
-            "attention_shapes": [
-                {
-                    "layer": layer,
-                    "q_token_count": q_tokens,
-                    kv_count_name: kv_tokens,
-                    "calls": count,
-                }
-                for (layer, q_tokens, kv_tokens), count in sorted(
-                    self.shape_counts.items()
-                )
-            ],
-            "grouped_sdpa_kernel_calls": dict(self.kernel_call_counts),
+            "attention_token_count_source": ("observed_sdpa_inputs" if self.observing else
+                                              "encoder_layout_dense" if self.encoder is not None else "unavailable"),
+            "attention_shapes": [{"layer": layer, "q_token_count": q, "kv_token_count": k, "calls": count}
+                                 for (layer, q, k), count in sorted(self.shape_counts.items())],
             "kv_selection_examples": self.audit_examples,
-            "grouped_attention_seconds": (
-                self.attention_seconds if self.config.profile_attention else None
-            ),
-            "grouped_attention_profiled_layers": self.profiled_calls,
-            "attention_timing_scope": (
-                "optional grouped gather + reshape + SDPA + restore time; "
-                "model_forward_seconds remains the primary end-to-end model timing"
-            ),
+            "global_sdpa_seconds": self.attention_seconds if self.config.profile_attention else None,
+            "global_sdpa_profiled_calls": self.profiled_calls,
+            "attention_timing_scope": "optional sum of global SDPA calls only; excludes QKV projection, normalization, RoPE, frame selection and K/V gather",
         }
