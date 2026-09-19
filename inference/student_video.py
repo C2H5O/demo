@@ -28,7 +28,7 @@ class SequenceFrames:
     """Lazy RGB decoding: accept all paths without retaining an entire video in RAM."""
 
     def __init__(self, paths: Sequence[str | Path], *, resize_mode: str = "resize",
-                 height: int = 448, width: int = 560):
+                 height: int = 224, width: int = 280):
         self.paths = list(paths)
         self.resize_mode, self.height, self.width = resize_mode, height, width
 
@@ -42,12 +42,14 @@ class SequenceFrames:
                                self.resize_mode, "zero_one")
 
 
-def sequence_frames(sequence, dataset_config, *, raw_rgb=False):
+def sequence_frames(sequence, dataset_config, *, raw_rgb=False, inference_config=None):
+    inference_config = inference_config or {}
+    height = int(inference_config.get("image_height", dataset_config.get("image_height", 224)))
+    width = int(inference_config.get("image_width", dataset_config.get("image_width", 280)))
     precomputed = sequence.get("preprocessing_identity", "legacy_scared") != "legacy_scared"
-    mode = "precomputed" if precomputed and not raw_rgb else dataset_config.get("resize_mode", "resize")
+    mode = "precomputed" if precomputed and not raw_rgb and (height, width) == (448, 560) else dataset_config.get("resize_mode", "resize")
     return SequenceFrames(sequence["frame_paths"], resize_mode=mode,
-                          height=int(dataset_config.get("image_height", 448)),
-                          width=int(dataset_config.get("image_width", 560)))
+                          height=height, width=width)
 
 
 def align_disparity(current: np.ndarray, reference: np.ndarray):

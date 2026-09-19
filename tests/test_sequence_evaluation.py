@@ -43,6 +43,8 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     config, _ = make_scared(tmp_path)
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
                         lambda *args: ConstantPlane().eval())
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+                        lambda checkpoint, config: checkpoint)
     result = evaluate_vda(config)
     assert result["full_test_set"] and result["complete_tae_coverage"]
     assert result["inference_frame_count"] == 6
@@ -58,10 +60,29 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert not list(tmp_path.glob(".vda_spool_*"))
 
 
+def test_distinct_inference_and_evaluation_grid(tmp_path, monkeypatch, capsys):
+    config_path, config = make_scared(tmp_path)
+    config["inference"] = {"image_height": 224, "image_width": 280}
+    config["vda_evaluation"].update({"evaluation_height": 224, "evaluation_width": 280,
+                                      "tae": {"enabled": False}})
+    config_path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
+                        lambda *args: ConstantPlane().eval())
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+                        lambda checkpoint, config: checkpoint)
+    result = evaluate_vda(config_path)
+    assert result["input_resolution_hw"] == [224, 280]
+    assert all(item["evaluation_shape_hxw"] == [224, 280] for item in result["sequences"])
+    assert result["metrics"]["tae"] is None
+    assert capsys.readouterr().out.count("DA3 inference resolution audit:") == 1
+
+
 def test_window_limit_never_claims_full_test_set(tmp_path, monkeypatch):
     config, _ = make_scared(tmp_path)
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
                         lambda *args: ConstantPlane().eval())
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+                        lambda checkpoint, config: checkpoint)
     result = evaluate_vda(config, limit_clips=1)
     assert not result["full_test_set"]
     assert result["sequence_count"] == 1
@@ -73,6 +94,8 @@ def test_missing_gt_never_claims_complete_coverage(tmp_path, monkeypatch):
         path.unlink()
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
                         lambda *args: ConstantPlane().eval())
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+                        lambda checkpoint, config: checkpoint)
     result = evaluate_vda(config)
     assert not result["full_test_set"] and not result["complete_gt_coverage"]
     assert len(result["skipped_sequences_without_gt"]) == 1

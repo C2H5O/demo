@@ -230,14 +230,19 @@ def evaluate_vda(
         inference_checkpoint = ensure_merged_student_checkpoint(checkpoint, config)
     model = _evaluation_model(inference_checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
-    height = int(config["dataset"]["image_height"])
-    width = int(config["dataset"]["image_width"])
+    inference_config = config.get("inference", {})
+    input_height = int(inference_config.get("image_height", config["dataset"]["image_height"]))
+    input_width = int(inference_config.get("image_width", config["dataset"]["image_width"]))
+    height = int(eval_config.get("evaluation_height", input_height))
+    width = int(eval_config.get("evaluation_width", input_width))
+    if (input_height, input_width) == (224, 280):
+        print("DA3 inference resolution audit:\nmodel_input = 224x280\npatch_size = 14\npatch_grid = 16x20\npatches_per_frame = 320\nnative_prediction = 224x280\nevaluation_grid = {}x{}\nwindow_length = 32".format(height, width))
     remaining = limit_clips
     sequence_results = []
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
-        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")), inference_config=inference_config)
         spool = vda_core._SequencePredictionSpool(output.parent, len(frames), height, width)
         try:
             def emit(start, disparities, intrinsics):
@@ -298,7 +303,7 @@ def evaluate_vda(
         "timing_scope": sequence_results[0]["inference"]["timing_scope"],
         "warmup_excluded": False, "amp": amp, "device": str(device),
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
-        "torch_version": torch.__version__, "input_resolution_hw": [height, width],
+        "torch_version": torch.__version__, "input_resolution_hw": [input_height, input_width],
         "window_limit": limit_clips,
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }
