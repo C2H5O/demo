@@ -95,7 +95,9 @@ def test_baseline_configs_keep_native_input_and_lock_paper_grid() -> None:
     config = load_config(path)
     assert [config["dataset"]["image_height"], config["dataset"]["image_width"]] == [448, 560]
     assert [config["student"]["image_height"], config["student"]["image_width"]] == [448, 560]
-    assert [config[section]["evaluation_height"], config[section]["evaluation_width"]] == [256, 320]
+    assert [config["inference"]["image_height"], config["inference"]["image_width"]] == [224, 280]
+    assert [config[section]["evaluation_height"], config[section]["evaluation_width"]] == [224, 280]
+    assert config[section]["tae"]["enabled"] is False
 
 
 def test_spool_resizes_disparity_bilinearly_before_evaluation(tmp_path: Path) -> None:
@@ -120,6 +122,17 @@ def test_spool_resizes_disparity_bilinearly_before_evaluation(tmp_path: Path) ->
         spool.close()
 
 
+def test_spool_skips_same_shape_interpolation(tmp_path: Path, monkeypatch) -> None:
+    spool = _SequencePredictionSpool(tmp_path, 1, height=2, width=3)
+    monkeypatch.setattr(cv2, "resize", lambda *args, **kwargs: pytest.fail("unnecessary resize"))
+    try:
+        values = np.arange(6, dtype=np.float32).reshape(1, 2, 3)
+        spool.add([0], values)
+        np.testing.assert_array_equal(spool.prediction(0), values[0])
+    finally:
+        spool.close()
+
+
 def test_ground_truth_uses_nearest_neighbor_at_evaluation_shape(tmp_path: Path) -> None:
     path = tmp_path / "depth_000000.npy"
     np.save(path, np.array([[1000.0, 2000.0], [3000.0, 4000.0]], np.float32))
@@ -137,6 +150,10 @@ def test_result_metadata_separates_native_model_and_evaluation_grids(
     monkeypatch.setattr(
         "evaluation.evaluate_crossclip_projection._evaluation_model",
         lambda *args: _NativePlane().eval(),
+    )
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, config: checkpoint,
     )
     result = evaluate_vda(config)
     written = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))

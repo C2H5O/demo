@@ -39,8 +39,9 @@ def _evaluation_resolution(
     config: Dict[str, Any], eval_config: Dict[str, Any]
 ) -> Tuple[int, int, int, int]:
     """Return model-input and evaluation grids without conflating them."""
-    model_input_height = int(config["dataset"]["image_height"])
-    model_input_width = int(config["dataset"]["image_width"])
+    inference_config = config.get("inference", {})
+    model_input_height = int(inference_config.get("image_height", config["dataset"]["image_height"]))
+    model_input_width = int(inference_config.get("image_width", config["dataset"]["image_width"]))
     evaluation_height = int(
         eval_config.get("evaluation_height", model_input_height)
     )
@@ -266,7 +267,8 @@ def evaluate_vda(
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
-        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")),
+                                 inference_config=config.get("inference"))
         spool = vda_core._SequencePredictionSpool(
             output.parent, len(frames), evaluation_height, evaluation_width
         )
@@ -287,6 +289,16 @@ def evaluate_vda(
             item["metrics"]["tae"] = item["temporal"]["tae"]
             item["inference"] = timing
             native_shapes = sorted(spool.native_prediction_resolutions_hw)
+            if not sequence_results:
+                patch_size = int(config["student"].get("patch_size", 14))
+                print("DA3 inference resolution audit:\n"
+                      f"model_input = {model_input_height}x{model_input_width}\n"
+                      f"patch_size = {patch_size}\n"
+                      f"patch_grid = {model_input_height // patch_size}x{model_input_width // patch_size}\n"
+                      f"patches_per_frame = {(model_input_height // patch_size) * (model_input_width // patch_size)}\n"
+                      f"native_prediction = {native_shapes[0][0]}x{native_shapes[0][1]}\n"
+                      f"evaluation_grid = {evaluation_height}x{evaluation_width}\n"
+                      f"window_length = {timing['window_length']}")
             item["native_prediction_resolution_hw"] = (
                 list(native_shapes[0]) if len(native_shapes) == 1 else None
             )

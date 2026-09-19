@@ -160,11 +160,13 @@ class _SequencePredictionSpool:
             )
         self.native_prediction_resolutions_hw.add(tuple(disparities.shape[-2:]))
         for offset, frame_index in enumerate(frame_indices):
-            resized = cv2.resize(
-                disparities[offset],
-                (self.width, self.height),
-                interpolation=cv2.INTER_LINEAR,
-            ).astype(np.float32, copy=False)
+            if disparities.shape[-2:] == (self.height, self.width):
+                resized = disparities[offset].astype(np.float32, copy=False)
+            else:
+                resized = cv2.resize(
+                    disparities[offset], (self.width, self.height),
+                    interpolation=cv2.INTER_LINEAR,
+                ).astype(np.float32, copy=False)
             self.sums[frame_index] += resized
             self.counts[frame_index] += 1
 

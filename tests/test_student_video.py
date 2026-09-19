@@ -3,7 +3,7 @@ import pytest
 import torch
 from torch import nn
 
-from inference.student_video import infer_student_video
+from inference.student_video import infer_student_video, sequence_frames
 
 
 class DriftingModel(nn.Module):
@@ -31,6 +31,18 @@ def scene_frames(length):
         frame[1] = torch.arange(6).reshape(2, 3) / 10
         frames.append(frame)
     return frames
+
+
+def test_sequence_frames_uses_inference_grid(tmp_path):
+    from PIL import Image
+    path = tmp_path / "frame.png"
+    Image.new("RGB", (560, 448)).save(path)
+    frames = sequence_frames(
+        {"frame_paths": [path]},
+        {"image_height": 448, "image_width": 560, "resize_mode": "resize"},
+        inference_config={"image_height": 224, "image_width": 280},
+    )
+    assert frames[0].shape == (3, 224, 280)
 
 
 @pytest.mark.parametrize("length", [1, 7, 16, 22, 24, 31, 32, 33, 44, 54, 55, 79])

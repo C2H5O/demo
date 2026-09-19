@@ -14,12 +14,21 @@ loss:
 training:
   output_dir: ./outputs/baseline_A
   resume: null
+inference:
+  image_height: 224
+  image_width: 280
 vda_evaluation:
   checkpoint: ./outputs/baseline_A/last.pt
+  evaluation_height: 224
+  evaluation_width: 280
+  tae:
+    enabled: false
   output: ./outputs/baseline_A/evaluation_test.json
 visualization:
   output_dir: ./outputs/baseline_A/visualization
 da3_small_baseline_vda_evaluation:
-  evaluation_height: 256
-  evaluation_width: 320
+  evaluation_height: 224
+  evaluation_width: 280
+  tae:
+    enabled: false
   output: ./outputs/baseline_A/evaluation_test.json

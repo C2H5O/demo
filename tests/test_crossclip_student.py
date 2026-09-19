@@ -169,7 +169,9 @@ def test_student_lora_mode_freezes_dino_base_and_inactive_camera_encoder() -> No
 
 
 def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> None:
+    camera_sizes = []
     def fake_pose_transform(pose, image_size):
+        camera_sizes.append(image_size)
         batch, frames = pose.shape[:2]
         c2w = torch.eye(4, device=pose.device).view(1, 1, 4, 4).repeat(batch, frames, 1, 1)[..., :3, :]
         height, width = image_size
@@ -198,4 +200,13 @@ def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> 
         "xyz_local", "xyz_global", "pts3d_local",
     }
     assert output["depth"].shape == (1, 16, 448, 560)
+    with pytest.raises(ValueError, match="training/attention capture"):
+        model(torch.zeros(1, 16, 3, 224, 280))
+    model.eval()
+    with torch.inference_mode():
+        output = model(torch.zeros(1, 32, 3, 224, 280), include_global_points=False)
+    assert output["depth"].shape == (1, 32, 224, 280)
+    assert output["intrinsics"][0, 0, 0, 0] == 280
+    assert camera_sizes == [(448, 560), (224, 280)]
+    assert (224 // 14, 280 // 14, (224 // 14) * (280 // 14)) == (16, 20, 320)
     assert model._ray_forward_count == 0

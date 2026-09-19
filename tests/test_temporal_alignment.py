@@ -247,6 +247,6 @@ def test_missing_camera_is_data_coverage_not_empty_projection(tmp_path):
 def test_all_baselines_and_attention_inherit_the_shared_tae(config_path):
     config = load_config(config_path)
     for section in ("vda_evaluation", "da3_small_baseline_vda_evaluation"):
-        assert config[section]["tae"]["enabled"] is True
+        assert config[section]["tae"]["enabled"] is (config_path != "configs/baselines/A.yaml")
         assert "frame_id_step" not in config[section]["tae"]
         assert config[section]["tae"]["require_all_pairs"] is True

@@ -14,6 +14,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor
 
@@ -37,17 +38,22 @@ class SequenceFrames:
 
     def __getitem__(self, index):
         if self.resize_mode == "precomputed":
-            return load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            image = load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            if image.shape[-2:] != (self.height, self.width):
+                image = F.interpolate(image[None], size=(self.height, self.width),
+                                      mode="bilinear", align_corners=False)[0]
+            return image
         return load_rgb_tensor(self.paths[index], self.height, self.width,
                                self.resize_mode, "zero_one")
 
 
-def sequence_frames(sequence, dataset_config, *, raw_rgb=False):
+def sequence_frames(sequence, dataset_config, *, raw_rgb=False, inference_config=None):
+    inference_config = inference_config or {}
     precomputed = sequence.get("preprocessing_identity", "legacy_scared") != "legacy_scared"
     mode = "precomputed" if precomputed and not raw_rgb else dataset_config.get("resize_mode", "resize")
     return SequenceFrames(sequence["frame_paths"], resize_mode=mode,
-                          height=int(dataset_config.get("image_height", 448)),
-                          width=int(dataset_config.get("image_width", 560)))
+                          height=int(inference_config.get("image_height", dataset_config.get("image_height", 448))),
+                          width=int(inference_config.get("image_width", dataset_config.get("image_width", 560))))
 
 
 def align_disparity(current: np.ndarray, reference: np.ndarray):

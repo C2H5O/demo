@@ -415,11 +415,15 @@ class DA3SmallStudent(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         self._last_forward_timing_events = {}
         self._record_cuda_timing("start", images.device)
-        if images.ndim != 5 or images.shape[1] < 1 or tuple(images.shape[2:]) != (3, 448, 560):
-            raise ValueError("DA3 student requires [B,T,3,448,560], got {}".format(tuple(images.shape)))
+        if images.ndim != 5 or images.shape[1] < 1 or images.shape[2] != 3:
+            raise ValueError("DA3 student requires [B,T,3,H,W], got {}".format(tuple(images.shape)))
         frames = images.shape[1]
-        if (self.training or self.attention_capture is not None) and frames != 16:
-            raise ValueError("DA3 training/attention capture requires [B,16,3,448,560]")
+        height, width = images.shape[-2:]
+        if self.training or self.attention_capture is not None:
+            if frames != 16 or (height, width) != (448, 560):
+                raise ValueError("DA3 training/attention capture requires [B,16,3,448,560]")
+        elif (height, width) != (224, 280):
+            raise ValueError("DA3 inference requires [B,T,3,224,280]")
         if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
             raise ValueError("DA3 dataset RGB must be finite in [0,1]")
         normalized = (images - self.imagenet_mean) / self.imagenet_std
@@ -435,11 +439,11 @@ class DA3SmallStudent(nn.Module):
         )
         self._record_cuda_timing("backbone_end", images.device)
         with torch.autocast(device_type=images.device.type, enabled=False):
-            depth, depth_conf = self._forward_depth_main(feats, 448, 560)
+            depth, depth_conf = self._forward_depth_main(feats, height, width)
             self._record_cuda_timing("depth_end", images.device)
             pose_encoding = self.camera_decoder(feats[-1][1])
             _, _, pose_encoding_to_extri_intri = _require_official_da3()
-            c2w, intrinsics = pose_encoding_to_extri_intri(pose_encoding, (448, 560))
+            c2w, intrinsics = pose_encoding_to_extri_intri(pose_encoding, (height, width))
             c2w_h = torch.eye(4, device=c2w.device, dtype=c2w.dtype).view(1, 1, 4, 4).repeat(
                 c2w.shape[0], c2w.shape[1], 1, 1
             )
@@ -453,13 +457,13 @@ class DA3SmallStudent(nn.Module):
             )
             self._record_cuda_timing("geometry_end", images.device)
         expected = {
-            "depth": (images.shape[0], frames, 448, 560),
+            "depth": (images.shape[0], frames, height, width),
             "intrinsics": (images.shape[0], frames, 3, 3),
             "extrinsics": (images.shape[0], frames, 3, 4),
-            "xyz_local": (images.shape[0], frames, 448, 560, 3),
+            "xyz_local": (images.shape[0], frames, height, width, 3),
         }
         if include_global_points:
-            expected["xyz_global"] = (images.shape[0], frames, 448, 560, 3)
+            expected["xyz_global"] = (images.shape[0], frames, height, width, 3)
         actual = {
             "depth": tuple(depth.shape), "intrinsics": tuple(intrinsics.shape),
             "extrinsics": tuple(extrinsics.shape), "xyz_local": tuple(xyz_local.shape),
