@@ -14,6 +14,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from datasets.transforms import load_precomputed_student_rgb_tensor, load_rgb_tensor
 
@@ -37,17 +38,22 @@ class SequenceFrames:
 
     def __getitem__(self, index):
         if self.resize_mode == "precomputed":
-            return load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            image = load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
+            if image.shape[-2:] != (self.height, self.width):
+                image = F.interpolate(image[None], size=(self.height, self.width),
+                                      mode="bilinear", align_corners=False)[0]
+            return image
         return load_rgb_tensor(self.paths[index], self.height, self.width,
                                self.resize_mode, "zero_one")
 
 
-def sequence_frames(sequence, dataset_config, *, raw_rgb=False):
+def sequence_frames(sequence, dataset_config, *, raw_rgb=False, inference_config=None):
+    inference_config = inference_config or dataset_config
     precomputed = sequence.get("preprocessing_identity", "legacy_scared") != "legacy_scared"
     mode = "precomputed" if precomputed and not raw_rgb else dataset_config.get("resize_mode", "resize")
     return SequenceFrames(sequence["frame_paths"], resize_mode=mode,
-                          height=int(dataset_config.get("image_height", 448)),
-                          width=int(dataset_config.get("image_width", 560)))
+                          height=int(inference_config.get("image_height", 448)),
+                          width=int(inference_config.get("image_width", 560)))
 
 
 def align_disparity(current: np.ndarray, reference: np.ndarray):
@@ -112,6 +118,7 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
     if max_windows is not None:
         starts = starts[:max_windows]
     stats = InferenceStats()
+    audited = False
     started = time.perf_counter()
     previous_ids = None
     anchors = None
@@ -124,6 +131,13 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         # Duplicate padding/anchor frames are decoded only once per window.
         decoded = {j: frames[j] for j in dict.fromkeys(ids)}
         images = torch.stack([decoded[j] for j in ids]).unsqueeze(0).to(device)
+        if not audited:
+            height, width = images.shape[-2:]
+            if (height, width) == (224, 280):
+                print("DA3 inference resolution audit:\nmodel_input = 224x280\npatch_size = 14\n"
+                      "patch_grid = 16x20\npatches_per_frame = 320\n"
+                      "native_prediction = 224x280\nevaluation_grid = 224x280\nwindow_length = 32")
+            audited = True
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         tick = time.perf_counter()

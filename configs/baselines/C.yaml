@@ -32,7 +32,14 @@ training:
   epochs: 3
   output_dir: ./outputs/baseline_C_online32_s2_3ep_t512x640
   resume: null
+inference:
+  image_height: 224
+  image_width: 280
 vda_evaluation:
+  evaluation_height: 224
+  evaluation_width: 280
+  tae:
+    enabled: false
   checkpoint: ./outputs/baseline_C_online32_s2_3ep_t512x640/last.pt
   output: ./outputs/baseline_C_online32_s2_3ep_t512x640/evaluation_test.json
 visualization:

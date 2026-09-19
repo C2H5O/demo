@@ -54,6 +54,10 @@ def test_config_keeps_only_the_intended_ablation() -> None:
         448,
         560,
     )
+    assert (config["inference"]["image_height"], config["inference"]["image_width"]) == (224, 280)
+    assert (config["vda_evaluation"]["evaluation_height"],
+            config["vda_evaluation"]["evaluation_width"]) == (224, 280)
+    assert config["vda_evaluation"]["tae"]["enabled"] is False
     assert config["training"]["epochs"] == 3
     assert config["training"]["resume"] is None
     assert config["vda_evaluation"]["checkpoint"].startswith(

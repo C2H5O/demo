@@ -39,6 +39,12 @@ def make_scared(tmp_path, count=3):
     return config, cfg
 
 
+@pytest.fixture(autouse=True)
+def bypass_checkpoint_merge_for_synthetic_models(monkeypatch):
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+                        lambda checkpoint, config: checkpoint)
+
+
 def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(tmp_path, monkeypatch):
     config, _ = make_scared(tmp_path)
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
@@ -56,6 +62,21 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert result["mean_frame_inference_seconds"] == result["total_model_inference_seconds"] / 6
     assert json.loads((tmp_path / "result.json").read_text())["sequence_count"] == 2
     assert not list(tmp_path.glob(".vda_spool_*"))
+
+
+def test_c_resolution_evaluates_native_grid_without_tae(tmp_path, monkeypatch):
+    config_path, config = make_scared(tmp_path)
+    config["inference"] = {"image_height": 8, "image_width": 10}
+    config["vda_evaluation"].update({"evaluation_height": 8, "evaluation_width": 10,
+                                      "tae": {"enabled": False}})
+    config_path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
+                        lambda *args: ConstantPlane().eval())
+    result = evaluate_vda(config_path)
+    assert result["input_resolution_hw"] == [8, 10]
+    assert all(item["evaluation_shape_hxw"] == [8, 10] for item in result["sequences"])
+    assert result["metrics"]["tae"] is None
+    assert result["tae_sequence_count"] == 0
 
 
 def test_window_limit_never_claims_full_test_set(tmp_path, monkeypatch):

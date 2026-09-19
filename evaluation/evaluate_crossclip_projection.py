@@ -230,14 +230,16 @@ def evaluate_vda(
         inference_checkpoint = ensure_merged_student_checkpoint(checkpoint, config)
     model = _evaluation_model(inference_checkpoint, config, device, model_source)
     amp = bool(eval_config.get("amp", True)) and device.type == "cuda"
-    height = int(config["dataset"]["image_height"])
-    width = int(config["dataset"]["image_width"])
+    inference_config = {**config["dataset"], **config.get("inference", {})}
+    height = int(eval_config.get("evaluation_height", inference_config["image_height"]))
+    width = int(eval_config.get("evaluation_width", inference_config["image_width"]))
     remaining = limit_clips
     sequence_results = []
     for sequence_id, sequence in sequences.items():
         if sequence_id not in gt_depths or remaining == 0:
             continue
-        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")))
+        frames = sequence_frames(sequence, config["dataset"], raw_rgb=bool(eval_config.get("rgb_root")),
+                                 inference_config=inference_config)
         spool = vda_core._SequencePredictionSpool(output.parent, len(frames), height, width)
         try:
             def emit(start, disparities, intrinsics):
@@ -252,7 +254,8 @@ def evaluate_vda(
             # A debug window limit evaluates temporal pairs only in its inferred prefix.
             temporal_sequence = dict(sequence)
             temporal_sequence["frame_paths"] = sequence["frame_paths"][:timing["output_frame_count"]]
-            item["temporal"] = evaluate_tae(temporal_sequence, spool, item, eval_config)
+            item["temporal"] = (evaluate_tae(temporal_sequence, spool, item, eval_config)
+                                if tae_config.get("enabled", True) else {"tae": None, "status": "disabled"})
             item["metrics"]["tae"] = item["temporal"]["tae"]
             item["inference"] = timing
             sequence_results.append(item)
@@ -272,8 +275,9 @@ def evaluate_vda(
         item["missing_prediction_count"] == 0 and item["inference"]["output_frame_count"] ==
         len(sequences[item["sequence_id"]]["frame_paths"]) for item in sequence_results)
     result = {
-        "protocol": "video-depth-anything-depth+video-depth-anything-tae-scared-v2",
-        **VDA_TAE_METADATA,
+        "protocol": ("video-depth-anything-depth+video-depth-anything-tae-scared-v2"
+                     if tae_config.get("enabled", True) else "video-depth-anything-depth-scared-v2"),
+        **(VDA_TAE_METADATA if tae_config.get("enabled", True) else {}),
         "config": str(config_path), "model_source": model_source,
         "checkpoint": str(checkpoint) if checkpoint is not None else str(config["student"]["checkpoint"]),
         "inference_checkpoint": (
@@ -303,7 +307,7 @@ def evaluate_vda(
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }
     output.write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
-    print("wrote full-sequence VDA + TAE evaluation: {}".format(output))
+    print("wrote full-sequence VDA evaluation: {}".format(output))
     return result
 
 
