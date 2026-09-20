@@ -3,9 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import torch
+from PIL import Image
 
 import models.teacher.output_adapter as output_adapter
 from datasets.transforms import load_teacher_rgb_tensor
+from inference.student_video import sequence_frames
 from losses.attention_distillation_loss import SpatialTokenAligner
 from trainers.direct_teacher_distillation_trainer import (
     _forward_full_online_teacher,
@@ -54,7 +56,8 @@ def test_config_keeps_only_the_intended_ablation() -> None:
         448,
         560,
     )
-    assert (config["inference"]["image_height"], config["inference"]["image_width"]) == (224, 280)
+    assert (config["inference"]["image_height"], config["inference"]["image_width"]) == (448, 560)
+    assert (448 // config["student"]["patch_size"], 560 // config["student"]["patch_size"]) == (32, 40)
     assert (config["vda_evaluation"]["evaluation_height"],
             config["vda_evaluation"]["evaluation_width"]) == (224, 280)
     assert config["vda_evaluation"]["tae"]["enabled"] is False
@@ -72,6 +75,15 @@ def test_config_keeps_only_the_intended_ablation() -> None:
     if ATTENTION_ENABLED:
         assert config["attention_distill"]["pair_chunk_size"] == 2
         assert config["attention_distill"]["teacher_probability_outside_checkpoint"] is True
+
+
+def test_vda_loader_uses_explicit_448x560_inference_size(tmp_path) -> None:
+    config = load_config("configs/baselines/C.yaml")
+    image_path = tmp_path / "frame_000000.png"
+    Image.new("RGB", (6, 4), color=(64, 128, 192)).save(image_path)
+    frames = sequence_frames({"frame_paths": [image_path]}, config["dataset"],
+                             raw_rgb=True, inference_config=config["inference"])
+    assert frames[0].shape == (3, 448, 560)
 
 
 def test_equal_attention_grids_use_identity() -> None:

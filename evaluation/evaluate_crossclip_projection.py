@@ -245,7 +245,8 @@ def evaluate_vda(
             def emit(start, disparities, intrinsics):
                 spool.add(range(start, start + len(disparities)), disparities)
             timing = infer_student_video(model, frames, emit, device=device, amp=amp,
-                                         max_windows=remaining)
+                                         max_windows=remaining,
+                                         evaluation_grid=(height, width) if not sequence_results else None)
             spool.flush()
             item = vda_core._evaluate_sequence(
                 sequence, spool, int(eval_config.get("gt_depth_channel", 0)),
@@ -302,7 +303,9 @@ def evaluate_vda(
         "timing_scope": sequence_results[0]["inference"]["timing_scope"],
         "warmup_excluded": False, "amp": amp, "device": str(device),
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
-        "torch_version": torch.__version__, "input_resolution_hw": [height, width],
+        "torch_version": torch.__version__,
+        "input_resolution_hw": [int(inference_config["image_height"]), int(inference_config["image_width"])],
+        "evaluation_resolution_hw": [height, width],
         "window_limit": limit_clips,
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }

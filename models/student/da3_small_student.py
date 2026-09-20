@@ -420,9 +420,8 @@ class DA3SmallStudent(nn.Module):
         frames = images.shape[1]
         height, width = images.shape[-2:]
         training_contract = self.training or self.attention_capture is not None
-        required_size = (self.config.image_height, self.config.image_width) if training_contract else (224, 280)
-        legacy_inference_size = (self.config.image_height, self.config.image_width)
-        if (height, width) != required_size and (training_contract or (height, width) != legacy_inference_size):
+        required_size = (self.config.image_height, self.config.image_width)
+        if (height, width) != required_size:
             raise ValueError("DA3 {} requires {}x{}, got {}x{}".format(
                 "training/attention capture" if training_contract else "inference",
                 *required_size, height, width))

@@ -64,17 +64,25 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert not list(tmp_path.glob(".vda_spool_*"))
 
 
-def test_c_resolution_evaluates_native_grid_without_tae(tmp_path, monkeypatch):
+def test_c_resolution_resizes_native_disparity_for_evaluation_without_tae(tmp_path, monkeypatch):
     config_path, config = make_scared(tmp_path)
     config["inference"] = {"image_height": 8, "image_width": 10}
-    config["vda_evaluation"].update({"evaluation_height": 8, "evaluation_width": 10,
+    config["vda_evaluation"].update({"evaluation_height": 4, "evaluation_width": 5,
                                       "tae": {"enabled": False}})
     config_path.write_text(yaml.safe_dump(config))
+    seen = []
+    class RecordingPlane(ConstantPlane):
+        def forward(self, images, include_global_points=False):
+            seen.append(tuple(images.shape))
+            return super().forward(images, include_global_points=include_global_points)
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
-                        lambda *args: ConstantPlane().eval())
+                        lambda *args: RecordingPlane().eval())
     result = evaluate_vda(config_path)
+    assert seen and all(shape == (1, 32, 3, 8, 10) for shape in seen)
     assert result["input_resolution_hw"] == [8, 10]
-    assert all(item["evaluation_shape_hxw"] == [8, 10] for item in result["sequences"])
+    assert result["evaluation_resolution_hw"] == [4, 5]
+    assert all(item["evaluation_shape_hxw"] == [4, 5] for item in result["sequences"])
+    assert result["metrics"]["abs_relative_difference"] == pytest.approx(0, abs=1e-6)
     assert result["metrics"]["tae"] is None
     assert result["tae_sequence_count"] == 0
 

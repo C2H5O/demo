@@ -100,7 +100,7 @@ class InferenceStats:
 
 @torch.inference_mode()
 def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
-                        max_windows=None, emit_window=None) -> dict:
+                        max_windows=None, emit_window=None, evaluation_grid=None) -> dict:
     """Emit (start, disparities[N,H,W], intrinsics[N,3,3]) once per finalized span.
 
     `emit_window(indices, raw_predictions)` optionally saves camera predictions
@@ -131,13 +131,6 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         # Duplicate padding/anchor frames are decoded only once per window.
         decoded = {j: frames[j] for j in dict.fromkeys(ids)}
         images = torch.stack([decoded[j] for j in ids]).unsqueeze(0).to(device)
-        if not audited:
-            height, width = images.shape[-2:]
-            if (height, width) == (224, 280):
-                print("DA3 inference resolution audit:\nmodel_input = 224x280\npatch_size = 14\n"
-                      "patch_grid = 16x20\npatches_per_frame = 320\n"
-                      "native_prediction = 224x280\nevaluation_grid = 224x280\nwindow_length = 32")
-            audited = True
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         tick = time.perf_counter()
@@ -151,6 +144,14 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         depth = prediction["depth"][0].float().cpu().numpy()
         if depth.shape != (WINDOW, *images.shape[-2:]) or not np.isfinite(depth).all():
             raise FloatingPointError("Invalid DA3 sequence depth output")
+        if not audited and evaluation_grid == (224, 280):
+            height, width = images.shape[-2:]
+            if (height, width) != (448, 560):
+                raise ValueError("DA3 evaluation requires 448x560 model input")
+            print("DA3 inference/evaluation audit:\nmodel_input = 448x560\npatch_size = 14\n"
+                  "patch_grid = 32x40\npatches_per_frame = 1280\n"
+                  "native_prediction = 448x560\nevaluation_grid = 224x280\nwindow_length = 32")
+            audited = True
         disparity = 1.0 / np.maximum(depth, 1e-3)
         intrinsics = prediction["intrinsics"][0].float().cpu().numpy()
         if emit_window is not None:
