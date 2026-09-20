@@ -8,6 +8,7 @@ from PIL import Image
 from torch import nn
 
 from evaluation.evaluate_crossclip_projection import evaluate_vda
+from evaluation.evaluate_vda import _SequencePredictionSpool, _resized_gt
 
 
 class ConstantPlane(nn.Module):
@@ -45,6 +46,26 @@ def make_scared(tmp_path, count=3):
 def bypass_checkpoint_merge_for_synthetic_model(monkeypatch):
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
                         lambda checkpoint, config: checkpoint)
+
+
+def test_native_disparity_and_gt_use_224x280_metric_grid(tmp_path, monkeypatch):
+    import cv2
+    native_depth = np.linspace(1.0, 3.0, 448 * 560, dtype=np.float32).reshape(448, 560)
+    native_disparity = np.reciprocal(native_depth)
+    gt_depth = np.arange(448 * 560, dtype=np.float32).reshape(448, 560)
+    monkeypatch.setattr("evaluation.evaluate_vda.load_scared_gt_depth",
+                        lambda path, channel: gt_depth)
+    spool = _SequencePredictionSpool(tmp_path, 1, 224, 280)
+    try:
+        spool.add([0], native_disparity[None])
+        np.testing.assert_allclose(spool.prediction(0),
+                                   cv2.resize(native_disparity, (280, 224),
+                                              interpolation=cv2.INTER_LINEAR))
+        np.testing.assert_array_equal(_resized_gt(tmp_path / "unused", 0, 224, 280),
+                                      cv2.resize(gt_depth, (280, 224),
+                                                 interpolation=cv2.INTER_NEAREST))
+    finally:
+        spool.close()
 
 
 def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(tmp_path, monkeypatch):

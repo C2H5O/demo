@@ -29,7 +29,7 @@ class SequenceFrames:
     """Lazy RGB decoding: accept all paths without retaining an entire video in RAM."""
 
     def __init__(self, paths: Sequence[str | Path], *, resize_mode: str = "resize",
-                 height: int = 224, width: int = 280):
+                 height: int = 448, width: int = 560):
         self.paths = list(paths)
         self.resize_mode, self.height, self.width = resize_mode, height, width
 
@@ -143,10 +143,10 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
         if depth.shape != (WINDOW, *images.shape[-2:]) or not np.isfinite(depth).all():
             raise FloatingPointError("Invalid DA3 sequence depth output")
         if (not getattr(model, "_da3_resolution_audited", False)
-                and tuple(depth.shape[-2:]) == (224, 280)):
-            print("DA3 inference resolution audit:\n"
-                  "model_input = 224x280\npatch_size = 14\npatch_grid = 16x20\n"
-                  "patches_per_frame = 320\nnative_prediction = 224x280\n"
+                and tuple(depth.shape[-2:]) == (448, 560)):
+            print("DA3 inference/evaluation audit:\n"
+                  "model_input = 448x560\npatch_size = 14\npatch_grid = 32x40\n"
+                  "patches_per_frame = 1280\nnative_prediction = 448x560\n"
                   "evaluation_grid = 224x280\nwindow_length = 32")
             model._da3_resolution_audited = True
         disparity = 1.0 / np.maximum(depth, 1e-3)

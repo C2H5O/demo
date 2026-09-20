@@ -38,5 +38,5 @@ vda_evaluation:
 visualization:
   output_dir: ./outputs/baseline_B/visualization
 inference:
-  image_height: 224
-  image_width: 280
+  image_height: 448
+  image_width: 560

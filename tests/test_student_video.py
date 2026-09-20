@@ -39,19 +39,19 @@ def test_baseline_b_resolution_config_and_frame_decode(monkeypatch):
     assert (config["dataset"]["image_height"], config["dataset"]["image_width"]) == (448, 560)
     assert (config["student"]["image_height"], config["student"]["image_width"]) == (448, 560)
     assert config["dataset"]["clip_length"] == 32
-    assert (config["inference"]["image_height"], config["inference"]["image_width"]) == (224, 280)
+    assert (config["inference"]["image_height"], config["inference"]["image_width"]) == (448, 560)
     assert (config["vda_evaluation"]["evaluation_height"],
             config["vda_evaluation"]["evaluation_width"]) == (224, 280)
     assert config["vda_evaluation"]["tae"]["enabled"] is False
-    assert (224 // config["student"]["patch_size"],
-            280 // config["student"]["patch_size"]) == (16, 20)
+    assert (448 // config["student"]["patch_size"],
+            560 // config["student"]["patch_size"]) == (32, 40)
     def fake_load(path, height, width, resize_mode, normalize_mode):
-        assert (height, width) == (224, 280)
+        assert (height, width) == (448, 560)
         return torch.zeros(3, height, width)
     monkeypatch.setattr("inference.student_video.load_rgb_tensor", fake_load)
     frames = sequence_frames({"frame_paths": ["unused"]}, config["dataset"],
                              config["inference"])
-    assert frames[0].shape == (3, 224, 280)
+    assert frames[0].shape == (3, 448, 560)
 
 
 @pytest.mark.parametrize("length", [1, 7, 16, 22, 24, 31, 32, 33, 44, 54, 55, 79])
