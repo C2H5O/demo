@@ -16,6 +16,8 @@ def main() -> None:
     parser.add_argument("--protocol", choices=("vda",), default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--limit-windows", "--limit-clips", dest="limit_clips", type=int, default=None, help="Debug window budget; --limit-clips is a legacy alias. Omit for full evaluation.")
+    parser.add_argument("--limit-sequences", type=int, default=None,
+                        help="Evaluate only the first N complete sequences with depth GT.")
     args = parser.parse_args()
     evaluate(
         Path(args.config),
@@ -24,6 +26,7 @@ def main() -> None:
         args.output,
         args.limit_clips,
         args.protocol,
+        limit_sequences=args.limit_sequences,
     )
 
 

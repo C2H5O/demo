@@ -18,15 +18,16 @@ from utils.config import load_config
 
 
 def current_h() -> KVSamplingConfig:
-    # QG remains a standalone optional policy after H switches to staggered KV.
+    # QG remains a standalone optional policy after H switches to Hybrid KV.
     return KVSamplingConfig(enabled=True, method="query_group", diagnostics=False)
 
 
-def test_h_selects_staggered_policy_and_qg_stays_explicitly_configurable() -> None:
+def test_h_selects_hybrid_policy_and_qg_stays_explicitly_configurable() -> None:
     raw = load_config("configs/baselines/H.yaml")
     config = current_h()
-    assert raw["kv_sampling"]["method"] == "role_layer_spatial_kv"
-    assert raw["kv_sampling"]["spatial_sampling"]["pattern"] == "staggered"
+    assert raw["kv_sampling"]["method"] == "hybrid_global_kv"
+    assert raw["kv_sampling"]["spatial_sampling"]["block5"] == {
+        "local_stride": 1, "global_stride": 2}
     assert config.method == "query_group"
     assert config.query_group_size == 8
     assert config.kv_frames == 20

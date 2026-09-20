@@ -21,7 +21,30 @@ TIE_WINNERS = [10, 11, 13, 14, 16, 17, 19, 20, 22, 23, 25, 26, 28, 29]
 
 
 def current_h():
-    return KVSamplingConfig.from_mapping(load_config("configs/baselines/H.yaml")["kv_sampling"])
+    # Freeze the previous H policy as a standalone legacy adapter fixture.
+    return KVSamplingConfig.from_mapping({
+        "enabled": True, "method": "role_layer_spatial_kv", "retention_ratio": .75,
+        "vda_role": {"key_frames": 2, "overlap_frames": 8, "new_frames": 22,
+                     "selected_new_frames": 14},
+        "new_frame_selection": {"method": "temporal_bucket_highlight", "num_buckets": 7,
+                                "keep_per_bucket": 2, "score": "lightweight_highlight",
+                                "tie_break": "frame_index"},
+        "first_window": {"method": "bucket_highlight", "num_frames": 16,
+                         "num_buckets": 16},
+        "lightweight_highlight": {"brightness_threshold": .90,
+                                  "saturation_threshold": .20, "downsample_factor": 4},
+        "spatial_sampling": {
+            "enabled": True, "pattern": "staggered",
+            "early_layers": {"start": 0, "end": 7, "key_stride": 1,
+                             "overlap_stride": 2, "new_stride": 2},
+            "late_layers": {"start": 8, "end": 11, "key_stride": 1,
+                            "overlap_stride": 1, "new_stride": 1},
+            "staggered": {"enabled": True, "cycle": 4,
+                          "layer_phase_offsets": {5: 0, 7: 2}},
+        },
+        "special_tokens": {"keep_all": True},
+        "diagnostics": {"print_once_per_sequence": True},
+    })
 
 
 def test_h_config_and_twenty_two_new_frames_form_seven_contiguous_buckets():
@@ -33,6 +56,7 @@ def test_h_config_and_twenty_two_new_frames_form_seven_contiguous_buckets():
             raw["vda_evaluation"]["evaluation_width"]) == (224, 280)
     assert raw["vda_evaluation"]["tae"]["enabled"] is False
     config = current_h()
+    assert raw["kv_sampling"]["method"] == "hybrid_global_kv"
     assert config.method == "role_layer_spatial_kv"
     assert config.frame_budget(32) == 24
     assert config.frame_budget(32, first_window=True) == 16

@@ -1,7 +1,7 @@
 base_config: _4090_common.yaml
 
 experiment:
-  name: baseline_H_staggered_spatial_kv
+  name: baseline_H_hybrid_global_kv
   baseline_id: H
   source_weights_branch: codex/baseline-J
   source_weights_project: vggtoda3-baseline-J
@@ -18,7 +18,7 @@ vda_evaluation:
   checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
   evaluation_height: 224
   evaluation_width: 280
-  output: ./outputs/baseline_H/evaluation_staggered_spatial_kv_test.json
+  output: ./outputs/baseline_H/evaluation_hybrid_global_kv_test.json
   tae:
     enabled: false
 
@@ -26,55 +26,28 @@ visualization:
   output_dir: ./outputs/baseline_H/visualization
 
 inference:
-  acceleration: role_layer_spatial_kv
+  acceleration: hybrid_global_kv
   image_height: 448
   image_width: 560
   source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
 
 kv_sampling:
   enabled: true
-  method: role_layer_spatial_kv
-  retention_ratio: 0.75
-  vda_role:
+  method: hybrid_global_kv
+  global_anchor_bank:
+    bank_size: 50
+    active_global_frames: 15
+    descriptor: da3_dino_pool
+    selection: fps_diversity
+    deterministic_seed: first_valid_frame
+  local_history:
     key_frames: 2
     overlap_frames: 8
-    new_frames: 22
-    selected_new_frames: 14
-  new_frame_selection:
-    method: temporal_bucket_highlight
-    num_buckets: 7
-    keep_per_bucket: 2
-    score: lightweight_highlight
-    tie_break: frame_index
-  first_window:
-    method: bucket_highlight
-    num_frames: 16
-    num_buckets: 16
-  lightweight_highlight:
-    brightness_threshold: 0.90
-    saturation_threshold: 0.20
-    downsample_factor: 4
   spatial_sampling:
-    enabled: true
-    pattern: staggered
-    early_layers:
-      start: 0
-      end: 7
-      key_stride: 1
-      overlap_stride: 2
-      new_stride: 2
-    late_layers:
-      start: 8
-      end: 11
-      key_stride: 1
-      overlap_stride: 1
-      new_stride: 1
-    staggered:
-      enabled: true
-      cycle: 4
-      layer_phase_offsets:
-        5: 0
-        7: 2
+    block5: {local_stride: 1, global_stride: 2}
+    block7: {local_stride: 1, global_stride: 2}
+    block9: {local_stride: 1, global_stride: 1}
+    block11: {local_stride: 1, global_stride: 1}
   special_tokens:
     keep_all: true
   diagnostics:

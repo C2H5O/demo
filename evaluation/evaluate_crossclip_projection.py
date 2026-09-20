@@ -194,6 +194,7 @@ def evaluate_vda(
     output_override: Optional[Path] = None,
     limit_clips: Optional[int] = None,
     model_source: str = TRAINED_STUDENT_SOURCE,
+    limit_sequences: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Infer each complete RGB sequence, then score once per absolute frame.
 
@@ -223,6 +224,8 @@ def evaluate_vda(
         _require_scared_8_9(sequences)
     if limit_clips is not None and limit_clips <= 0:
         raise ValueError("Window limit must be positive")
+    if limit_sequences is not None and limit_sequences <= 0:
+        raise ValueError("Sequence limit must be positive")
     if not gt_depths:
         raise RuntimeError("No sequences contain configured depth GT")
     tae_config = eval_config.get("tae", {})
@@ -253,6 +256,8 @@ def evaluate_vda(
     sequence_results = []
     resolution_audit_printed = False
     for sequence_id, sequence in sequences.items():
+        if limit_sequences is not None and len(sequence_results) >= limit_sequences:
+            break
         if sequence_id not in gt_depths or remaining == 0:
             continue
         frames = sequence_frames(
@@ -374,6 +379,7 @@ def evaluate_vda(
         "model_input_resolution_hw": [model_height, model_width],
         "evaluation_resolution_hw": [evaluation_height, evaluation_width],
         "window_limit": limit_clips,
+        "sequence_limit": limit_sequences,
         "skipped_sequences_without_gt": skipped, "sequences": sequence_results,
     }
     if tae_enabled:
@@ -406,11 +412,13 @@ def evaluate(
     limit_clips: Optional[int] = None,
     protocol: Optional[str] = None,
     model_source: str = TRAINED_STUDENT_SOURCE,
+    limit_sequences: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     select_protocol(config, protocol)
     return evaluate_vda(
-        config_path, checkpoint, split, output, limit_clips, model_source
+        config_path, checkpoint, split, output, limit_clips, model_source,
+        limit_sequences=limit_sequences,
     )
 
 

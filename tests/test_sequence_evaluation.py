@@ -64,6 +64,21 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert not list(tmp_path.glob(".vda_spool_*"))
 
 
+def test_one_complete_sequence_limit_is_a_partial_evaluation(tmp_path, monkeypatch):
+    config, _ = make_scared(tmp_path)
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded: checkpoint)
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
+                        lambda *args: ConstantPlane().eval())
+    result = evaluate_vda(config, limit_sequences=1)
+    assert result["sequence_count"] == 1
+    assert result["inference_frame_count"] == 3
+    assert result["sequence_limit"] == 1
+    assert result["full_test_set"] is False
+    assert result["complete_gt_coverage"] is False
+
+
 def test_448_inference_and_224_metric_grid(tmp_path, monkeypatch):
     config_path, config = make_scared(tmp_path, count=1)
     config["inference"] = {"image_height": 448, "image_width": 560}

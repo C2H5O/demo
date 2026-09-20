@@ -158,6 +158,8 @@ def _infer_student_video(model, frames, emit: Callable, *, device, amp,
     if max_windows is not None:
         starts = starts[:max_windows]
     stats = InferenceStats()
+    if hasattr(sampling, "prepare_sequence"):
+        sampling.prepare_sequence(frames, device=device, amp=amp)
     previous_ids = None
     previous_padding = None
     absolute_ids = getattr(frames, "absolute_frame_ids", range(len(frames)))

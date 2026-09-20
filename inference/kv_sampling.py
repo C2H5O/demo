@@ -68,6 +68,8 @@ class KVSamplingConfig:
     spatial_sampling: dict = field(default_factory=dict)
     special_tokens: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
+    global_anchor_bank: dict = field(default_factory=dict)
+    local_history: dict = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -99,6 +101,24 @@ class KVSamplingConfig:
                 or self.provider_selection != "temporal_uniform"):
                 raise ValueError("Invalid query_group configuration")
             return self.kv_frames
+        if self.method == "hybrid_global_kv":
+            if window_length != 32:
+                raise ValueError("Hybrid Global KV requires a 32-frame VDA window")
+            if (self.lightweight_highlight or self.new_frame_selection
+                or self.bucket_highlight or self.highlight_detection):
+                raise ValueError("Hybrid Global KV must not configure highlight selection")
+            bank = self.global_anchor_bank
+            history = self.local_history
+            if bank != {"bank_size": 50, "active_global_frames": 15,
+                        "descriptor": "da3_dino_pool", "selection": "fps_diversity",
+                        "deterministic_seed": "first_valid_frame"}:
+                raise ValueError("Invalid Hybrid Global KV anchor-bank contract")
+            if history != {"key_frames": 2, "overlap_frames": 8}:
+                raise ValueError("Hybrid Global KV requires 2 key and 8 overlap frames")
+            resolve_hybrid_spatial_sampling_options(self.spatial_sampling)
+            resolve_special_token_options(self.special_tokens)
+            resolve_diagnostics_options(self.diagnostics)
+            return 25
         if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight",
                                "role_layer_spatial_kv", "spark3r_fixed_stride"}:
             raise ValueError("Unknown kv_sampling.method")
@@ -257,6 +277,20 @@ def resolve_spatial_sampling_options(options: Mapping | None = None) -> dict:
             "early/late layer ranges must be contiguous, nonoverlapping, and cover [0, 11]"
         )
     return values
+
+
+def resolve_hybrid_spatial_sampling_options(options: Mapping | None = None) -> dict:
+    """Independent spatial schedule for the four DA3-Small global blocks."""
+    if not isinstance(options, Mapping) or set(options) != {"block5", "block7", "block9", "block11"}:
+        raise ValueError("Hybrid spatial sampling requires blocks 5, 7, 9, 11")
+    result = {}
+    for layer in (5, 7, 9, 11):
+        item = options[f"block{layer}"]
+        expected = {"local_stride": 1, "global_stride": 2 if layer in (5, 7) else 1}
+        if item != expected:
+            raise ValueError(f"Invalid Hybrid spatial schedule at block {layer}")
+        result[layer] = dict(item)
+    return result
 
 
 def resolve_special_token_options(options: Mapping | None = None) -> dict:
