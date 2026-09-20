@@ -28,7 +28,7 @@ def test_h_config_and_twenty_two_new_frames_form_seven_contiguous_buckets():
     raw = load_config("configs/baselines/H.yaml")
     assert (raw["dataset"]["image_height"], raw["dataset"]["image_width"]) == (448, 560)
     assert (raw["student"]["image_height"], raw["student"]["image_width"]) == (448, 560)
-    assert (raw["inference"]["image_height"], raw["inference"]["image_width"]) == (448, 560)
+    assert (raw["inference"]["image_height"], raw["inference"]["image_width"]) == (224, 280)
     assert (raw["vda_evaluation"]["evaluation_height"],
             raw["vda_evaluation"]["evaluation_width"]) == (224, 280)
     assert raw["vda_evaluation"]["tae"]["enabled"] is False
@@ -78,21 +78,21 @@ def test_spatial_indices_are_original_grid_stride_two_and_follow_layer_role_sche
         "key": 1, "overlap": 1, "new": 1}
     selected = [0, 2, 10]
     early = build_role_layer_patch_indices(
-        normal_window(), selected, 5, 32, 40, config.spatial_sampling)
+        normal_window(), selected, 5, 16, 20, config.spatial_sampling)
     late = build_role_layer_patch_indices(
-        normal_window(), selected, 9, 32, 40, config.spatial_sampling)
-    assert len(early[0]) == 1280 and len(early[2]) == len(early[10]) == 320
-    assert all(len(late[slot]) == 1280 for slot in selected)
+        normal_window(), selected, 9, 16, 20, config.spatial_sampling)
+    assert len(early[0]) == 320 and len(early[2]) == len(early[10]) == 80
+    assert all(len(late[slot]) == 320 for slot in selected)
 
 
 def test_four_phases_partition_the_grid_with_equal_budget():
-    phases = [set(build_spatial_patch_indices(32, 40, 2, row, col))
+    phases = [set(build_spatial_patch_indices(16, 20, 2, row, col))
               for row, col in ((0, 0), (0, 1), (1, 0), (1, 1))]
-    assert all(len(phase) == 320 for phase in phases)
-    assert len(set.union(*phases)) == 1280
+    assert all(len(phase) == 80 for phase in phases)
+    assert len(set.union(*phases)) == 320
     assert all(not phases[a] & phases[b] for a in range(4) for b in range(a + 1, 4))
     with pytest.raises(ValueError, match="offsets"):
-        build_spatial_patch_indices(32, 40, 1, 0, 1)
+        build_spatial_patch_indices(16, 20, 1, 0, 1)
 
 
 def test_rank_phases_rotate_across_blocks_and_ignore_slot_modulo():
@@ -104,9 +104,9 @@ def test_rank_phases_rotate_across_blocks_and_ignore_slot_modulo():
         plan = provider_spatial_plan(first, selected, layer, config.spatial_sampling)
         assert [item["phase"] for item in plan] == expected
         assert [item["provider_rank"] for item in plan] == list(range(8))
-        patches = build_role_layer_patch_indices(first, selected, layer, 32, 40,
+        patches = build_role_layer_patch_indices(first, selected, layer, 16, 20,
                                                   config.spatial_sampling)
-        assert all(len(patches[slot]) == 320 for slot in selected)
+        assert all(len(patches[slot]) == 80 for slot in selected)
 
 
 def test_key_is_full_and_late_blocks_are_dense_for_all_roles():
@@ -115,16 +115,16 @@ def test_key_is_full_and_late_blocks_are_dense_for_all_roles():
     for layer in (5, 7):
         plan = provider_spatial_plan(normal_window(), selected, layer, config.spatial_sampling)
         patches = build_role_layer_patch_indices(normal_window(), selected, layer,
-                                                  32, 40, config.spatial_sampling)
+                                                  16, 20, config.spatial_sampling)
         assert [(item["stride"], item["phase"]) for item in plan[:2]] == [(1, None)] * 2
-        assert all(len(patches[slot]) == 1280 for slot in selected[:2])
-        assert all(len(patches[slot]) == 320 for slot in selected[2:])
+        assert all(len(patches[slot]) == 320 for slot in selected[:2])
+        assert all(len(patches[slot]) == 80 for slot in selected[2:])
     for layer in (9, 11):
         plan = provider_spatial_plan(normal_window(), selected, layer, config.spatial_sampling)
         patches = build_role_layer_patch_indices(normal_window(), selected, layer,
-                                                  32, 40, config.spatial_sampling)
+                                                  16, 20, config.spatial_sampling)
         assert all(item["stride"] == 1 and item["phase"] is None for item in plan)
-        assert all(len(patches[slot]) == 1280 for slot in selected)
+        assert all(len(patches[slot]) == 320 for slot in selected)
 
 
 def test_fixed_pattern_keeps_its_original_lattice():
@@ -132,9 +132,9 @@ def test_fixed_pattern_keeps_its_original_lattice():
                if key not in {"pattern", "staggered"}}
     selected = [0, 2, 10]
     plan = provider_spatial_plan(normal_window(), selected, 5, options)
-    patches = build_role_layer_patch_indices(normal_window(), selected, 5, 32, 40, options)
+    patches = build_role_layer_patch_indices(normal_window(), selected, 5, 16, 20, options)
     assert all(item["phase"] is None for item in plan)
-    assert patches[2] == patches[10] == build_spatial_patch_indices(32, 40, 2)
+    assert patches[2] == patches[10] == build_spatial_patch_indices(16, 20, 2)
 
 
 def test_token_mapping_keeps_every_special_and_no_patch_from_unselected_frames():
@@ -165,15 +165,15 @@ def test_staggered_original_patch_lattices_survive_reference_permutation():
     references = torch.tensor([3, 10], dtype=torch.long)
     for layer in (5, 7):
         patches = build_role_layer_patch_indices(
-            metadata, selected, layer, 32, 40, current_h().spatial_sampling)
+            metadata, selected, layer, 16, 20, current_h().spatial_sampling)
         actual = frame_slots_to_token_indices(
-            selected, num_frames=32, tokens_per_frame=1281, special_tokens=1,
+            selected, num_frames=32, tokens_per_frame=321, special_tokens=1,
             reference_indices=references, patch_indices_by_slot=patches)
-        assert actual.shape == (2, 32 + 1280 + 320 + 320)
+        assert actual.shape == (2, 32 + 320 + 80 + 80)
         for batch, reference in enumerate(references.tolist()):
             order = [reference] + [slot for slot in range(32) if slot != reference]
-            expected = {internal * 1281 for internal in range(32)}
-            expected.update(order.index(slot) * 1281 + 1 + patch
+            expected = {internal * 321 for internal in range(32)}
+            expected.update(order.index(slot) * 321 + 1 + patch
                             for slot in selected for patch in patches[slot])
             assert set(actual[batch].tolist()) == expected
 

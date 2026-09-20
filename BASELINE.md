@@ -1,10 +1,11 @@
-# Baseline H: staggered spatial K/V
+# Baseline H-224: staggered spatial K/V at 224x280
 
 Baseline H runs the trained Baseline-J epoch-15 Student without training. Its
 inference config is `configs/baselines/H.yaml`. The evaluator strictly merges
 that training checkpoint to the matching `ours.pt` when needed and uses the
-existing 32-frame VDA stitching. Training, model input, and native depth are
-448x560. Predictions and ground truth are evaluated at 224x280. TAE is disabled.
+existing 32-frame VDA stitching. Training remains at 448x560; model input,
+native depth, and evaluation are 224x280. TAE is disabled. This branch varies
+inference resolution only; highlight ranking and GotoHunt remain inherited.
 
 ## Inference policy
 
@@ -19,7 +20,7 @@ may have fewer unique real providers because padding is excluded.
 
 The same original-window provider set is used in all global blocks. In blocks 5
 and 7, key providers keep every patch and overlap/new providers keep one
-stride-2 lattice (320 of 1280 patches at the 32x40 inference patch grid). The
+stride-2 lattice (80 of 320 patches at the 16x20 inference patch grid). The
 lattice phase is assigned by the selected provider's rank in original VDA window
 order, including key ranks:
 

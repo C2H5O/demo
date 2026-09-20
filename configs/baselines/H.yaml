@@ -1,7 +1,7 @@
 base_config: _4090_common.yaml
 
 experiment:
-  name: baseline_H_staggered_spatial_kv
+  name: baseline_H_224_staggered_spatial_kv
   baseline_id: H
   source_weights_branch: codex/baseline-J
   source_weights_project: vggtoda3-baseline-J
@@ -18,17 +18,17 @@ vda_evaluation:
   checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
   evaluation_height: 224
   evaluation_width: 280
-  output: ./outputs/baseline_H/evaluation_staggered_spatial_kv_test.json
+  output: ./outputs/baseline_H_224/evaluation_test.json
   tae:
     enabled: false
 
 visualization:
-  output_dir: ./outputs/baseline_H/visualization
+  output_dir: ./outputs/baseline_H_224/visualization
 
 inference:
   acceleration: role_layer_spatial_kv
-  image_height: 448
-  image_width: 560
+  image_height: 224
+  image_width: 280
   source_checkpoint: /public/home/2024141520249/Documents/Projects/vggtoda3-baseline-J/outputs/baseline_J/epoch_0015.pt
 
 kv_sampling:

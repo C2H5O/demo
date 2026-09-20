@@ -203,18 +203,18 @@ def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> 
         model(torch.zeros(1, 16, 3, 224, 280))
     model.eval()
     with torch.no_grad():
-        inference = model(torch.zeros(1, 32, 3, 448, 560), include_global_points=False)
-    assert inference["depth"].shape == (1, 32, 448, 560)
-    assert inference["xyz_local"].shape == (1, 32, 448, 560, 3)
-    assert inference["intrinsics"][0, 0, 0, 0] == 560
-    assert inference["intrinsics"][0, 0, 1, 1] == 448
+        inference = model(torch.zeros(1, 32, 3, 224, 280), include_global_points=False)
+    assert inference["depth"].shape == (1, 32, 224, 280)
+    assert inference["xyz_local"].shape == (1, 32, 224, 280, 3)
+    assert inference["intrinsics"][0, 0, 0, 0] == 280
+    assert inference["intrinsics"][0, 0, 1, 1] == 224
     with pytest.raises(ValueError, match="DA3 inference requires"):
-        model(torch.zeros(1, 32, 3, 224, 280))
+        model(torch.zeros(1, 32, 3, 448, 560))
     with pytest.raises(ValueError, match="DA3 inference requires"):
         model(torch.zeros(1, 32, 3, 448, 280))
 
 
-def test_depth_head_wrapper_uses_32x40_patch_grid() -> None:
+def test_depth_head_wrapper_uses_16x20_patch_grid() -> None:
     class Fuse(nn.Module):
         def forward(self, x, residual=None, size=None):
             return x if residual is None else x + residual
@@ -244,8 +244,8 @@ def test_depth_head_wrapper_uses_32x40_patch_grid() -> None:
 
     model = DA3SmallStudent(DA3SmallConfig(), network=_FakeNetwork())
     model.network.head = Head()
-    tokens = [torch.ones(1, 1280, 1) for _ in range(4)]
-    depth, confidence = model._depth_main_chunk(tokens, 448, 560)
-    assert depth.shape == confidence.shape == (1, 448, 560)
+    tokens = [torch.ones(1, 320, 1) for _ in range(4)]
+    depth, confidence = model._depth_main_chunk(tokens, 224, 280)
+    assert depth.shape == confidence.shape == (1, 224, 280)
     with pytest.raises(ValueError, match="runtime patch grid"):
-        model._depth_main_chunk([torch.ones(1, 1281, 1)] * 4, 448, 560)
+        model._depth_main_chunk([torch.ones(1, 321, 1)] * 4, 224, 280)

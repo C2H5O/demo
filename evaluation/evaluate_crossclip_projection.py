@@ -21,7 +21,7 @@ from evaluation.temporal_alignment import (
     evaluate_tae,
 )
 from inference.kv_sampling import resolve_kv_sampling
-from inference.student_video import WINDOW, infer_student_video, sequence_frames
+from inference.student_video import OVERLAP, STEP, WINDOW, infer_student_video, sequence_frames
 
 from models.student.da3_small_student import DA3SmallStudent
 from utils.checkpoint import (
@@ -269,6 +269,11 @@ def evaluate_vda(
             if not resolution_audit_printed and isinstance(model, DA3SmallStudent):
                 patch_size = int(model.config.patch_size)
                 native = timing["native_prediction_resolution_hw"]
+                observed_sdpa = [
+                    {**shape, "token_retention_ratio":
+                     shape["kv_token_count"] / shape["q_token_count"]}
+                    for shape in timing["attention_shapes"]
+                ]
                 audit = {
                     "model_input": f"{model_height}x{model_width}",
                     "patch_size": patch_size,
@@ -276,18 +281,22 @@ def evaluate_vda(
                     "patches_per_frame": model_height * model_width // patch_size ** 2,
                     "native_prediction": f"{native[0]}x{native[1]}",
                     "evaluation_grid": f"{evaluation_height}x{evaluation_width}",
-                    "window_length": WINDOW,
+                    "window": WINDOW, "overlap": OVERLAP, "step": STEP,
+                    "first_window_provider_count": kv_config.frame_budget(WINDOW, first_window=True),
+                    "later_window_provider_count": kv_config.frame_budget(WINDOW),
+                    "observed_window_provider_counts": [
+                        {"window_id": item["window_id"],
+                         "count": item["total_kv_frame_count"]}
+                        for item in timing["kv_selection_examples"]
+                    ],
+                    "global_blocks": timing["global_attention_layers"],
+                    "full_patches_per_frame": model_height * model_width // patch_size ** 2,
+                    "stride2_patches_per_frame":
+                        (model_height // (2 * patch_size)) *
+                        (model_width // (2 * patch_size)),
+                    "observed_sdpa": observed_sdpa,
                 }
-                print("DA3 inference/evaluation audit: " + json.dumps(audit), flush=True)
-                if kv_config.enabled and kv_config.method == "role_layer_spatial_kv":
-                    print("H sparse KV audit: " + json.dumps({
-                        "full_patches_per_frame": audit["patches_per_frame"],
-                        "stride2_patches_per_frame":
-                            (model_height // (2 * patch_size)) *
-                            (model_width // (2 * patch_size)),
-                        "block5": "sparse", "block7": "sparse",
-                        "block9": "dense", "block11": "dense",
-                    }), flush=True)
+                print("H-224 inference audit: " + json.dumps(audit), flush=True)
                 resolution_audit_printed = True
             spool.flush()
             item = vda_core._evaluate_sequence(
