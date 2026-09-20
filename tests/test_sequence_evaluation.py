@@ -64,9 +64,9 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
     assert not list(tmp_path.glob(".vda_spool_*"))
 
 
-def test_independent_224_inference_and_metric_grid(tmp_path, monkeypatch):
+def test_448_inference_and_224_metric_grid(tmp_path, monkeypatch):
     config_path, config = make_scared(tmp_path, count=1)
-    config["inference"] = {"image_height": 224, "image_width": 280}
+    config["inference"] = {"image_height": 448, "image_width": 560}
     config["vda_evaluation"].update({"evaluation_height": 224,
                                      "evaluation_width": 280, "tae": {"enabled": False}})
     config_path.write_text(yaml.safe_dump(config))
@@ -84,24 +84,24 @@ def test_independent_224_inference_and_metric_grid(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ConstantPlane, "forward", record)
     result = evaluate_vda(config_path)
-    assert observed == [(1, 32, 3, 224, 280)] * 2
-    assert result["model_input_resolution_hw"] == [224, 280]
+    assert observed == [(1, 32, 3, 448, 560)] * 2
+    assert result["model_input_resolution_hw"] == [448, 560]
     assert result["evaluation_resolution_hw"] == [224, 280]
-    assert all(item["inference"]["native_prediction_resolution_hw"] == (224, 280)
+    assert all(item["inference"]["native_prediction_resolution_hw"] == (448, 560)
                for item in result["sequences"])
     assert set(result["metrics"]) == {"abs_relative_difference", "rmse_linear", "delta1_acc"}
 
 
-def test_precomputed_training_rgb_is_resized_only_for_inference(tmp_path):
+def test_precomputed_training_rgb_keeps_448_inference_grid(tmp_path):
     image_path = tmp_path / "frame_000000.png"
     Image.new("RGB", (560, 448), color=(128, 128, 128)).save(image_path)
     sequence = {"frame_paths": [str(image_path)],
                 "preprocessing_identity": "canonical_student_rgb"}
     frames = sequence_frames(
         sequence, {"image_height": 448, "image_width": 560},
-        inference_height=224, inference_width=280)
-    assert frames[0].shape == (3, 224, 280)
-    assert (frames.height, frames.width) == (224, 280)
+        inference_height=448, inference_width=560)
+    assert frames[0].shape == (3, 448, 560)
+    assert (frames.height, frames.width) == (448, 560)
 
 
 def test_native_metric_grid_disparity_skips_interpolation(tmp_path, monkeypatch):
@@ -113,6 +113,27 @@ def test_native_metric_grid_disparity_skips_interpolation(tmp_path, monkeypatch)
         values = np.full((1, 224, 280), 0.5, dtype=np.float32)
         spool.add([0], values)
         np.testing.assert_array_equal(spool.prediction(0), values[0])
+    finally:
+        spool.close()
+
+
+def test_native_448_disparity_and_gt_resize_to_metric_grid(tmp_path):
+    import cv2
+    from evaluation.evaluate_vda import _resized_gt
+
+    spool = _SequencePredictionSpool(tmp_path, 1, 224, 280)
+    try:
+        native = np.arange(448 * 560, dtype=np.float32).reshape(448, 560)
+        spool.add([0], native[None])
+        expected = cv2.resize(native, (280, 224), interpolation=cv2.INTER_LINEAR)
+        np.testing.assert_allclose(spool.prediction(0), expected)
+        gt_path = tmp_path / "depth.npy"
+        np.save(gt_path, native)
+        np.testing.assert_array_equal(
+            _resized_gt(gt_path, 0, 224, 280),
+            cv2.resize(native.astype(np.float32) * 0.001, (280, 224),
+                       interpolation=cv2.INTER_NEAREST),
+        )
     finally:
         spool.close()
 

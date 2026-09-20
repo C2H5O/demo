@@ -28,7 +28,7 @@ def test_h_config_and_twenty_two_new_frames_form_seven_contiguous_buckets():
     raw = load_config("configs/baselines/H.yaml")
     assert (raw["dataset"]["image_height"], raw["dataset"]["image_width"]) == (448, 560)
     assert (raw["student"]["image_height"], raw["student"]["image_width"]) == (448, 560)
-    assert (raw["inference"]["image_height"], raw["inference"]["image_width"]) == (224, 280)
+    assert (raw["inference"]["image_height"], raw["inference"]["image_width"]) == (448, 560)
     assert (raw["vda_evaluation"]["evaluation_height"],
             raw["vda_evaluation"]["evaluation_width"]) == (224, 280)
     assert raw["vda_evaluation"]["tae"]["enabled"] is False
@@ -93,19 +93,6 @@ def test_four_phases_partition_the_grid_with_equal_budget():
     assert all(not phases[a] & phases[b] for a in range(4) for b in range(a + 1, 4))
     with pytest.raises(ValueError, match="offsets"):
         build_spatial_patch_indices(32, 40, 1, 0, 1)
-
-
-def test_staggered_budget_on_224x280_inference_grid():
-    phases = [set(build_spatial_patch_indices(16, 20, 2, row, col))
-              for row, col in ((0, 0), (0, 1), (1, 0), (1, 1))]
-    assert all(len(phase) == 80 for phase in phases)
-    assert len(set.union(*phases)) == 320
-    assert all(not phases[a] & phases[b] for a in range(4) for b in range(a + 1, 4))
-    selected = [0, 1, 2, 3, 10]
-    for layer in (5, 7):
-        patches = build_role_layer_patch_indices(
-            normal_window(), selected, layer, 16, 20, current_h().spatial_sampling)
-        assert [len(patches[slot]) for slot in selected] == [320, 320, 80, 80, 80]
 
 
 def test_rank_phases_rotate_across_blocks_and_ignore_slot_modulo():

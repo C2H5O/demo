@@ -278,7 +278,7 @@ def evaluate_vda(
                     "evaluation_grid": f"{evaluation_height}x{evaluation_width}",
                     "window_length": WINDOW,
                 }
-                print("DA3 inference resolution audit: " + json.dumps(audit), flush=True)
+                print("DA3 inference/evaluation audit: " + json.dumps(audit), flush=True)
                 if kv_config.enabled and kv_config.method == "role_layer_spatial_kv":
                     print("H sparse KV audit: " + json.dumps({
                         "full_patches_per_frame": audit["patches_per_frame"],
