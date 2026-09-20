@@ -95,7 +95,7 @@ def test_baseline_configs_keep_native_input_and_lock_paper_grid() -> None:
     config = load_config(path)
     assert [config["dataset"]["image_height"], config["dataset"]["image_width"]] == [448, 560]
     assert [config["student"]["image_height"], config["student"]["image_width"]] == [448, 560]
-    assert [config["inference"]["image_height"], config["inference"]["image_width"]] == [224, 280]
+    assert [config["inference"]["image_height"], config["inference"]["image_width"]] == [448, 560]
     assert [config[section]["evaluation_height"], config[section]["evaluation_width"]] == [224, 280]
     assert config[section]["tae"]["enabled"] is False
 
@@ -122,6 +122,23 @@ def test_spool_resizes_disparity_bilinearly_before_evaluation(tmp_path: Path) ->
         spool.close()
 
 
+def test_da3_native_grid_is_resized_to_paper_metric_grid(tmp_path: Path) -> None:
+    depth = np.linspace(1.0, 4.0, 448 * 560, dtype=np.float32).reshape(1, 448, 560)
+    disparity = _student_depth_to_vda_disparity(depth)
+    spool = _SequencePredictionSpool(tmp_path, 1, height=224, width=280)
+    try:
+        spool.add([0], disparity)
+        assert spool.native_prediction_resolutions_hw == {(448, 560)}
+        assert spool.prediction(0).shape == (224, 280)
+        np.testing.assert_allclose(
+            spool.prediction(0),
+            cv2.resize(disparity[0], (280, 224), interpolation=cv2.INTER_LINEAR),
+            rtol=1e-6,
+        )
+    finally:
+        spool.close()
+
+
 def test_ground_truth_uses_nearest_neighbor_at_evaluation_shape(tmp_path: Path) -> None:
     path = tmp_path / "depth_000000.npy"
     np.save(path, np.array([[1000.0, 2000.0], [3000.0, 4000.0]], np.float32))
@@ -130,6 +147,9 @@ def test_ground_truth_uses_nearest_neighbor_at_evaluation_shape(tmp_path: Path) 
         resized,
         np.array([[1.0, 1.0, 2.0, 2.0], [3.0, 3.0, 4.0, 4.0]], np.float32),
     )
+    paper_grid = _resized_gt(path, 0, height=224, width=280)
+    assert paper_grid.shape == (224, 280)
+    np.testing.assert_allclose(np.unique(paper_grid), [1.0, 2.0, 3.0, 4.0])
 
 
 def test_result_metadata_separates_native_model_and_evaluation_grids(

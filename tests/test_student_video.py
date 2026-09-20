@@ -3,7 +3,8 @@ import pytest
 import torch
 from torch import nn
 
-from inference.student_video import infer_student_video
+from inference.student_video import infer_student_video, sequence_frames
+from utils.config import load_config
 
 
 class DriftingModel(nn.Module):
@@ -76,3 +77,19 @@ def test_nonfinite_depth_rejected():
             return result
     with pytest.raises(FloatingPointError):
         infer_student_video(Broken().eval(), scene_frames(2), None, device="cpu")
+
+
+def test_j_inference_loader_uses_full_resolution(tmp_path):
+    from pathlib import Path
+    from PIL import Image
+
+    config = load_config(Path(__file__).resolve().parents[1] / "configs/baselines/J.yaml")
+    path = tmp_path / "frame.png"
+    Image.new("RGB", (560, 448)).save(path)
+    sequence = {"frame_paths": [path], "preprocessing_identity": "legacy_scared"}
+    frames = sequence_frames(sequence, config["dataset"], raw_rgb=True,
+                             inference_config=config["inference"])
+    assert (frames.height, frames.width) == (448, 560)
+    assert frames[0].shape == (3, 448, 560)
+    assert (frames.height // config["student"]["patch_size"],
+            frames.width // config["student"]["patch_size"]) == (32, 40)

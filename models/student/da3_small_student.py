@@ -419,7 +419,7 @@ class DA3SmallStudent(nn.Module):
             raise ValueError("DA3 student requires [B,T,3,H,W], got {}".format(tuple(images.shape)))
         frames = images.shape[1]
         height, width = images.shape[-2:]
-        required_size = (448, 560) if self.training or self.attention_capture is not None else (224, 280)
+        required_size = (448, 560)
         if (height, width) != required_size:
             raise ValueError("DA3 {} requires {}x{}, got {}x{}".format(
                 "training/attention capture" if self.training or self.attention_capture is not None else "inference",

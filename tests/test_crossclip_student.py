@@ -202,7 +202,9 @@ def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> 
     with pytest.raises(ValueError, match="training/attention capture requires 448x560"):
         model(torch.zeros(1, 16, 3, 224, 280))
     model.eval()
-    output = model(torch.zeros(1, 32, 3, 224, 280), include_global_points=False)
-    assert output["depth"].shape == (1, 32, 224, 280)
-    assert output["intrinsics"][0, 0, 0, 0] == 280
-    assert output["intrinsics"][0, 0, 1, 1] == 224
+    with pytest.raises(ValueError, match="inference requires 448x560"):
+        model(torch.zeros(1, 32, 3, 224, 280), include_global_points=False)
+    output = model(torch.zeros(1, 32, 3, 448, 560), include_global_points=False)
+    assert output["depth"].shape == (1, 32, 448, 560)
+    assert output["intrinsics"][0, 0, 0, 0] == 560
+    assert output["intrinsics"][0, 0, 1, 1] == 448

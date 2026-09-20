@@ -198,9 +198,9 @@ def infer_student_video(model, frames, emit: Callable, *, device, amp=True,
                         max_windows=None, emit_window=None) -> dict:
     """Run DA3 through the shared formal VDA temporal/stitching pipeline."""
     global _resolution_audit_printed
-    if not _resolution_audit_printed and getattr(frames, "height", None) == 224 and getattr(frames, "width", None) == 280:
-        print("DA3 inference resolution audit: model_input = 224x280; patch_size = 14; "
-              "patch_grid = 16x20; patches_per_frame = 320; native_prediction = 224x280; "
+    if not _resolution_audit_printed and getattr(frames, "height", None) == 448 and getattr(frames, "width", None) == 560:
+        print("DA3 inference/evaluation audit: model_input = 448x560; patch_size = 14; "
+              "patch_grid = 32x40; patches_per_frame = 1280; native_prediction = 448x560; "
               "evaluation_grid = 224x280; window_length = 32")
         _resolution_audit_printed = True
     return infer_vda_video(
