@@ -416,7 +416,7 @@ class DA3SmallStudent(nn.Module):
         self._last_forward_timing_events = {}
         self._record_cuda_timing("start", images.device)
         training_input = self.training or self.attention_capture is not None
-        expected_size = (self.config.image_height, self.config.image_width) if training_input else (224, 280)
+        expected_size = (self.config.image_height, self.config.image_width)
         if images.ndim != 5 or images.shape[1] < 1 or tuple(images.shape[2:]) != (3, *expected_size):
             raise ValueError("DA3 student requires [B,T,3,{},{}], got {}".format(*expected_size, tuple(images.shape)))
         frames = images.shape[1]

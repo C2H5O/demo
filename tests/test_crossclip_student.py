@@ -202,8 +202,11 @@ def test_student_depth_only_contract_never_executes_ray_modules(monkeypatch) -> 
     with pytest.raises(ValueError, match="448,560"):
         model(torch.zeros(1, 16, 3, 224, 280))
     model.eval()
-    inferred = model(torch.zeros(1, 32, 3, 224, 280))
-    assert inferred["depth"].shape == (1, 32, 224, 280)
-    assert inferred["intrinsics"][0, 0, 0, 0] == 280
-    assert inferred["intrinsics"][0, 0, 1, 1] == 224
-    assert (224 // 14, 280 // 14, (224 // 14) * (280 // 14)) == (16, 20, 320)
+    with pytest.raises(ValueError, match="448,560"):
+        model(torch.zeros(1, 32, 3, 224, 280))
+    with torch.no_grad():
+        inferred = model(torch.zeros(1, 32, 3, 448, 560), include_global_points=False)
+    assert inferred["depth"].shape == (1, 32, 448, 560)
+    assert inferred["intrinsics"][0, 0, 0, 0] == 560
+    assert inferred["intrinsics"][0, 0, 1, 1] == 448
+    assert (448 // 14, 560 // 14, (448 // 14) * (560 // 14)) == (32, 40, 1280)

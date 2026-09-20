@@ -62,19 +62,27 @@ def test_full_evaluation_discovers_short_sequences_scores_tae_and_writes_speed(t
 
 def test_distinct_inference_and_evaluation_grid(tmp_path, monkeypatch, capsys):
     config_path, config = make_scared(tmp_path)
-    config["inference"] = {"image_height": 224, "image_width": 280}
+    config["inference"] = {"image_height": 448, "image_width": 560}
     config["vda_evaluation"].update({"evaluation_height": 224, "evaluation_width": 280,
                                       "tae": {"enabled": False}})
     config_path.write_text(yaml.safe_dump(config))
+    model = ConstantPlane().eval()
+    model_input_shapes = []
+    original_forward = model.forward
+    def audited_forward(images, include_global_points=False):
+        model_input_shapes.append(tuple(images.shape))
+        return original_forward(images, include_global_points=include_global_points)
+    monkeypatch.setattr(model, "forward", audited_forward)
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
-                        lambda *args: ConstantPlane().eval())
+                        lambda *args: model)
     monkeypatch.setattr("evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
                         lambda checkpoint, config: checkpoint)
     result = evaluate_vda(config_path)
-    assert result["input_resolution_hw"] == [224, 280]
+    assert result["input_resolution_hw"] == [448, 560]
+    assert set(model_input_shapes) == {(1, 32, 3, 448, 560)}
     assert all(item["evaluation_shape_hxw"] == [224, 280] for item in result["sequences"])
     assert result["metrics"]["tae"] is None
-    assert capsys.readouterr().out.count("DA3 inference resolution audit:") == 1
+    assert capsys.readouterr().out.count("DA3 inference/evaluation audit:") == 1
 
 
 def test_window_limit_never_claims_full_test_set(tmp_path, monkeypatch):

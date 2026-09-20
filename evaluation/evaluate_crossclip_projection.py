@@ -235,8 +235,8 @@ def evaluate_vda(
     input_width = int(inference_config.get("image_width", config["dataset"]["image_width"]))
     height = int(eval_config.get("evaluation_height", input_height))
     width = int(eval_config.get("evaluation_width", input_width))
-    if (input_height, input_width) == (224, 280):
-        print("DA3 inference resolution audit:\nmodel_input = 224x280\npatch_size = 14\npatch_grid = 16x20\npatches_per_frame = 320\nnative_prediction = 224x280\nevaluation_grid = {}x{}\nwindow_length = 32".format(height, width))
+    if (input_height, input_width) == (448, 560):
+        print("DA3 inference/evaluation audit:\nmodel_input = 448x560\npatch_size = 14\npatch_grid = 32x40\npatches_per_frame = 1280\nnative_prediction = 448x560\nevaluation_grid = {}x{}\nwindow_length = 32".format(height, width))
     remaining = limit_clips
     sequence_results = []
     for sequence_id, sequence in sequences.items():
