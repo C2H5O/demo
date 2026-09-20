@@ -95,7 +95,7 @@ def test_baseline_configs_keep_native_input_and_lock_paper_grid() -> None:
     config = load_config(path)
     assert [config["dataset"]["image_height"], config["dataset"]["image_width"]] == [448, 560]
     assert [config["student"]["image_height"], config["student"]["image_width"]] == [448, 560]
-    assert [config["inference"]["image_height"], config["inference"]["image_width"]] == [224, 280]
+    assert [config["inference"]["image_height"], config["inference"]["image_width"]] == [448, 560]
     assert [config[section]["evaluation_height"], config[section]["evaluation_width"]] == [224, 280]
     assert config[section]["tae"]["enabled"] is False
 
@@ -129,6 +129,21 @@ def test_spool_skips_same_shape_interpolation(tmp_path: Path, monkeypatch) -> No
         values = np.arange(6, dtype=np.float32).reshape(1, 2, 3)
         spool.add([0], values)
         np.testing.assert_array_equal(spool.prediction(0), values[0])
+    finally:
+        spool.close()
+
+
+def test_native_da3_disparity_reaches_224x280_metric_grid(tmp_path: Path) -> None:
+    depth = np.tile(np.linspace(1, 4, 560, dtype=np.float32), (448, 1))[None]
+    disparity = _student_depth_to_vda_disparity(depth)
+    spool = _SequencePredictionSpool(tmp_path, 1, height=224, width=280)
+    try:
+        spool.add([0], disparity)
+        assert spool.native_prediction_resolutions_hw == {(448, 560)}
+        np.testing.assert_allclose(
+            spool.prediction(0),
+            cv2.resize(disparity[0], (280, 224), interpolation=cv2.INTER_LINEAR),
+        )
     finally:
         spool.close()
 

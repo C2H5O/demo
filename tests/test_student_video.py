@@ -39,10 +39,10 @@ def test_sequence_frames_uses_inference_grid(tmp_path):
     Image.new("RGB", (560, 448)).save(path)
     frames = sequence_frames(
         {"frame_paths": [path]},
-        {"image_height": 448, "image_width": 560, "resize_mode": "resize"},
-        inference_config={"image_height": 224, "image_width": 280},
+        {"image_height": 224, "image_width": 280, "resize_mode": "resize"},
+        inference_config={"image_height": 448, "image_width": 560},
     )
-    assert frames[0].shape == (3, 224, 280)
+    assert frames[0].shape == (3, 448, 560)
 
 
 @pytest.mark.parametrize("length", [1, 7, 16, 22, 24, 31, 32, 33, 44, 54, 55, 79])

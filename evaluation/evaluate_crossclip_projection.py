@@ -277,6 +277,17 @@ def evaluate_vda(
                 spool.add(range(start, start + len(disparities)), disparities)
             timing = infer_student_video(model, frames, emit, device=device, amp=amp,
                                          max_windows=remaining)
+            native_shapes = sorted(spool.native_prediction_resolutions_hw)
+            if not sequence_results:
+                patch_size = int(config["student"].get("patch_size", 14))
+                print("DA3 inference/evaluation audit:\n"
+                      f"model_input = {model_input_height}x{model_input_width}\n"
+                      f"patch_size = {patch_size}\n"
+                      f"patch_grid = {model_input_height // patch_size}x{model_input_width // patch_size}\n"
+                      f"patches_per_frame = {(model_input_height // patch_size) * (model_input_width // patch_size)}\n"
+                      f"native_prediction = {native_shapes[0][0]}x{native_shapes[0][1]}\n"
+                      f"evaluation_grid = {evaluation_height}x{evaluation_width}\n"
+                      f"window_length = {timing['window_length']}")
             spool.flush()
             item = vda_core._evaluate_sequence(
                 sequence, spool, int(eval_config.get("gt_depth_channel", 0)),
@@ -288,17 +299,6 @@ def evaluate_vda(
             item["temporal"] = evaluate_tae(temporal_sequence, spool, item, eval_config)
             item["metrics"]["tae"] = item["temporal"]["tae"]
             item["inference"] = timing
-            native_shapes = sorted(spool.native_prediction_resolutions_hw)
-            if not sequence_results:
-                patch_size = int(config["student"].get("patch_size", 14))
-                print("DA3 inference resolution audit:\n"
-                      f"model_input = {model_input_height}x{model_input_width}\n"
-                      f"patch_size = {patch_size}\n"
-                      f"patch_grid = {model_input_height // patch_size}x{model_input_width // patch_size}\n"
-                      f"patches_per_frame = {(model_input_height // patch_size) * (model_input_width // patch_size)}\n"
-                      f"native_prediction = {native_shapes[0][0]}x{native_shapes[0][1]}\n"
-                      f"evaluation_grid = {evaluation_height}x{evaluation_width}\n"
-                      f"window_length = {timing['window_length']}")
             item["native_prediction_resolution_hw"] = (
                 list(native_shapes[0]) if len(native_shapes) == 1 else None
             )
