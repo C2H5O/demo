@@ -61,6 +61,6 @@
     "source_baseline": "J",
     "source_weights_branch": "codex/baseline-J",
     "source_weights_project": "vggtoda3-baseline-J",
-    "inference_algorithm": "hybrid_global_kv_50_bank_15_active_25_unique_providers"
+    "inference_algorithm": "fixed_sequence_global_50_persistent_kv_cache"
   }
 ]

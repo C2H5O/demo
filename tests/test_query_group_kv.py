@@ -25,9 +25,8 @@ def current_h() -> KVSamplingConfig:
 def test_h_selects_hybrid_policy_and_qg_stays_explicitly_configurable() -> None:
     raw = load_config("configs/baselines/H.yaml")
     config = current_h()
-    assert raw["kv_sampling"]["method"] == "hybrid_global_kv"
-    assert raw["kv_sampling"]["spatial_sampling"]["block5"] == {
-        "local_stride": 1, "global_stride": 2}
+    assert raw["kv_sampling"]["method"] == "fixed_global_kv"
+    assert raw["kv_sampling"]["spatial_sampling"]["block5"] == {"global_stride": 2}
     assert config.method == "query_group"
     assert config.query_group_size == 8
     assert config.kv_frames == 20

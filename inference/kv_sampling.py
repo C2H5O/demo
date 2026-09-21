@@ -70,6 +70,9 @@ class KVSamplingConfig:
     diagnostics: dict = field(default_factory=dict)
     global_anchor_bank: dict = field(default_factory=dict)
     local_history: dict = field(default_factory=dict)
+    provider_policy: str = ""
+    persistent_kv_cache: bool = False
+    anchor_selection: str = ""
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -101,24 +104,27 @@ class KVSamplingConfig:
                 or self.provider_selection != "temporal_uniform"):
                 raise ValueError("Invalid query_group configuration")
             return self.kv_frames
-        if self.method == "hybrid_global_kv":
+        if self.method == "fixed_global_kv":
             if window_length != 32:
-                raise ValueError("Hybrid Global KV requires a 32-frame VDA window")
+                raise ValueError("Fixed Global KV requires a 32-frame VDA window")
             if (self.lightweight_highlight or self.new_frame_selection
                 or self.bucket_highlight or self.highlight_detection):
-                raise ValueError("Hybrid Global KV must not configure highlight selection")
+                raise ValueError("Fixed Global KV must not configure highlight selection")
             bank = self.global_anchor_bank
-            history = self.local_history
-            if bank != {"bank_size": 50, "active_global_frames": 15,
+            if bank != {"anchor_count": 50,
                         "descriptor": "da3_dino_pool", "selection": "fps_diversity",
                         "deterministic_seed": "first_valid_frame"}:
-                raise ValueError("Invalid Hybrid Global KV anchor-bank contract")
-            if history != {"key_frames": 2, "overlap_frames": 8}:
-                raise ValueError("Hybrid Global KV requires 2 key and 8 overlap frames")
-            resolve_hybrid_spatial_sampling_options(self.spatial_sampling)
+                raise ValueError("Invalid Fixed Global KV anchor-bank contract")
+            if self.local_history:
+                raise ValueError("Fixed Global KV must not configure local-history providers")
+            if (self.provider_policy != "fixed_sequence_global"
+                or self.persistent_kv_cache is not True
+                or self.anchor_selection != "fps_diversity"):
+                raise ValueError("Invalid fixed sequence-global cache policy")
+            resolve_fixed_global_spatial_sampling_options(self.spatial_sampling)
             resolve_special_token_options(self.special_tokens)
             resolve_diagnostics_options(self.diagnostics)
-            return 25
+            return 50
         if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight",
                                "role_layer_spatial_kv", "spark3r_fixed_stride"}:
             raise ValueError("Unknown kv_sampling.method")
@@ -181,6 +187,22 @@ class KVSamplingConfig:
         return target
 
     def as_dict(self):
+        if self.method == "fixed_global_kv":
+            return {
+                "enabled": self.enabled,
+                "method": self.method,
+                "anchor_count": self.global_anchor_bank["anchor_count"],
+                "provider_policy": self.provider_policy,
+                "persistent_kv_cache": self.persistent_kv_cache,
+                "anchor_selection": self.anchor_selection,
+                "global_anchor_bank": dict(self.global_anchor_bank),
+                "spatial_sampling": {name: dict(value)
+                                     for name, value in self.spatial_sampling.items()},
+                "special_tokens": dict(self.special_tokens),
+                "diagnostics": dict(self.diagnostics),
+                "debug": self.debug, "debug_max_windows": self.debug_max_windows,
+                "profile_attention": self.profile_attention,
+            }
         return asdict(self)
 
 
@@ -289,6 +311,20 @@ def resolve_hybrid_spatial_sampling_options(options: Mapping | None = None) -> d
         expected = {"local_stride": 1, "global_stride": 2 if layer in (5, 7) else 1}
         if item != expected:
             raise ValueError(f"Invalid Hybrid spatial schedule at block {layer}")
+        result[layer] = dict(item)
+    return result
+
+
+def resolve_fixed_global_spatial_sampling_options(options: Mapping | None = None) -> dict:
+    """Validate the fixed Global-50 schedule independently of legacy role policies."""
+    if not isinstance(options, Mapping) or set(options) != {"block5", "block7", "block9", "block11"}:
+        raise ValueError("Fixed-global spatial sampling requires blocks 5, 7, 9, 11")
+    result = {}
+    for layer in (5, 7, 9, 11):
+        item = options[f"block{layer}"]
+        expected = {"global_stride": 1 if layer == 11 else 2}
+        if item != expected:
+            raise ValueError(f"Invalid Fixed Global KV spatial schedule at block {layer}")
         result[layer] = dict(item)
     return result
 

@@ -98,7 +98,7 @@ class DA3KVAttention:
         if cls is DA3KVAttention and config.enabled and config.method == "query_group":
             from inference.qg_kv_attention import DA3KVAttention as QGKVAttention
             return QGKVAttention(model, config, window_length)
-        if cls is DA3KVAttention and config.enabled and config.method == "hybrid_global_kv":
+        if cls is DA3KVAttention and config.enabled and config.method == "fixed_global_kv":
             from inference.hybrid_global_kv import HybridGlobalKVAttention
             return HybridGlobalKVAttention(model, config, window_length)
         return super().__new__(cls)

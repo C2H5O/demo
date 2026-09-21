@@ -63,36 +63,12 @@ def extract_frame_descriptors(model, frames, *, device, batch_size: int = 8) -> 
 
 @dataclass(frozen=True)
 class GlobalAnchorBank:
-    bank_positions: tuple[int, ...]
-    active_positions: tuple[int, ...]
-    candidate_positions: tuple[int, ...]
+    anchor_positions: tuple[int, ...]
     selection_seconds: float
 
 
-def select_diverse_anchors(descriptors: np.ndarray, *, bank_size: int = 50,
-                           active_size: int = 15) -> GlobalAnchorBank:
+def select_diverse_anchors(descriptors: np.ndarray, *, anchor_count: int = 50) -> GlobalAnchorBank:
     started = time.perf_counter()
-    bank = farthest_point_indices(descriptors, min(bank_size, len(descriptors)))
-    candidate_rows = farthest_point_indices(np.asarray(descriptors)[bank], len(bank))
-    candidates = [bank[i] for i in candidate_rows]
-    active = candidates[:min(active_size, len(bank))]
-    return GlobalAnchorBank(tuple(bank), tuple(active), tuple(candidates),
+    anchors = farthest_point_indices(descriptors, min(anchor_count, len(descriptors)))
+    return GlobalAnchorBank(tuple(anchors),
                             time.perf_counter() - started)
-
-
-def select_window_providers(metadata, bank: GlobalAnchorBank, target: int = 25):
-    """Local VDA history wins; fill unique positions from sequence FPS order."""
-    local = [] if metadata.first_window else [
-        pos for pos, role, padded in zip(metadata.frame_positions, metadata.frame_roles, metadata.is_padding)
-        if role in ("key", "overlap") and not padded
-    ]
-    local = list(dict.fromkeys(local))
-    if len(local) > 10:
-        raise ValueError("Hybrid local history exceeds 2 key + 8 overlap")
-    selected = set(local)
-    global_positions = []
-    for position in bank.candidate_positions:
-        if position not in selected and len(selected) < target:
-            selected.add(position)
-            global_positions.append(position)
-    return tuple(local), tuple(global_positions)

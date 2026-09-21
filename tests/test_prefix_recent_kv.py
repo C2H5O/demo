@@ -56,7 +56,7 @@ def test_h_config_and_twenty_two_new_frames_form_seven_contiguous_buckets():
             raw["vda_evaluation"]["evaluation_width"]) == (224, 280)
     assert raw["vda_evaluation"]["tae"]["enabled"] is False
     config = current_h()
-    assert raw["kv_sampling"]["method"] == "hybrid_global_kv"
+    assert raw["kv_sampling"]["method"] == "fixed_global_kv"
     assert config.method == "role_layer_spatial_kv"
     assert config.frame_budget(32) == 24
     assert config.frame_budget(32, first_window=True) == 16
