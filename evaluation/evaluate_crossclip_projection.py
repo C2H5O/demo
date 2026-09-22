@@ -252,6 +252,11 @@ def evaluate_vda(
     model_height, model_width, evaluation_height, evaluation_width = (
         _evaluation_resolution(config, eval_config)
     )
+    if kv_config.enabled and kv_config.method == "layer_stride_kv":
+        if (model_height, model_width) != (448, 560):
+            raise RuntimeError("Layer-stride KV requires 448x560 model input")
+        if (evaluation_height, evaluation_width) != (224, 280):
+            raise RuntimeError("Layer-stride KV requires 224x280 evaluation")
     remaining = limit_clips
     sequence_results = []
     resolution_audit_printed = False

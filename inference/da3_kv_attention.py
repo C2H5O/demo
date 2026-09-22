@@ -18,7 +18,9 @@ from torch.overrides import TorchFunctionMode
 
 from inference.kv_sampling import (
     KVSamplingConfig, WindowFrameMetadata, build_role_layer_patch_indices,
+    build_spatial_patch_indices,
     eligible_frame_slots, provider_spatial_plan, select_kv_frames, spatial_strides_for_layer,
+    resolve_layer_stride_policy, temporal_stride_slots,
 )
 from models.attention_capture import _blocks
 from inference.lightweight_highlight import compute_lightweight_highlight_scores
@@ -138,6 +140,10 @@ class DA3KVAttention:
                 raise RuntimeError("Role/layer spatial KV requires the 12-block DA3-Small encoder")
             for layer in self.layers:
                 spatial_strides_for_layer(layer, config.spatial_sampling)
+        if config.enabled and config.method == "layer_stride_kv":
+            if len(self.blocks) != 12 or self.layers != [5, 7, 9, 11]:
+                raise RuntimeError("Layer-stride KV requires DA3-Small global blocks 5, 7, 9, 11")
+            self.layer_stride_policy = resolve_layer_stride_policy(config.layer_policy)
 
     def __enter__(self):
         if not self.observing:
@@ -171,6 +177,8 @@ class DA3KVAttention:
         self.metadata = None
         self.token_indices = None
         self.token_indices_by_layer = None
+        self.selected_by_layer = None
+        self.patch_indices_by_layer = None
         self.reference_indices = None
         self.events = []
         return self.stack.__exit__(*exc)
@@ -235,6 +243,8 @@ class DA3KVAttention:
         self.batch, self.frames = images.shape[:2]
         if self.frames != len(metadata.frame_positions):
             raise RuntimeError("Metadata does not match model input frames")
+        if self.config.enabled and self.config.method == "layer_stride_kv" and self.frames != 32:
+            raise RuntimeError("Layer-stride KV requires all 32 query frames")
         if self.encoder is not None:
             self.grid_height = images.shape[-2] // self.patch_size
             self.grid_width = images.shape[-1] // self.patch_size
@@ -256,17 +266,39 @@ class DA3KVAttention:
             self.reference_indices = torch.zeros(self.batch, dtype=torch.long, device=output.device)
         if self.config.enabled:
             self.token_indices_by_layer = {}
+            self.selected_by_layer = {}
+            self.patch_indices_by_layer = {}
             token_layout_cache = {}
             for layer in self.layers:
                 patch_indices = None
+                selected = self.selected
                 if self.config.method == "role_layer_spatial_kv":
                     patch_indices = build_role_layer_patch_indices(
                         self.metadata, self.selected, layer, self.grid_height, self.grid_width,
                         self.config.spatial_sampling)
-                signature = None if patch_indices is None else tuple(patch_indices.items())
+                elif self.config.method == "layer_stride_kv":
+                    policy = self.layer_stride_policy[layer]
+                    if policy == "spatial":
+                        selected = list(range(self.frames))
+                        lattice = build_spatial_patch_indices(
+                            self.grid_height, self.grid_width, self.config.spatial_stride)
+                        patch_indices = {slot: lattice for slot in selected}
+                        expected_patches = self.patches // 4
+                        if (self.grid_height % 2 or self.grid_width % 2
+                            or len(lattice) != expected_patches):
+                            raise RuntimeError("Spatial stride2 did not produce one-quarter patch K/V")
+                    else:
+                        selected = list(temporal_stride_slots(
+                            self.frames, self.config.temporal_stride))
+                        if selected != list(range(0, 32, 2)):
+                            raise RuntimeError("Temporal stride2 must select VDA slots 0,2,...,30")
+                self.selected_by_layer[layer] = selected
+                self.patch_indices_by_layer[layer] = patch_indices
+                signature = (tuple(selected), None if patch_indices is None
+                             else tuple(patch_indices.items()))
                 if signature not in token_layout_cache:
                     token_layout_cache[signature] = frame_slots_to_token_indices(
-                        self.selected, num_frames=self.frames,
+                        selected, num_frames=self.frames,
                         tokens_per_frame=self.tokens_per_frame,
                         special_tokens=self.special_tokens,
                         reference_indices=self.reference_indices,
@@ -284,6 +316,8 @@ class DA3KVAttention:
             raise RuntimeError("Expected full DA3 Q/K/V [B,heads,F*tokens,head_dim]")
         if query.shape[0] != self.batch or query.shape[-2] != expected:
             raise RuntimeError("Global attention token count does not match window metadata")
+        if self.config.enabled and self.config.method == "layer_stride_kv" and self.frames != 32:
+            raise RuntimeError("Every layer-stride global attention query must contain 32 frames")
         if self.config.enabled:
             if attn_mask is not None or is_causal or dropout_p:
                 raise ValueError("VDA KV sampling expects unmasked, noncausal eval attention")
@@ -374,6 +408,30 @@ class DA3KVAttention:
                 },
                 "token_count_source": "observed_sdpa_inputs" if self.observing else "encoder_layout_dense",
             }
+            if self.config.method == "layer_stride_kv":
+                layer_audit = {}
+                for layer in self.layers:
+                    policy = self.layer_stride_policy[layer]
+                    provider_slots = self.selected_by_layer[layer]
+                    patches_per_frame = self.patches // 4 if policy == "spatial" else self.patches
+                    expected_frames = 32 if policy == "spatial" else 16
+                    if len(provider_slots) != expected_frames:
+                        raise RuntimeError("Layer-stride provider-frame assertion failed")
+                    expected_patch_tokens = expected_frames * patches_per_frame
+                    if layer_kv_patches[layer] != expected_patch_tokens:
+                        raise RuntimeError("Layer-stride patch-token assertion failed")
+                    layer_audit[layer] = {
+                        "layer": layer,
+                        "policy": policy + "_stride2",
+                        "q_frame_count": self.frames,
+                        "q_token_count": q_tokens,
+                        "kv_token_count": layer_kv_tokens[layer],
+                        "selected_patch_frames": provider_slots,
+                        "kv_patch_frame_count": expected_frames,
+                        "spatial_patch_count_per_frame": patches_per_frame,
+                        "kv_patch_token_count": expected_patch_tokens,
+                    }
+                audit["layer_stride_kv"] = layer_audit
             if self.highlight_scores is not None:
                 audit["new_highlight_scores"] = self.highlight_scores
                 audit["new_candidate_count"] = len(self.highlight_scores)
@@ -397,7 +455,8 @@ class DA3KVAttention:
                 }
             audit_limit = (self.config.debug_max_windows
                            if self.config.debug and self.config.method in {
-                               "vda_role_bucket_highlight", "role_layer_spatial_kv"
+                               "vda_role_bucket_highlight", "role_layer_spatial_kv",
+                               "layer_stride_kv",
                            } else 2)
             if len(self.audit_examples) < audit_limit:
                 self.audit_examples.append(audit)
@@ -451,6 +510,16 @@ class DA3KVAttention:
                 }
                 print("KV sampling diagnostics: " + json.dumps(diagnostic, ensure_ascii=False), flush=True)
                 self.diagnostic_printed = True
+            if (self.config.method == "layer_stride_kv" and not self.diagnostic_printed
+                and self.config.diagnostics.get("print_once_per_sequence") is True):
+                print("Layer-stride KV diagnostics: " + json.dumps({
+                    "window_id": metadata.window_id,
+                    "query_frames": self.frames,
+                    "patch_grid": [self.grid_height, self.grid_width],
+                    "special_tokens_keep_all": True,
+                    "layers": audit["layer_stride_kv"],
+                }), flush=True)
+                self.diagnostic_printed = True
             if self.config.debug and metadata.window_id < self.config.debug_max_windows:
                 # Logging is outside model-forward timing. No GPU->CPU reference
                 # transfer is needed during the timed attention path.
@@ -460,6 +529,8 @@ class DA3KVAttention:
         self.metadata = None
         self.token_indices = None
         self.token_indices_by_layer = None
+        self.selected_by_layer = None
+        self.patch_indices_by_layer = None
         self.reference_indices = None
         self.events = []
 
@@ -476,4 +547,7 @@ class DA3KVAttention:
             "global_sdpa_seconds": self.attention_seconds if self.config.profile_attention else None,
             "global_sdpa_profiled_calls": self.profiled_calls,
             "attention_timing_scope": "optional sum of global SDPA calls only; excludes QKV projection, normalization, RoPE, frame selection and K/V gather",
+            "descriptor_seconds": 0.0 if self.config.method == "layer_stride_kv" else None,
+            "anchor_backbone_seconds": 0.0 if self.config.method == "layer_stride_kv" else None,
+            "highlight_selection_seconds": 0.0 if self.config.method == "layer_stride_kv" else None,
         }

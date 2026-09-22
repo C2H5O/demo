@@ -1,0 +1,17 @@
+base_config: _H_stride_common.yaml
+
+experiment:
+  name: baseline_H_layer_stride_D
+
+vda_evaluation:
+  output: ./outputs/baseline_H/output_D/evaluation.json
+
+visualization:
+  output_dir: ./outputs/baseline_H/output_D/visualization
+
+kv_sampling:
+  layer_policy:
+    block5: temporal
+    block7: spatial
+    block9: temporal
+    block11: spatial
