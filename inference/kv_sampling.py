@@ -66,6 +66,8 @@ class KVSamplingConfig:
     bucket_highlight: dict = field(default_factory=dict)
     new_frame_selection: dict = field(default_factory=dict)
     spatial_sampling: dict = field(default_factory=dict)
+    layer_policy: dict = field(default_factory=dict)
+    spatial_stride: int = 2
     special_tokens: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
 
@@ -99,6 +101,23 @@ class KVSamplingConfig:
                 or self.provider_selection != "temporal_uniform"):
                 raise ValueError("Invalid query_group configuration")
             return self.kv_frames
+        if self.method == "layer_stride_kv":
+            if window_length != 32:
+                raise ValueError("Layer-stride KV requires a 32-frame VDA window")
+            if self.spatial_stride != 2 or self.temporal_stride != 2:
+                raise ValueError("Layer-stride KV requires spatial_stride=2 and temporal_stride=2")
+            resolve_layer_stride_policy(self.layer_policy)
+            resolve_special_token_options(self.special_tokens)
+            resolve_diagnostics_options(self.diagnostics)
+            forbidden = {
+                "highlight_detection": self.highlight_detection,
+                "lightweight_highlight": self.lightweight_highlight,
+                "bucket_highlight": self.bucket_highlight,
+                "new_frame_selection": self.new_frame_selection,
+            }
+            if any(forbidden.values()):
+                raise ValueError("Layer-stride KV must not configure highlight or frame selection")
+            return window_length
         if self.method not in {"vda_role", "vda_role_highlight", "vda_role_bucket_highlight",
                                "role_layer_spatial_kv", "spark3r_fixed_stride"}:
             raise ValueError("Unknown kv_sampling.method")
@@ -266,6 +285,20 @@ def resolve_special_token_options(options: Mapping | None = None) -> dict:
     return values
 
 
+def resolve_layer_stride_policy(options: Mapping | None = None) -> dict[int, str]:
+    """Validate the four real DA3-Small global-block policies."""
+    expected = {f"block{layer}" for layer in (5, 7, 9, 11)}
+    if not isinstance(options, Mapping) or set(options) != expected:
+        raise ValueError("Layer-stride KV requires policies for blocks 5, 7, 9, 11")
+    result = {}
+    for layer in (5, 7, 9, 11):
+        policy = str(options[f"block{layer}"])
+        if policy not in {"spatial", "temporal"}:
+            raise ValueError(f"Invalid layer-stride policy at block {layer}: {policy}")
+        result[layer] = policy
+    return result
+
+
 def resolve_diagnostics_options(options: Mapping | None = None) -> dict:
     values = _exact_mapping(options, {"print_once_per_sequence": True}, "diagnostics")
     if values["print_once_per_sequence"] is not True:
@@ -295,6 +328,13 @@ def build_spatial_patch_indices(grid_height: int, grid_width: int, stride: int,
     return tuple(row * grid_width + column
                  for row in range(row_offset, grid_height, stride)
                  for column in range(col_offset, grid_width, stride))
+
+
+def temporal_stride_slots(num_frames: int, stride: int) -> tuple[int, ...]:
+    """Original VDA tensor slots for deterministic temporal K/V stride."""
+    if type(num_frames) is not int or num_frames < 1 or type(stride) is not int or stride < 1:
+        raise ValueError("Frame count and temporal stride must be positive integers")
+    return tuple(range(0, num_frames, stride))
 
 
 _PHASE_OFFSETS = ((0, 0), (0, 1), (1, 0), (1, 1))
@@ -528,7 +568,11 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     """Dispatch frame selection with an identical unique-frame cap for F and G."""
     if not config.enabled:
         return list(range(len(metadata.frame_positions)))
-    if config.method in {"vda_role_highlight", "vda_role_bucket_highlight",
+    if config.method == "layer_stride_kv":
+        if budget != len(metadata.frame_positions):
+            raise ValueError("Layer-stride KV keeps the full query-window frame set")
+        selected = list(range(len(metadata.frame_positions)))
+    elif config.method in {"vda_role_highlight", "vda_role_bucket_highlight",
                           "role_layer_spatial_kv"}:
         expected_budget = config.frame_budget(len(metadata.frame_positions), first_window=metadata.first_window)
         if budget != expected_budget:
@@ -602,7 +646,12 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     else:
         raise ValueError("Unknown KV sampling method: " + config.method)
     expected = min(budget, len(eligible_frame_slots(metadata)))
-    if config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
+    if config.method == "layer_stride_kv":
+        # This policy is defined on the current 32-slot VDA tensor, including
+        # repeated tail padding. Q retains those 32 slots, so K/V stride must
+        # not collapse them through the unique-frame eligibility helper.
+        expected = len(metadata.frame_positions)
+    elif config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
         expected = len(history) + sum(keep_counts)
     elif config.method == "vda_role_highlight" and not metadata.first_window:
         expected = len(history) + min(config.new_frames, len(new))

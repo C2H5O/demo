@@ -151,6 +151,23 @@ def test_window_limit_never_claims_full_test_set(tmp_path, monkeypatch):
     assert result["sequence_count"] == 1
 
 
+def test_sequence_limit_evaluates_one_complete_sequence(tmp_path, monkeypatch):
+    config, _ = make_scared(tmp_path)
+    monkeypatch.setattr(
+        "evaluation.evaluate_crossclip_projection.ensure_merged_student_checkpoint",
+        lambda checkpoint, loaded: checkpoint,
+    )
+    monkeypatch.setattr("evaluation.evaluate_crossclip_projection._evaluation_model",
+                        lambda *args: ConstantPlane().eval())
+    result = evaluate_vda(config, limit_sequences=1)
+    assert result["sequence_limit"] == 1
+    assert result["sequence_count"] == 1
+    assert result["inference_frame_count"] == 3
+    assert result["inference_window_count"] == 1
+    assert result["sequences"][0]["missing_prediction_count"] == 0
+    assert not result["full_test_set"]
+
+
 def test_missing_gt_never_claims_complete_coverage(tmp_path, monkeypatch):
     config, _ = make_scared(tmp_path)
     for path in (tmp_path / "dataset_9/keyframe_1/data/depth").glob("*.npy"):

@@ -194,6 +194,7 @@ def evaluate_vda(
     output_override: Optional[Path] = None,
     limit_clips: Optional[int] = None,
     model_source: str = TRAINED_STUDENT_SOURCE,
+    limit_sequences: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Infer each complete RGB sequence, then score once per absolute frame.
 
@@ -223,6 +224,8 @@ def evaluate_vda(
         _require_scared_8_9(sequences)
     if limit_clips is not None and limit_clips <= 0:
         raise ValueError("Window limit must be positive")
+    if limit_sequences is not None and limit_sequences <= 0:
+        raise ValueError("Sequence limit must be positive")
     if not gt_depths:
         raise RuntimeError("No sequences contain configured depth GT")
     tae_config = eval_config.get("tae", {})
@@ -253,6 +256,8 @@ def evaluate_vda(
     sequence_results = []
     resolution_audit_printed = False
     for sequence_id, sequence in sequences.items():
+        if limit_sequences is not None and len(sequence_results) >= limit_sequences:
+            break
         if sequence_id not in gt_depths or remaining == 0:
             continue
         frames = sequence_frames(
@@ -339,9 +344,10 @@ def evaluate_vda(
                    if item["inference"]["peak_cuda_memory_allocated_bytes"] is not None]
     peak_reserved = [item["inference"]["peak_cuda_memory_reserved_bytes"] for item in sequence_results
                      if item["inference"]["peak_cuda_memory_reserved_bytes"] is not None]
-    complete = not skipped and len(sequence_results) == len(sequences) and all(
+    complete = (limit_sequences is None and not skipped
+                and len(sequence_results) == len(sequences) and all(
         item["missing_prediction_count"] == 0 and item["inference"]["output_frame_count"] ==
-        len(sequences[item["sequence_id"]]["frame_paths"]) for item in sequence_results)
+        len(sequences[item["sequence_id"]]["frame_paths"]) for item in sequence_results))
     result = {
         "protocol": (
             "video-depth-anything-depth+video-depth-anything-tae-scared-v2"
@@ -357,6 +363,7 @@ def evaluate_vda(
         ),
         "split": split, "metrics": metrics, "metric_aggregation": "macro mean over evaluated sequences",
         "sequence_count": len(sequence_results), "expected_sequence_count": len(sequences),
+        "sequence_limit": limit_sequences,
         "complete_gt_coverage": complete,
         "full_test_set": split == "test" and limit_clips is None and complete,
         "inference_mode": "complete sequence, VDA 32-view windows with anchor alignment and 8-frame disparity blending",
@@ -415,11 +422,13 @@ def evaluate(
     limit_clips: Optional[int] = None,
     protocol: Optional[str] = None,
     model_source: str = TRAINED_STUDENT_SOURCE,
+    limit_sequences: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     select_protocol(config, protocol)
     return evaluate_vda(
-        config_path, checkpoint, split, output, limit_clips, model_source
+        config_path, checkpoint, split, output, limit_clips,
+        model_source=model_source, limit_sequences=limit_sequences,
     )
 
 
@@ -428,6 +437,7 @@ def evaluate_official_da3_small(
     output: Optional[Path] = None,
     limit_clips: Optional[int] = None,
     protocol: Optional[str] = None,
+    limit_sequences: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Evaluate untouched official DA3-Small on raw SCARED datasets 8 and 9."""
     return evaluate(
@@ -438,6 +448,7 @@ def evaluate_official_da3_small(
         limit_clips=limit_clips,
         protocol=protocol,
         model_source=OFFICIAL_DA3_SMALL_SOURCE,
+        limit_sequences=limit_sequences,
     )
 
 
