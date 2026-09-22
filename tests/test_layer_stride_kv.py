@@ -8,8 +8,10 @@ import torch
 from inference.da3_kv_attention import DA3KVAttention, frame_slots_to_token_indices
 from inference.kv_sampling import (
     KVSamplingConfig,
+    WindowFrameMetadata,
     build_spatial_patch_indices,
     resolve_layer_stride_policy,
+    select_kv_frames,
     temporal_stride_slots,
 )
 from inference.student_video import infer_student_video
@@ -41,6 +43,20 @@ def test_spatial_stride2_is_two_dimensional_fixed_lattice():
 def test_temporal_stride2_uses_current_vda_slots_only():
     assert temporal_stride_slots(32, 2) == tuple(range(0, 32, 2))
     assert len(temporal_stride_slots(32, 2)) == 16
+
+
+def test_tail_window_keeps_all_tensor_slots_even_when_padding_repeats_frames():
+    positions = tuple(range(10)) + (9,) * 22
+    metadata = WindowFrameMetadata(
+        window_id=0,
+        frame_positions=positions,
+        absolute_frame_ids=positions,
+        frame_roles=("new",) * 32,
+        is_padding=(False,) * 10 + (True,) * 22,
+        first_window=True,
+    )
+    config = stride_config("A")
+    assert select_kv_frames(metadata, config, config.frame_budget(32)) == list(range(32))
 
 
 @pytest.mark.parametrize("variant", "ABCD")

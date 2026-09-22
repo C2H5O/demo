@@ -720,7 +720,12 @@ def select_kv_frames(metadata: WindowFrameMetadata, config: KVSamplingConfig,
     else:
         raise ValueError("Unknown KV sampling method: " + config.method)
     expected = min(budget, len(eligible_frame_slots(metadata)))
-    if config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
+    if config.method == "layer_stride_kv":
+        # This policy is defined on the current 32-slot VDA tensor, including
+        # repeated tail padding. Q retains those 32 slots, so K/V stride must
+        # not collapse them through the unique-frame eligibility helper.
+        expected = len(metadata.frame_positions)
+    elif config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
         expected = len(history) + sum(keep_counts)
     elif config.method == "vda_role_highlight" and not metadata.first_window:
         expected = len(history) + min(config.new_frames, len(new))
