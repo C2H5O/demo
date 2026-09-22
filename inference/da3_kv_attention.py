@@ -103,6 +103,9 @@ class DA3KVAttention:
         if cls is DA3KVAttention and config.enabled and config.method == "fixed_global_kv":
             from inference.hybrid_global_kv import HybridGlobalKVAttention
             return HybridGlobalKVAttention(model, config, window_length)
+        if cls is DA3KVAttention and config.enabled and config.method == "layer_stride_kv":
+            from inference.layer_stride_attention import LayerStrideKVAttention
+            return LayerStrideKVAttention(model, config, window_length)
         return super().__new__(cls)
 
     def __init__(self, model, config: KVSamplingConfig, window_length: int):
@@ -431,6 +434,22 @@ class DA3KVAttention:
                         "spatial_patch_count_per_frame": patches_per_frame,
                         "kv_patch_token_count": expected_patch_tokens,
                     }
+                    projection = getattr(self, "projection_token_counts", {}).get(layer)
+                    if projection is None:
+                        raise RuntimeError("Layer-stride projection-token audit is missing")
+                    expected_projection = {
+                        "q_projection_tokens": q_tokens,
+                        "k_projection_tokens": layer_kv_tokens[layer],
+                        "v_projection_tokens": layer_kv_tokens[layer],
+                        "sdpa_q_tokens": q_tokens,
+                        "sdpa_kv_tokens": layer_kv_tokens[layer],
+                    }
+                    if projection != expected_projection:
+                        raise RuntimeError(
+                            "Layer-stride projection-token audit mismatch at block {}: {} != {}"
+                            .format(layer, projection, expected_projection)
+                        )
+                    layer_audit[layer].update(projection)
                 audit["layer_stride_kv"] = layer_audit
             if self.highlight_scores is not None:
                 audit["new_highlight_scores"] = self.highlight_scores

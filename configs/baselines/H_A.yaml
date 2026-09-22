@@ -10,6 +10,8 @@ visualization:
   output_dir: ./outputs/baseline_H/output_A/visualization
 
 kv_sampling:
+  debug: false
+  profile_attention: false
   layer_policy:
     block5: spatial
     block7: spatial
