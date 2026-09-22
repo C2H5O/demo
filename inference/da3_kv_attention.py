@@ -411,7 +411,7 @@ class DA3KVAttention:
                 },
                 "token_count_source": "observed_sdpa_inputs" if self.observing else "encoder_layout_dense",
             }
-            if self.config.method == "layer_stride_kv":
+            if self.config.enabled and self.config.method == "layer_stride_kv":
                 layer_audit = {}
                 for layer in self.layers:
                     policy = self.layer_stride_policy[layer]
@@ -458,7 +458,7 @@ class DA3KVAttention:
                 if self.config.method in {"vda_role_bucket_highlight", "role_layer_spatial_kv"}:
                     audit["highlight_score_type"] = "gpu_brightness_low_saturation_ratio"
                     audit.update(self.selection_audit)
-            if self.config.method == "role_layer_spatial_kv":
+            if self.config.enabled and self.config.method == "role_layer_spatial_kv":
                 def spatial_sample(layer):
                     plan = provider_spatial_plan(
                         metadata, self.selected, layer, self.config.spatial_sampling)
@@ -479,7 +479,8 @@ class DA3KVAttention:
                            } else 2)
             if len(self.audit_examples) < audit_limit:
                 self.audit_examples.append(audit)
-            if (self.config.method == "role_layer_spatial_kv" and not self.diagnostic_printed
+            if (self.config.enabled and self.config.method == "role_layer_spatial_kv"
+                and not self.diagnostic_printed
                 and self.config.diagnostics.get("print_once_per_sequence") is True):
                 sparse_patches = len(range(0, self.grid_height, 2)) * len(
                     range(0, self.grid_width, 2))
@@ -529,7 +530,8 @@ class DA3KVAttention:
                 }
                 print("KV sampling diagnostics: " + json.dumps(diagnostic, ensure_ascii=False), flush=True)
                 self.diagnostic_printed = True
-            if (self.config.method == "layer_stride_kv" and not self.diagnostic_printed
+            if (self.config.enabled and self.config.method == "layer_stride_kv"
+                and not self.diagnostic_printed
                 and self.config.diagnostics.get("print_once_per_sequence") is True):
                 print("Layer-stride KV diagnostics: " + json.dumps({
                     "window_id": metadata.window_id,
@@ -566,7 +568,10 @@ class DA3KVAttention:
             "global_sdpa_seconds": self.attention_seconds if self.config.profile_attention else None,
             "global_sdpa_profiled_calls": self.profiled_calls,
             "attention_timing_scope": "optional sum of global SDPA calls only; excludes QKV projection, normalization, RoPE, frame selection and K/V gather",
-            "descriptor_seconds": 0.0 if self.config.method == "layer_stride_kv" else None,
-            "anchor_backbone_seconds": 0.0 if self.config.method == "layer_stride_kv" else None,
-            "highlight_selection_seconds": 0.0 if self.config.method == "layer_stride_kv" else None,
+            "descriptor_seconds": (0.0 if self.config.enabled
+                                   and self.config.method == "layer_stride_kv" else None),
+            "anchor_backbone_seconds": (0.0 if self.config.enabled
+                                        and self.config.method == "layer_stride_kv" else None),
+            "highlight_selection_seconds": (0.0 if self.config.enabled
+                                             and self.config.method == "layer_stride_kv" else None),
         }

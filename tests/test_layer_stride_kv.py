@@ -340,6 +340,31 @@ def test_profile_configs_are_dedicated_and_formal_a_stays_off():
     }
 
 
+def test_dense_profile_config_does_not_enter_disabled_layer_stride_audit():
+    model, _ = tiny_da3("middle", depth=12)
+    raw = load_config("configs/baselines/H_dense_profile.yaml")
+    config = KVSamplingConfig.from_mapping(raw["kv_sampling"])
+    assert config.enabled is False and config.method == "layer_stride_kv"
+    adapter = DA3KVAttention(model, config, 32)
+    assert type(adapter) is DA3KVAttention
+
+    images = torch.zeros(1, 32, 3, 28, 28)
+    with torch.inference_mode(), adapter:
+        adapter.begin_window(normal_window(), images)
+        model(images)
+        adapter.finish_window()
+
+    summary = adapter.summary()
+    assert summary["attention_shapes"] == [
+        {"layer": layer, "q_token_count": 160, "kv_token_count": 160, "calls": 1}
+        for layer in (5, 7, 9, 11)
+    ]
+    assert "layer_stride_kv" not in summary["kv_selection_examples"][0]
+    assert summary["descriptor_seconds"] is None
+    assert summary["anchor_backbone_seconds"] is None
+    assert summary["highlight_selection_seconds"] is None
+
+
 def test_runtime_profiler_summary_uses_calls_totals_and_means():
     profiler = object.__new__(DA3RuntimeProfiler)
     profiler.calls = {"top_level.backbone": 2}
