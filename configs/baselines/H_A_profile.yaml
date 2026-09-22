@@ -1,0 +1,8 @@
+base_config: H_A.yaml
+
+experiment:
+  name: baseline_H_layer_stride_A_profile
+
+kv_sampling:
+  debug: false
+  profile_attention: true

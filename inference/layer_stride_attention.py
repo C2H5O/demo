@@ -105,6 +105,7 @@ class LayerStrideKVAttention(DA3KVAttention):
         super().__init__(model, config, window_length)
         self.projection_token_counts = {}
         self.profile_seconds = Counter()
+        self.profile_calls = Counter()
         self.profile_events = []
         self._static_selected_by_layer = None
         self._static_patch_indices_by_layer = None
@@ -166,6 +167,7 @@ class LayerStrideKVAttention(DA3KVAttention):
     def _measure(self, layer, stage, tensor, operation):
         if not self.config.profile_attention:
             return operation()
+        self.profile_calls[(layer, stage)] += 1
         if tensor.is_cuda:
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
@@ -281,12 +283,25 @@ class LayerStrideKVAttention(DA3KVAttention):
 
     def summary(self):
         result = super().summary()
-        result["layer_stride_profile_seconds"] = {
+        result["layer_stride_profile"] = {
             f"block{layer}": {
-                stage: self.profile_seconds.get((layer, stage), 0.0)
+                stage: {
+                    "calls": self.profile_calls.get((layer, stage), 0),
+                    "total_seconds": self.profile_seconds.get((layer, stage), 0.0),
+                    "mean_ms": (
+                        1000.0 * self.profile_seconds.get((layer, stage), 0.0)
+                        / self.profile_calls[(layer, stage)]
+                        if self.profile_calls.get((layer, stage), 0) else 0.0
+                    ),
+                }
                 for stage in self._STAGES
             }
             for layer in self.layers
+        } if self.config.profile_attention else None
+        # Retain the old key for consumers that only need accumulated seconds.
+        result["layer_stride_profile_seconds"] = {
+            block: {stage: values["total_seconds"] for stage, values in stages.items()}
+            for block, stages in (result["layer_stride_profile"] or {}).items()
         } if self.config.profile_attention else None
         if self.config.profile_attention:
             result["global_sdpa_seconds"] = sum(

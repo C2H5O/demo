@@ -14,6 +14,7 @@ from inference.layer_stride_attention import (
     sparse_attention_output,
     split_fused_qkv,
 )
+from inference.da3_runtime_profiler import DA3RuntimeProfiler
 from inference.kv_sampling import (
     KVSamplingConfig,
     WindowFrameMetadata,
@@ -323,4 +324,60 @@ def test_microbenchmark_is_a_only_and_excludes_warmup():
     assert 'parser.add_argument("--warmup", type=int, default=20)' in text
     assert 'parser.add_argument("--iterations", type=int, default=50)' in text
     assert "warmup_windows_excluded" in text
+    assert "H_B.yaml" not in text and "H_C.yaml" not in text and "H_D.yaml" not in text
+
+
+def test_profile_configs_are_dedicated_and_formal_a_stays_off():
+    formal = load_config("configs/baselines/H_A.yaml")["kv_sampling"]
+    dense = load_config("configs/baselines/H_dense_profile.yaml")["kv_sampling"]
+    sparse = load_config("configs/baselines/H_A_profile.yaml")["kv_sampling"]
+    assert formal["profile_attention"] is False
+    assert dense["enabled"] is False and dense["profile_attention"] is False
+    assert sparse["enabled"] is True and sparse["profile_attention"] is True
+    assert sparse["layer_policy"] == {
+        "block5": "spatial", "block7": "spatial",
+        "block9": "temporal", "block11": "temporal",
+    }
+
+
+def test_runtime_profiler_summary_uses_calls_totals_and_means():
+    profiler = object.__new__(DA3RuntimeProfiler)
+    profiler.calls = {"top_level.backbone": 2}
+    profiler.seconds = {"top_level.backbone": 0.012}
+    profiler.shapes = {(5, 40992, 40992): 2}
+    profiler.global_layers = [5]
+    profiler.profile_dense_attention = False
+    summary = profiler.summary()
+    assert summary["regions"]["top_level.backbone"] == {
+        "calls": 2, "total_seconds": 0.012, "mean_ms": 6.0,
+    }
+    assert summary["dense_attention_shapes"] == [
+        {"layer": 5, "q_tokens": 40992, "kv_tokens": 40992, "calls": 2}
+    ]
+
+
+def test_sparse_profile_reports_six_stage_call_total_and_mean_fields():
+    model, _ = tiny_da3("middle", depth=12)
+    raw = load_config("configs/baselines/H_A_profile.yaml")
+    adapter = DA3KVAttention(model, KVSamplingConfig.from_mapping(raw["kv_sampling"]), 32)
+    images = torch.zeros(1, 32, 3, 28, 28)
+    with torch.inference_mode(), adapter:
+        adapter.begin_window(normal_window(), images)
+        model(images)
+        adapter.finish_window()
+    profile = adapter.summary()["layer_stride_profile"]
+    assert set(profile) == {"block5", "block7", "block9", "block11"}
+    for stages in profile.values():
+        assert set(stages) == set(LayerStrideKVAttention._STAGES)
+        for stats in stages.values():
+            assert stats["calls"] == 1
+            assert set(stats) == {"calls", "total_seconds", "mean_ms"}
+            assert stats["mean_ms"] == pytest.approx(1000.0 * stats["total_seconds"])
+
+
+def test_profile_runner_has_fixed_protocol_and_does_not_run_bcd():
+    text = Path("scripts/profile_baseline_h.py").read_text(encoding="utf-8")
+    assert 'default=20' in text and 'default=50' in text
+    assert "40992" in text
+    assert "H_A_profile.yaml" in text and "H_dense_profile.yaml" in text
     assert "H_B.yaml" not in text and "H_C.yaml" not in text and "H_D.yaml" not in text

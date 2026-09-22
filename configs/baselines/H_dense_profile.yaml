@@ -1,0 +1,12 @@
+base_config: _H_stride_common.yaml
+
+experiment:
+  name: baseline_H_dense_profile
+
+inference:
+  acceleration: none
+
+kv_sampling:
+  enabled: false
+  debug: false
+  profile_attention: false
