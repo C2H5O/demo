@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -26,6 +27,7 @@ from evaluation.hamlyn.data import (
     frame_id,
     index_by_frame_id,
 )
+from evaluation.hamlyn.endo3r import _validate_raft_checkpoint
 from evaluation.hamlyn.gt import load_hamlyn_gt_depth
 from utils.config import load_config
 
@@ -173,3 +175,30 @@ def test_tae_is_disabled_in_formal_config() -> None:
     config = load_config(Path("configs/hamlyn_eval.yaml"))
     assert config["evaluation"]["tae"] == {"enabled": False}
     assert config["evaluation"]["resolution_hw"] == [224, 280]
+
+
+def test_endo3r_uses_endo3r_and_raft_checkpoints() -> None:
+    config = load_config(Path("configs/hamlyn_eval.yaml"))
+    paths = config["paths"]
+    assert paths["endo3r_checkpoint"].endswith("/checkpoints/endo3r.pth")
+    assert paths["endo3r_raft_checkpoint"].endswith(
+        "/checkpoints/raft-things.pth"
+    )
+    assert "endo3r_dust3r_checkpoint" not in paths
+
+
+def test_endo3r_raft_checkpoint_must_match_official_relative_path(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "Endo3R"
+    checkpoint = repository / "checkpoints" / "raft-things.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.touch()
+    runtime = SimpleNamespace(
+        endo3r_repository=repository.resolve(),
+        endo3r_raft_checkpoint=checkpoint.resolve(),
+    )
+    _validate_raft_checkpoint(runtime)
+    runtime.endo3r_raft_checkpoint = (tmp_path / "elsewhere" / "raft-things.pth").resolve()
+    with pytest.raises(RuntimeError, match="loads RAFT"):
+        _validate_raft_checkpoint(runtime)

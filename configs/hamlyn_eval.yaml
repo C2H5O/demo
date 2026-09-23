@@ -14,7 +14,7 @@ paths:
   endodav_pretrained_path: external/EndoDAV/ckpts/pretrained_model
   endo3r_repository: external/Endo3R
   endo3r_checkpoint: external/Endo3R/checkpoints/endo3r.pth
-  endo3r_dust3r_checkpoint: external/Endo3R/checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth
+  endo3r_raft_checkpoint: external/Endo3R/checkpoints/raft-things.pth
   output_root: outputs/hamlyn_eval
 
 methods:

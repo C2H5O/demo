@@ -114,10 +114,20 @@ def run_preflight(
         "https://github.com/wrld/Endo3R.git external/Endo3R",
     )
     _require_file(runtime.endo3r_repository / "demo.py", "Official Endo3R demo.py is missing")
+    expected_raft = (
+        runtime.endo3r_repository / "checkpoints" / "raft-things.pth"
+    ).resolve()
+    if runtime.endo3r_raft_checkpoint != expected_raft:
+        raise PreflightError(
+            "Official Endo3R loads RAFT from ./checkpoints/raft-things.pth; "
+            "configured path must resolve to {}: {}".format(
+                expected_raft, runtime.endo3r_raft_checkpoint
+            )
+        )
     _require_file(runtime.endo3r_checkpoint, "Endo3R checkpoint is missing")
     _require_file(
-        runtime.endo3r_dust3r_checkpoint,
-        "Endo3R DUSt3R checkpoint is missing",
+        runtime.endo3r_raft_checkpoint,
+        "Endo3R RAFT checkpoint is missing",
     )
 
     dataset = print_preflight(records)
@@ -155,7 +165,7 @@ def run_preflight(
                 runtime.endodav_pretrained_path / "video_depth_anything_vits.pth"
             ),
             "endo3r": str(runtime.endo3r_checkpoint),
-            "endo3r_dust3r": str(runtime.endo3r_dust3r_checkpoint),
+            "endo3r_raft": str(runtime.endo3r_raft_checkpoint),
         },
     }
     atomic_write_json(runtime.output_root / "preflight.json", result)

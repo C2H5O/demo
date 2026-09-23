@@ -47,7 +47,7 @@ class RuntimeConfig:
     endodav_pretrained_path: Path
     endo3r_repository: Path
     endo3r_checkpoint: Path
-    endo3r_dust3r_checkpoint: Path
+    endo3r_raft_checkpoint: Path
     output_root: Path
     ours_python: Path
     endodav_python: Path
@@ -64,7 +64,7 @@ PATH_ENV = {
     "endodav_pretrained_path": "ENDODAV_PRETRAINED_PATH",
     "endo3r_repository": "ENDO3R_REPOSITORY",
     "endo3r_checkpoint": "ENDO3R_CHECKPOINT",
-    "endo3r_dust3r_checkpoint": "ENDO3R_DUST3R_CHECKPOINT",
+    "endo3r_raft_checkpoint": "ENDO3R_RAFT_CHECKPOINT",
     "output_root": "HAMLYN_OUTPUT_ROOT",
 }
 

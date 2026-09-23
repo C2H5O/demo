@@ -41,7 +41,7 @@ external/
     ckpts/pretrained_model/video_depth_anything_vits.pth
   Endo3R/
     checkpoints/endo3r.pth
-    checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth
+    checkpoints/raft-things.pth
 ```
 
 The discovery code also supports the prepared `croppedNN/` plus
@@ -60,9 +60,14 @@ export ENDODAV_CHECKPOINT=/path/to/depth_model.pth
 export ENDODAV_PRETRAINED_PATH=/path/to/directory/containing/video_depth_anything_vits.pth
 export ENDO3R_REPOSITORY=/path/to/Endo3R
 export ENDO3R_CHECKPOINT=/path/to/endo3r.pth
-export ENDO3R_DUST3R_CHECKPOINT=/path/to/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth
+export ENDO3R_RAFT_CHECKPOINT=/path/to/Endo3R/checkpoints/raft-things.pth
 export CUDA_VISIBLE_DEVICES=0
 ```
+
+Endo3R reads RAFT from `./checkpoints/raft-things.pth` relative to its
+repository working directory. Therefore `ENDO3R_RAFT_CHECKPOINT` must resolve to
+that exact location; changing `ENDO3R_REPOSITORY` is the normal way to relocate both
+Endo3R weights together.
 
 The default output root can be changed with `HAMLYN_OUTPUT_ROOT` and the
 logical model device with `HAMLYN_DEVICE` (default `cuda:0`).

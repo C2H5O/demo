@@ -25,6 +25,23 @@ from evaluation.hamlyn.data import SequenceRecord, index_by_frame_id
 OFFICIAL_REPOSITORY = "https://github.com/wrld/Endo3R"
 
 
+def _validate_raft_checkpoint(runtime: RuntimeConfig) -> None:
+    expected = (
+        runtime.endo3r_repository / "checkpoints" / "raft-things.pth"
+    ).resolve()
+    if runtime.endo3r_raft_checkpoint != expected:
+        raise RuntimeError(
+            "Official Endo3R loads RAFT from ./checkpoints/raft-things.pth; "
+            "configured path must resolve to {}: {}".format(
+                expected, runtime.endo3r_raft_checkpoint
+            )
+        )
+    if not expected.is_file():
+        raise FileNotFoundError(
+            "Endo3R RAFT checkpoint is missing: {}".format(expected)
+        )
+
+
 def clean_environment() -> Dict[str, str]:
     environment = os.environ.copy()
     environment.pop("PYTHONHOME", None)
@@ -98,6 +115,8 @@ def infer_endo3r_sequences(
         for record in records
         if force or not cache_is_complete(runtime.output_root, method, record, shape)
     ]
+    if pending:
+        _validate_raft_checkpoint(runtime)
     for record in records:
         if record not in pending:
             print("[endo3r] reuse sequence {:02d} cache".format(record.sequence_id), flush=True)
@@ -151,5 +170,6 @@ def infer_endo3r_sequences(
                 "sequence_pipeline_seconds": elapsed,
                 "prediction_resize": "bilinear depth 256x320 to 224x280 in common evaluator",
                 "ground_truth_used_for_inference": False,
+                "raft_checkpoint": str(runtime.endo3r_raft_checkpoint),
             },
         )
