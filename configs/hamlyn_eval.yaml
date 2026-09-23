@@ -1,0 +1,46 @@
+dataset:
+  name: Hamlyn
+  root: /public/home/2024141520249/Documents/datasets/vggtodistilldata/Hamlyn
+  sequence_ids: [1, 4, 5, 6, 8, 9, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  gt_scale: 0.001
+  min_depth: 0.001
+  max_depth: 0.300
+
+paths:
+  ours_checkpoint: checkpoints/eval_H/ours.pt
+  da3_checkpoint_dir: checkpoints/da3-small
+  endodav_repository: external/EndoDAV
+  endodav_checkpoint: external/EndoDAV/ckpts/depth_model.pth
+  endodav_pretrained_path: external/EndoDAV/ckpts/pretrained_model
+  endo3r_repository: external/Endo3R
+  endo3r_checkpoint: external/Endo3R/checkpoints/endo3r.pth
+  endo3r_dust3r_checkpoint: external/Endo3R/checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth
+  output_root: outputs/hamlyn_eval
+
+methods:
+  ours:
+    inference_resolution_hw: [224, 280]
+    evaluation_resolution_hw: [224, 280]
+    temporal_inference: baseline-J infer_student_video, 32-frame VDA windows
+  da3:
+    inference_resolution_hw: [224, 280]
+    evaluation_resolution_hw: [224, 280]
+    temporal_inference: baseline-J infer_student_video, 32-frame VDA windows
+  endodav:
+    inference_resolution_hw: [224, 280]
+    evaluation_resolution_hw: [224, 280]
+    temporal_inference: one official infer_video_depth call per complete sequence
+    external_windowing: false
+  endo3r:
+    inference_resolution_hw: [256, 320]
+    evaluation_resolution_hw: [224, 280]
+    resolution_argument: 320
+    kf_every: 1
+
+evaluation:
+  resolution_hw: [224, 280]
+  alignment: sequence-global disparity scale and shift, float64 least squares
+  metrics: [abs_relative_difference, rmse_linear, delta1_acc]
+  aggregation: per-frame within sequence, then macro mean over 22 sequences
+  tae:
+    enabled: false

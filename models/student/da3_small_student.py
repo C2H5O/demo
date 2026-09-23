@@ -419,11 +419,17 @@ class DA3SmallStudent(nn.Module):
             raise ValueError("DA3 student requires [B,T,3,H,W], got {}".format(tuple(images.shape)))
         frames = images.shape[1]
         height, width = images.shape[-2:]
-        required_size = (448, 560)
-        if (height, width) != required_size:
-            raise ValueError("DA3 {} requires {}x{}, got {}x{}".format(
-                "training/attention capture" if self.training or self.attention_capture is not None else "inference",
-                *required_size, height, width))
+        capture_or_training = self.training or self.attention_capture is not None
+        allowed_sizes = {(448, 560)} if capture_or_training else {(448, 560), (224, 280)}
+        if (height, width) not in allowed_sizes:
+            raise ValueError(
+                "DA3 {} requires one of {}, got {}x{}".format(
+                    "training/attention capture" if capture_or_training else "inference",
+                    sorted(allowed_sizes),
+                    height,
+                    width,
+                )
+            )
         if (self.training or self.attention_capture is not None) and frames < 2:
             raise ValueError("DA3 training/attention capture requires at least two frames")
         if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
