@@ -14,6 +14,9 @@ from utils.config import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs/hamlyn_eval.yaml"
+DEFAULT_OURS_PYTHON = "/public/home/2024141520249/miniconda3/envs/vggtomast3r/bin/python"
+DEFAULT_ENDODAV_PYTHON = "/public/home/2024141520249/miniconda3/envs/endodav/bin/python"
+DEFAULT_ENDO3R_PYTHON = "/public/home/2024141520249/miniconda3/envs/endo3r/bin/python"
 
 
 def _path(value: str, project_root: Path) -> Path:
@@ -36,6 +39,18 @@ def _python(value: str, project_root: Path) -> Path:
     return resolved
 
 
+def _environment_integer(
+    environment: Mapping[str, str], name: str, default: int, minimum: int
+) -> int:
+    try:
+        value = int(environment.get(name, str(default)))
+    except ValueError as error:
+        raise ValueError("{} must be an integer".format(name)) from error
+    if value < minimum:
+        raise ValueError("{} must be >= {}; found {}".format(name, minimum, value))
+    return value
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     project_root: Path
@@ -53,6 +68,8 @@ class RuntimeConfig:
     endodav_python: Path
     endo3r_python: Path
     device: str
+    resize_workers: int
+    frame_cache_size: int
 
 
 PATH_ENV = {
@@ -84,9 +101,11 @@ def load_runtime_config(
         key: _path(environment.get(variable, str(values[key])), project_root)
         for key, variable in PATH_ENV.items()
     }
-    ours_python_value = environment.get("OURS_PYTHON", "python")
-    endodav_python_value = environment.get("ENDODAV_PYTHON", ours_python_value)
-    endo3r_python_value = environment.get("ENDO3R_PYTHON", "python")
+    ours_python_value = environment.get("OURS_PYTHON", DEFAULT_OURS_PYTHON)
+    endodav_python_value = environment.get(
+        "ENDODAV_PYTHON", DEFAULT_ENDODAV_PYTHON
+    )
+    endo3r_python_value = environment.get("ENDO3R_PYTHON", DEFAULT_ENDO3R_PYTHON)
     return RuntimeConfig(
         project_root=project_root,
         **resolved,
@@ -94,4 +113,10 @@ def load_runtime_config(
         endodav_python=_python(endodav_python_value, project_root),
         endo3r_python=_python(endo3r_python_value, project_root),
         device=environment.get("HAMLYN_DEVICE", "cuda:0"),
+        resize_workers=_environment_integer(
+            environment, "HAMLYN_RESIZE_WORKERS", 4, 1
+        ),
+        frame_cache_size=_environment_integer(
+            environment, "HAMLYN_FRAME_CACHE_SIZE", 96, 0
+        ),
     )

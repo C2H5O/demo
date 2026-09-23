@@ -7,10 +7,13 @@ The callback receives finalized frames exactly once, in original sequence order.
 """
 from __future__ import annotations
 
+import multiprocessing
 import time
+from collections import OrderedDict
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Dict, Optional, Sequence
 
 import numpy as np
 import torch
@@ -26,26 +29,189 @@ KEYFRAMES = [0, 12, 24, 25, 26, 27, 28, 29, 30, 31]
 _resolution_audit_printed = False
 
 
+def _load_frame_tensor(
+    path: str | Path, resize_mode: str, height: int, width: int
+) -> torch.Tensor:
+    if resize_mode == "precomputed":
+        image = load_precomputed_student_rgb_tensor(path, "zero_one")
+        if image.shape[-2:] != (height, width):
+            image = (
+                F.interpolate(
+                    image.unsqueeze(0),
+                    size=(height, width),
+                    mode="bicubic",
+                    align_corners=False,
+                )
+                .squeeze(0)
+                .clamp_(0, 1)
+            )
+        return image
+    return load_rgb_tensor(path, height, width, resize_mode, "zero_one")
+
+
+def _load_frame_worker(task):
+    """Pickleable CPU-only worker. Never receives a model or CUDA tensor."""
+    index, path, resize_mode, height, width = task
+    tensor = _load_frame_tensor(path, resize_mode, height, width)
+    return int(index), tensor.contiguous().numpy()
+
+
+class _PrefetchedFrames:
+    def __init__(
+        self,
+        loader: "SequenceFrames",
+        indices: Sequence[int],
+        futures: Dict[int, Future],
+    ) -> None:
+        self.loader = loader
+        self.indices = tuple(int(index) for index in indices)
+        self.futures = futures
+
+    def result(self) -> list[torch.Tensor]:
+        return self.loader._resolve_prefetch(self.indices, self.futures)
+
+
 class SequenceFrames:
-    """Lazy RGB decoding: accept all paths without retaining an entire video in RAM."""
+    """Streaming RGB loader with optional spawn workers, lookahead, and LRU cache."""
 
-    def __init__(self, paths: Sequence[str | Path], *, resize_mode: str = "resize",
-                 height: int = 448, width: int = 560):
-        self.paths = list(paths)
-        self.resize_mode, self.height, self.width = resize_mode, height, width
+    def __init__(
+        self,
+        paths: Sequence[str | Path],
+        *,
+        resize_mode: str = "resize",
+        height: int = 448,
+        width: int = 560,
+        num_workers: int = 1,
+        frame_cache_size: int = 0,
+    ) -> None:
+        self.paths = [str(path) for path in paths]
+        self.resize_mode = str(resize_mode)
+        self.height, self.width = int(height), int(width)
+        self.num_workers = int(num_workers)
+        self.frame_cache_size = int(frame_cache_size)
+        if self.num_workers < 1:
+            raise ValueError("num_workers must be >= 1")
+        if self.frame_cache_size < 0:
+            raise ValueError("frame_cache_size must be >= 0")
+        self.multiprocessing_context = "spawn" if self.num_workers > 1 else None
+        self.loader_backend = (
+            "ProcessPoolExecutor(spawn)" if self.num_workers > 1 else "serial"
+        )
+        self._executor = (
+            ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+            if self.num_workers > 1
+            else None
+        )
+        self._cache: OrderedDict[int, torch.Tensor] = OrderedDict()
+        self._inflight: Dict[int, Future] = {}
+        self.closed = False
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, index):
-        if self.resize_mode == "precomputed":
-            image = load_precomputed_student_rgb_tensor(self.paths[index], "zero_one")
-            if image.shape[-2:] != (self.height, self.width):
-                image = F.interpolate(image.unsqueeze(0), size=(self.height, self.width),
-                                      mode="bicubic", align_corners=False).squeeze(0).clamp_(0, 1)
-            return image
-        return load_rgb_tensor(self.paths[index], self.height, self.width,
-                               self.resize_mode, "zero_one")
+    def __getitem__(self, index: int) -> torch.Tensor:
+        index = int(index)
+        if index < 0 or index >= len(self.paths):
+            raise IndexError(index)
+        return _load_frame_tensor(
+            self.paths[index], self.resize_mode, self.height, self.width
+        )
+
+    def _cache_get(self, index: int) -> Optional[torch.Tensor]:
+        value = self._cache.pop(index, None)
+        if value is not None:
+            self._cache[index] = value
+        return value
+
+    def _cache_put(self, index: int, value: torch.Tensor) -> None:
+        if self.frame_cache_size == 0:
+            return
+        self._cache.pop(index, None)
+        self._cache[index] = value
+        while len(self._cache) > self.frame_cache_size:
+            self._cache.popitem(last=False)
+
+    def prefetch_indices(self, indices: Sequence[int]) -> _PrefetchedFrames:
+        if self.closed:
+            raise RuntimeError("SequenceFrames is closed")
+        requested = tuple(int(index) for index in indices)
+        for index in requested:
+            if index < 0 or index >= len(self.paths):
+                raise IndexError(index)
+        futures: Dict[int, Future] = {}
+        if self._executor is not None:
+            for index in dict.fromkeys(requested):
+                if index in self._cache:
+                    continue
+                future = self._inflight.get(index)
+                if future is None:
+                    future = self._executor.submit(
+                        _load_frame_worker,
+                        (
+                            index,
+                            self.paths[index],
+                            self.resize_mode,
+                            self.height,
+                            self.width,
+                        ),
+                    )
+                    self._inflight[index] = future
+                futures[index] = future
+        return _PrefetchedFrames(self, requested, futures)
+
+    def _resolve_prefetch(
+        self, indices: Sequence[int], futures: Dict[int, Future]
+    ) -> list[torch.Tensor]:
+        loaded = []
+        for index in indices:
+            value = self._cache_get(index)
+            if value is None:
+                future = futures.get(index)
+                if future is None:
+                    value = self[index]
+                else:
+                    try:
+                        returned_index, array = future.result()
+                    finally:
+                        if self._inflight.get(index) is future:
+                            self._inflight.pop(index, None)
+                    if returned_index != index:
+                        raise RuntimeError(
+                            "RGB worker returned frame {} for requested {}".format(
+                                returned_index, index
+                            )
+                        )
+                    value = torch.from_numpy(array)
+                self._cache_put(index, value)
+            loaded.append(value)
+        return loaded
+
+    def load_indices(self, indices: Sequence[int]) -> list[torch.Tensor]:
+        return self.prefetch_indices(indices).result()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for future in self._inflight.values():
+            future.cancel()
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=True)
+            self._executor = None
+        self._inflight.clear()
+        self._cache.clear()
+
+    def __enter__(self) -> "SequenceFrames":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
 
 def sequence_frames(sequence, dataset_config, *, raw_rgb=False, inference_config=None):
@@ -76,6 +242,21 @@ def align_disparity(current: np.ndarray, reference: np.ndarray):
     return float(scale), float(shift), bool(fallback)
 
 
+def _window_frame_ids(frame_count: int, max_windows=None) -> list[list[int]]:
+    starts = list(range(0, frame_count, STEP))
+    if max_windows is not None:
+        starts = starts[:max_windows]
+    windows = []
+    previous_ids = None
+    for start in starts:
+        ids = [min(start + offset, frame_count - 1) for offset in range(WINDOW)]
+        if previous_ids is not None:
+            ids[:OVERLAP] = [previous_ids[index] for index in KEYFRAMES]
+        windows.append(ids)
+        previous_ids = ids
+    return windows
+
+
 @dataclass
 class InferenceStats:
     output_frame_count: int = 0
@@ -83,10 +264,12 @@ class InferenceStats:
     model_input_frame_count: int = 0
     model_forward_seconds: float = 0.0
     sequence_pipeline_seconds: float = 0.0
+    rgb_wait_seconds: float = 0.0
     alignment_fallback_count: int = 0
 
     def as_dict(self):
         n = self.output_frame_count
+        windows = self.window_count
         seconds = self.model_forward_seconds
         return {**vars(self), "window_length": WINDOW, "window_stride": STEP,
                 "overlap": OVERLAP, "blend_frames": BLEND,
@@ -94,6 +277,7 @@ class InferenceStats:
                 "mean_frame_inference_ms": seconds * 1000 / n if n else None,
                 "inference_fps": n / seconds if seconds else None,
                 "mean_frame_pipeline_seconds": self.sequence_pipeline_seconds / n if n else None,
+                "mean_rgb_wait_ms_per_window": self.rgb_wait_seconds * 1000 / windows if windows else None,
                 "timing_scope": "synchronized model forwards / unique output frames; includes repeated anchors and padding; excludes RGB decode, transfers, stitching, GT scoring and export",
                 "pipeline_timing_scope": "RGB decode, transfer, model, stitching and output callback; excludes model loading and GT scoring",
                 "warmup_excluded": False}
@@ -118,29 +302,39 @@ def infer_vda_video(model, frames, emit: Callable, *, device, amp=True,
     if max_windows is not None and max_windows <= 0:
         raise ValueError("max_windows must be positive")
     device = torch.device(device)
-    starts = list(range(0, len(frames), STEP))
-    if max_windows is not None:
-        starts = starts[:max_windows]
+    windows = _window_frame_ids(len(frames), max_windows=max_windows)
     stats = InferenceStats()
     started = time.perf_counter()
-    previous_ids = None
     anchors = None
     pending_disp = pending_k = None
     next_output = 0
-    for window_number, start in enumerate(starts):
-        ids = [min(start + j, len(frames) - 1) for j in range(WINDOW)]
-        if previous_ids is not None:
-            ids[:OVERLAP] = [previous_ids[j] for j in KEYFRAMES]
-        # Duplicate padding/anchor frames are decoded only once per window.
+    prefetched = None
+    if hasattr(frames, "prefetch_indices"):
+        first_unique_ids = list(dict.fromkeys(windows[0]))
+        prefetched = frames.prefetch_indices(first_unique_ids)
+    for window_number, ids in enumerate(windows):
         unique_ids = list(dict.fromkeys(ids))
-        if hasattr(frames, "load_indices"):
+        wait_started = time.perf_counter()
+        if prefetched is not None:
+            loaded = prefetched.result()
+            if len(loaded) != len(unique_ids):
+                raise RuntimeError("Frame loader returned the wrong number of images")
+            decoded = dict(zip(unique_ids, loaded))
+        elif hasattr(frames, "load_indices"):
             loaded = frames.load_indices(unique_ids)
             if len(loaded) != len(unique_ids):
                 raise RuntimeError("Frame loader returned the wrong number of images")
             decoded = dict(zip(unique_ids, loaded))
         else:
-            decoded = {j: frames[j] for j in unique_ids}
-        images = torch.stack([decoded[j] for j in ids]).unsqueeze(0).to(device)
+            decoded = {index: frames[index] for index in unique_ids}
+        stats.rgb_wait_seconds += time.perf_counter() - wait_started
+
+        next_prefetched = None
+        if window_number + 1 < len(windows) and hasattr(frames, "prefetch_indices"):
+            next_unique_ids = list(dict.fromkeys(windows[window_number + 1]))
+            next_prefetched = frames.prefetch_indices(next_unique_ids)
+
+        images = torch.stack([decoded[index] for index in ids]).unsqueeze(0).to(device)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         tick = time.perf_counter()
@@ -178,8 +372,7 @@ def infer_vda_video(model, frames, emit: Callable, *, device, amp=True,
             combined_disp = np.concatenate((blended, disparity[OVERLAP:]))
             combined_k = np.concatenate((blended_k, intrinsics[OVERLAP:]))
         anchors = disparity[KEYFRAMES[:2]].copy() if anchors is None else np.stack((anchors[0], disparity[12]))
-        previous_ids = ids
-        final_window = window_number == len(starts) - 1
+        final_window = window_number == len(windows) - 1
         count = len(combined_disp) if final_window else len(combined_disp) - BLEND
         count = min(count, len(frames) - next_output)
         if count > 0:
@@ -187,11 +380,26 @@ def infer_vda_video(model, frames, emit: Callable, *, device, amp=True,
             next_output += count
         pending_disp = combined_disp[-BLEND:].copy()
         pending_k = combined_k[-BLEND:].copy()
+        prefetched = next_prefetched
         if next_output == len(frames):
             break
     stats.output_frame_count = next_output
     stats.sequence_pipeline_seconds = time.perf_counter() - started
-    return stats.as_dict()
+    result = stats.as_dict()
+    result.update(
+        {
+            "rgb_loader_workers": int(getattr(frames, "num_workers", 1)),
+            "rgb_loader_backend": str(
+                getattr(frames, "loader_backend", "synchronous caller")
+            ),
+            "prefetch_windows": int(
+                hasattr(frames, "prefetch_indices")
+                and int(getattr(frames, "num_workers", 1)) > 1
+            ),
+            "frame_cache_size": int(getattr(frames, "frame_cache_size", 0)),
+        }
+    )
+    return result
 
 
 def infer_student_video(model, frames, emit: Callable, *, device, amp=True,

@@ -107,6 +107,22 @@ def infer_da3_sequences(
         raise RuntimeError("Hamlyn DA3 inference requires an available CUDA device")
     model = _load(method, runtime, device)
     amp = True
+    print(
+        "Hamlyn RGB loader:\n"
+        "  workers={}\n"
+        "  multiprocessing_context={}\n"
+        "  prefetch_windows={}\n"
+        "  frame_cache_size={}\n"
+        "  model_input={}x{}".format(
+            runtime.resize_workers,
+            "spawn" if runtime.resize_workers > 1 else "serial",
+            1 if runtime.resize_workers > 1 else 0,
+            runtime.frame_cache_size,
+            shape[0],
+            shape[1],
+        ),
+        flush=True,
+    )
     for position, record in enumerate(pending, start=1):
         print(
             "[{}] {}/{} sequence {:02d}".format(
@@ -120,6 +136,8 @@ def infer_da3_sequences(
             resize_mode="resize",
             height=shape[0],
             width=shape[1],
+            num_workers=runtime.resize_workers,
+            frame_cache_size=runtime.frame_cache_size,
         )
 
         def emit(start, disparities, _intrinsics):
@@ -127,13 +145,16 @@ def infer_da3_sequences(
                 identifier = record.frame_ids[start + offset]
                 save_prediction(directory, identifier, disparity)
 
-        timing = infer_student_video(
-            model,
-            frames,
-            emit,
-            device=device,
-            amp=amp,
-        )
+        try:
+            timing = infer_student_video(
+                model,
+                frames,
+                emit,
+                device=device,
+                amp=amp,
+            )
+        finally:
+            frames.close()
         if timing["output_frame_count"] != record.frame_count:
             raise RuntimeError(
                 "{} emitted {} of {} Hamlyn frames".format(

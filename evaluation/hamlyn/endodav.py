@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import multiprocessing
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping, Sequence, Tuple
@@ -147,22 +149,73 @@ def _resample_bicubic():
     return getattr(Image, "Resampling", Image).BICUBIC
 
 
-def load_resized_rgb(paths: Sequence[Path]) -> np.ndarray:
-    """Use the same direct PIL bicubic resize as baseline-J SequenceFrames."""
-    height, width = INFERENCE_RESOLUTIONS_HW["endodav"]
-    frames = []
-    for path in paths:
-        try:
-            with Image.open(path) as image:
-                rgb = image.convert("RGB").resize(
-                    (width, height), _resample_bicubic()
-                )
-                frames.append(np.asarray(rgb, dtype=np.uint8))
-        except (OSError, ValueError) as error:
-            raise AdapterError("Failed to decode Hamlyn RGB {}: {}".format(path, error))
-    if not frames:
-        raise AdapterError("Cannot run EndoDAV on an empty sequence")
-    return np.stack(frames)
+def _load_resized_rgb_worker(task) -> np.ndarray:
+    """Pickleable CPU-only EndoDAV preprocessing worker."""
+    path, height, width = task
+    try:
+        with Image.open(path) as image:
+            rgb = image.convert("RGB").resize(
+                (width, height), _resample_bicubic()
+            )
+            return np.asarray(rgb, dtype=np.uint8).copy()
+    except (OSError, ValueError) as error:
+        raise AdapterError("Failed to decode Hamlyn RGB {}: {}".format(path, error))
+
+
+class EndoDAVRGBLoader:
+    def __init__(self, num_workers: int = 4) -> None:
+        self.num_workers = int(num_workers)
+        if self.num_workers < 1:
+            raise ValueError("num_workers must be >= 1")
+        self.multiprocessing_context = "spawn" if self.num_workers > 1 else None
+        self.loader_backend = (
+            "ProcessPoolExecutor(spawn)" if self.num_workers > 1 else "serial"
+        )
+        self._executor = (
+            ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+            if self.num_workers > 1
+            else None
+        )
+        self.closed = False
+
+    def load(self, paths: Sequence[Path]) -> np.ndarray:
+        if self.closed:
+            raise RuntimeError("EndoDAVRGBLoader is closed")
+        if not paths:
+            raise AdapterError("Cannot run EndoDAV on an empty sequence")
+        height, width = INFERENCE_RESOLUTIONS_HW["endodav"]
+        tasks = [(str(path), height, width) for path in paths]
+        if self._executor is None:
+            frames = [_load_resized_rgb_worker(task) for task in tasks]
+        else:
+            frames = list(self._executor.map(_load_resized_rgb_worker, tasks))
+        return np.stack(frames)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=True)
+            self._executor = None
+
+    def __enter__(self) -> "EndoDAVRGBLoader":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+
+def load_resized_rgb(paths: Sequence[Path], num_workers: int = 4) -> np.ndarray:
+    """Decode/resize in input order with a spawn pool when workers exceed one."""
+    with EndoDAVRGBLoader(num_workers) as loader:
+        return loader.load(paths)
 
 
 def official_output_to_depth(output_disp: np.ndarray) -> np.ndarray:
@@ -191,49 +244,66 @@ def infer_endodav_sequences(
     ]
     for record in records:
         if record not in pending:
-            print("[endodav] reuse sequence {:02d} cache".format(record.sequence_id), flush=True)
+            print(
+                "[endodav] reuse sequence {:02d} cache".format(record.sequence_id),
+                flush=True,
+            )
     if not pending:
         return
     if not torch.cuda.is_available() or not runtime.device.startswith("cuda"):
         raise RuntimeError("EndoDAV inference requires an available CUDA device")
     model, temporal_lora = load_official_model(runtime)
-    for position, record in enumerate(pending, start=1):
-        print(
-            "[endodav] {}/{} sequence {:02d}".format(
-                position, len(pending), record.sequence_id
-            ),
-            flush=True,
-        )
-        directory = prepare_cache(runtime.output_root, method, record, force=force)
-        frames = load_resized_rgb(
-            [record.rgb_by_id[identifier] for identifier in record.frame_ids]
-        )
-        started = time.perf_counter()
-        with torch.inference_mode():
-            output = model.infer_video_depth(frames)
-        elapsed = time.perf_counter() - started
-        output = np.asarray(output, dtype=np.float32)
-        expected = (record.frame_count, *shape)
-        if output.shape != expected:
-            raise AdapterError(
-                "Official EndoDAV output must have shape {}; found {}".format(
-                    expected, output.shape
-                )
+    rgb_loader = EndoDAVRGBLoader(runtime.resize_workers)
+    try:
+        for position, record in enumerate(pending, start=1):
+            print(
+                "[endodav] {}/{} sequence {:02d}".format(
+                    position, len(pending), record.sequence_id
+                ),
+                flush=True,
             )
-        depth = official_output_to_depth(output)
-        for identifier, value in zip(record.frame_ids, depth):
-            save_prediction(directory, identifier, value)
-        finalize_cache(
-            directory,
-            method,
-            record,
-            shape,
-            {
-                "official_inference": "one model.infer_video_depth(frames) call",
-                "external_windowing": False,
-                "sequence_pipeline_seconds": elapsed,
-                "temporal_lora": temporal_lora,
-                "normalized_disparity_conversion": "official disp_to_depth range 0.1..150.0 m",
-                "ground_truth_used_for_inference": False,
-            },
-        )
+            directory = prepare_cache(runtime.output_root, method, record, force=force)
+            pipeline_started = time.perf_counter()
+            rgb_started = time.perf_counter()
+            frames = rgb_loader.load(
+                [record.rgb_by_id[identifier] for identifier in record.frame_ids]
+            )
+            rgb_seconds = time.perf_counter() - rgb_started
+            forward_started = time.perf_counter()
+            with torch.inference_mode():
+                output = model.infer_video_depth(frames)
+            forward_seconds = time.perf_counter() - forward_started
+            output = np.asarray(output, dtype=np.float32)
+            expected = (record.frame_count, *shape)
+            if output.shape != expected:
+                raise AdapterError(
+                    "Official EndoDAV output must have shape {}; found {}".format(
+                        expected, output.shape
+                    )
+                )
+            depth = official_output_to_depth(output)
+            for identifier, value in zip(record.frame_ids, depth):
+                save_prediction(directory, identifier, value)
+            pipeline_seconds = time.perf_counter() - pipeline_started
+            finalize_cache(
+                directory,
+                method,
+                record,
+                shape,
+                {
+                    "official_inference": "one model.infer_video_depth(frames) call",
+                    "external_windowing": False,
+                    "model_forward_seconds": forward_seconds,
+                    "sequence_pipeline_seconds": pipeline_seconds,
+                    "rgb_decode_resize_seconds": rgb_seconds,
+                    "rgb_loader_workers": runtime.resize_workers,
+                    "rgb_loader_backend": rgb_loader.loader_backend,
+                    "prefetch_windows": 0,
+                    "frame_cache_size": 0,
+                    "temporal_lora": temporal_lora,
+                    "normalized_disparity_conversion": "official disp_to_depth range 0.1..150.0 m",
+                    "ground_truth_used_for_inference": False,
+                },
+            )
+    finally:
+        rgb_loader.close()

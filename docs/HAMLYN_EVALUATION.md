@@ -18,9 +18,12 @@ bash scripts/eval_all.bash
 ```
 
 `scripts/eval_all.bash` performs a fail-fast preflight before loading any
-model. It verifies the Hamlyn root and all 22 sequences, prints the selected
-RGB/GT directories and frame statistics, checks every required checkpoint and
-external source file, probes each Python environment, and requires CUDA.
+model. It verifies the Hamlyn root and all 22 sequences, compares complete RGB
+and GT numeric frame-ID listings, and decodes only the first matched RGB/GT pair
+per sequence to check readability, sample shape, and GT dtype. It does not scan
+all frame contents or calculate sequence-wide GT min/max/valid-pixel counts.
+The same preflight checks every required checkpoint and external source file,
+probes each Python environment, and requires CUDA.
 
 ## Default data and checkpoint layout
 
@@ -50,8 +53,9 @@ be `.jpg`/`.jpeg` (and prepared `.png` is also accepted); GT remains strict
 uint16 `.png`. The discovery code
 also supports `rectifiedNN/color + depth` and the prepared `croppedNN/` plus
 `depth_croppedNN/` layout. It matches RGB and GT by numeric frame ID and
-rejects missing sequences, duplicate IDs, unequal RGB/GT ID sets, non-2D GT,
-non-`uint16` GT, and sequences without valid GT pixels.
+rejects missing sequences, duplicate IDs, unequal RGB/GT ID sets, and invalid
+sample RGB/GT files. Formal evaluation still reads every GT frame and enforces
+the complete validity/range protocol.
 
 All machine-specific paths can be overridden without editing source:
 
@@ -76,17 +80,33 @@ Endo3R weights together.
 The default output root can be changed with `HAMLYN_OUTPUT_ROOT` and the
 logical model device with `HAMLYN_DEVICE` (default `cuda:0`).
 
-## Python environments
+## Python environments and RGB workers
 
-Ours and DA3 share the repository environment. EndoDAV and Endo3R may use
-separate environments:
+The server defaults are already encoded in `scripts/eval_all.bash`:
+
+```text
+Ours / DA3: /public/home/2024141520249/miniconda3/envs/vggtomast3r/bin/python
+EndoDAV:    /public/home/2024141520249/miniconda3/envs/endodav/bin/python
+Endo3R:     /public/home/2024141520249/miniconda3/envs/endo3r/bin/python
+```
+
+They remain independently overridable with `OURS_PYTHON`, `ENDODAV_PYTHON`,
+and `ENDO3R_PYTHON`. Ours/DA3 and EndoDAV use four spawn-context CPU resize
+workers by default:
 
 ```bash
-export OURS_PYTHON=/path/to/ours/bin/python
-export ENDODAV_PYTHON=/path/to/endodav/bin/python
-export ENDO3R_PYTHON=/path/to/endo3r/bin/python
-bash scripts/eval_all.bash
+HAMLYN_RESIZE_WORKERS=8 bash scripts/eval_all.bash
+HAMLYN_RESIZE_WORKERS=1 bash scripts/eval_all.bash  # serial fallback
+HAMLYN_FRAME_CACHE_SIZE=96 bash scripts/eval_all.bash
 ```
+
+Ours/DA3 keep one current window, one asynchronously prefetched window, and a
+bounded resized-frame LRU (default 96); the full sequence is never loaded.
+EndoDAV parallelizes ordered full-sequence decode/resize but still makes exactly
+one official `model.infer_video_depth(frames)` call per sequence. Endo3R keeps
+its official preprocessing unchanged. Per-sequence inference metadata records
+the worker backend/count, prefetch depth, cache size, RGB wait time, and mean
+RGB wait per window.
 
 `eval_all.bash` remains the only evaluation command; it dispatches each method
 to the configured interpreter.

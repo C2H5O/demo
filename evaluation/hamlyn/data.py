@@ -7,15 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
-import numpy as np
 from PIL import Image
 
-from evaluation.hamlyn.constants import (
-    HAMLYN_GT_SCALE,
-    HAMLYN_MAX_DEPTH,
-    HAMLYN_MIN_DEPTH,
-    HAMLYN_SEQUENCE_IDS,
-)
+from evaluation.hamlyn.constants import HAMLYN_SEQUENCE_IDS
 from evaluation.hamlyn.gt import read_hamlyn_gt_uint16
 
 
@@ -218,43 +212,27 @@ def discover_sequences(
 
 
 def inspect_sequence(record: SequenceRecord) -> Dict[str, object]:
-    """Read every matched PNG so preflight fails before any model is loaded."""
-    rgb_shapes = set()
-    gt_shapes = set()
-    gt_dtypes = set()
-    gt_min = None
-    gt_max = None
-    valid_pixels = 0
-    for identifier in record.frame_ids:
-        with Image.open(record.rgb_by_id[identifier]) as image:
-            rgb_shapes.add((image.height, image.width))
-        depth = read_hamlyn_gt_uint16(record.depth_by_id[identifier])
-        gt_shapes.add(tuple(depth.shape))
-        gt_dtypes.add(str(depth.dtype))
-        current_min, current_max = int(depth.min()), int(depth.max())
-        gt_min = current_min if gt_min is None else min(gt_min, current_min)
-        gt_max = current_max if gt_max is None else max(gt_max, current_max)
-        valid_pixels += int(
-            ((depth.astype(np.float32) * HAMLYN_GT_SCALE > HAMLYN_MIN_DEPTH)
-             & (depth.astype(np.float32) * HAMLYN_GT_SCALE < HAMLYN_MAX_DEPTH)).sum()
-        )
-    if valid_pixels == 0:
+    """Decode one matched RGB/GT pair; filenames validate the full sequence."""
+    identifier = record.frame_ids[0]
+    rgb_path = record.rgb_by_id[identifier]
+    try:
+        with Image.open(rgb_path) as image:
+            image.load()
+            sample_rgb_hw = [image.height, image.width]
+    except (OSError, ValueError) as error:
         raise DiscoveryError(
-            "Hamlyn sequence {} has no valid GT pixels; dtype={}, min={}, max={}".format(
-                record.sequence_id, sorted(gt_dtypes), gt_min, gt_max
-            )
-        )
+            "Could not decode Hamlyn sample RGB {}: {}".format(rgb_path, error)
+        ) from error
+    depth = read_hamlyn_gt_uint16(record.depth_by_id[identifier])
     return {
         **record.to_dict(),
         "rgb_frame_count": len(record.rgb_by_id),
         "gt_frame_count": len(record.depth_by_id),
         "matched_frame_count": record.frame_count,
-        "rgb_original_resolutions_hw": [list(shape) for shape in sorted(rgb_shapes)],
-        "gt_original_resolutions_hw": [list(shape) for shape in sorted(gt_shapes)],
-        "gt_dtype": sorted(gt_dtypes),
-        "gt_raw_min": gt_min,
-        "gt_raw_max": gt_max,
-        "valid_pixel_count": valid_pixels,
+        "sample_frame_id": identifier,
+        "sample_rgb_hw": sample_rgb_hw,
+        "sample_gt_hw": list(depth.shape),
+        "sample_gt_dtype": str(depth.dtype),
     }
 
 
@@ -265,18 +243,16 @@ def print_preflight(records: Sequence[SequenceRecord]) -> List[Dict[str, object]
         inspected.append(item)
         print(
             "[Hamlyn {:02d}] RGB={} GT={} rgb_frames={} gt_frames={} matched={} "
-            "rgb_hw={} gt_hw={} gt_dtype={} gt_min/max={}/{}".format(
+            "sample_rgb_hw={} sample_gt_hw={} sample_gt_dtype={}".format(
                 record.sequence_id,
                 record.rgb_directory,
                 record.depth_directory,
                 item["rgb_frame_count"],
                 item["gt_frame_count"],
                 item["matched_frame_count"],
-                item["rgb_original_resolutions_hw"],
-                item["gt_original_resolutions_hw"],
-                item["gt_dtype"],
-                item["gt_raw_min"],
-                item["gt_raw_max"],
+                item["sample_rgb_hw"],
+                item["sample_gt_hw"],
+                item["sample_gt_dtype"],
             ),
             flush=True,
         )
