@@ -26,8 +26,8 @@ external source file, probes each Python environment, and requires CUDA.
 
 ```text
 /public/home/2024141520249/Documents/datasets/vggtodistilldata/Hamlyn/
-  rectified01/color/*.png
-  rectified01/depth/*.png
+  rectified01/image01/*.png
+  rectified01/depth01/*.png
   ...
 
 checkpoints/
@@ -44,7 +44,9 @@ external/
     checkpoints/raft-things.pth
 ```
 
-The discovery code also supports the prepared `croppedNN/` plus
+Camera 01 is the formal monocular evaluation stream; sibling `image02/` and
+`depth02/` directories are intentionally not evaluated. The discovery code
+also supports `rectifiedNN/color + depth` and the prepared `croppedNN/` plus
 `depth_croppedNN/` layout. It matches RGB and GT by numeric frame ID and
 rejects missing sequences, duplicate IDs, unequal RGB/GT ID sets, non-2D GT,
 non-`uint16` GT, and sequences without valid GT pixels.

@@ -82,6 +82,27 @@ def test_discovery_finds_the_exact_prepared_22_sequence_layout(tmp_path: Path) -
     assert all(record.frame_ids == (10,) for record in records)
 
 
+def test_discovery_prefers_native_camera01_layout_when_both_views_exist(
+    tmp_path: Path,
+) -> None:
+    for sequence_id in HAMLYN_SEQUENCE_IDS:
+        directory = tmp_path / "rectified{:02d}".format(sequence_id)
+        for camera in ("01", "02"):
+            image = directory / "image{}".format(camera)
+            depth = directory / "depth{}".format(camera)
+            image.mkdir(parents=True)
+            depth.mkdir(parents=True)
+            assert cv2.imwrite(
+                str(image / "frame_10.png"), np.zeros((2, 3, 3), dtype=np.uint8)
+            )
+            assert cv2.imwrite(
+                str(depth / "depth_10.png"), np.full((2, 3), 100, dtype=np.uint16)
+            )
+    records = discover_sequences(tmp_path)
+    assert all(record.rgb_directory.name == "image01" for record in records)
+    assert all(record.depth_directory.name == "depth01" for record in records)
+
+
 def test_numeric_frame_id_matching_is_not_lexicographic(tmp_path: Path) -> None:
     paths = [
         tmp_path / "frame_10.png",

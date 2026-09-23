@@ -93,6 +93,11 @@ def _candidate_pairs(root: Path, sequence_id: int) -> List[Tuple[int, Path, Path
     for base in bases:
         for suffix in suffixes:
             rectified = base / "rectified{}".format(suffix)
+            # The server's native Hamlyn stereo layout stores the left stream
+            # and its registered depth in image01/depth01. This evaluation is
+            # monocular, so select camera 01 deterministically when both views
+            # are present.
+            pairs.append((-1, rectified / "image01", rectified / "depth01"))
             for rgb in _directory_or_children(rectified, ("color", "rgb", "images")):
                 for depth in _directory_or_children(rectified, ("depth", "depth_gt")):
                     pairs.append((0, rgb, depth))
@@ -153,8 +158,15 @@ def _discover_one(root: Path, sequence_id: int) -> SequenceRecord:
     if not usable:
         raise DiscoveryError(
             "Missing Hamlyn sequence {} below {}. Expected layouts such as "
-            "rectified{:02d}/color + depth or cropped{:02d} + depth_cropped{:02d}."
-            .format(sequence_id, root, sequence_id, sequence_id, sequence_id)
+            "rectified{:02d}/image01 + depth01, rectified{:02d}/color + depth, "
+            "or cropped{:02d} + depth_cropped{:02d}.".format(
+                sequence_id,
+                root,
+                sequence_id,
+                sequence_id,
+                sequence_id,
+                sequence_id,
+            )
         )
     best_priority = min(item[0] for item in usable)
     best = [item for item in usable if item[0] == best_priority]
