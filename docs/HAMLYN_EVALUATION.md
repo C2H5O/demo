@@ -26,7 +26,7 @@ external source file, probes each Python environment, and requires CUDA.
 
 ```text
 /public/home/2024141520249/Documents/datasets/vggtodistilldata/Hamlyn/
-  rectified01/image01/*.png
+  rectified01/image01/*.jpg
   rectified01/depth01/*.png
   ...
 
@@ -45,7 +45,9 @@ external/
 ```
 
 Camera 01 is the formal monocular evaluation stream; sibling `image02/` and
-`depth02/` directories are intentionally not evaluated. The discovery code
+`depth02/` directories are intentionally not evaluated. Native RGB frames may
+be `.jpg`/`.jpeg` (and prepared `.png` is also accepted); GT remains strict
+uint16 `.png`. The discovery code
 also supports `rectifiedNN/color + depth` and the prepared `croppedNN/` plus
 `depth_croppedNN/` layout. It matches RGB and GT by numeric frame ID and
 rejects missing sequences, duplicate IDs, unequal RGB/GT ID sets, non-2D GT,

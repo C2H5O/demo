@@ -93,14 +93,15 @@ def test_discovery_prefers_native_camera01_layout_when_both_views_exist(
             image.mkdir(parents=True)
             depth.mkdir(parents=True)
             assert cv2.imwrite(
-                str(image / "frame_10.png"), np.zeros((2, 3, 3), dtype=np.uint8)
+                str(image / "0000000000.jpg"), np.zeros((2, 3, 3), dtype=np.uint8)
             )
             assert cv2.imwrite(
-                str(depth / "depth_10.png"), np.full((2, 3), 100, dtype=np.uint16)
+                str(depth / "0000000000.png"), np.full((2, 3), 100, dtype=np.uint16)
             )
     records = discover_sequences(tmp_path)
     assert all(record.rgb_directory.name == "image01" for record in records)
     assert all(record.depth_directory.name == "depth01" for record in records)
+    assert all(record.frame_ids == (0,) for record in records)
 
 
 def test_numeric_frame_id_matching_is_not_lexicographic(tmp_path: Path) -> None:

@@ -19,7 +19,8 @@ from evaluation.hamlyn.constants import (
 from evaluation.hamlyn.gt import read_hamlyn_gt_uint16
 
 
-PNG_SUFFIX = ".png"
+RGB_SUFFIXES = frozenset((".jpg", ".jpeg", ".png"))
+GT_SUFFIXES = frozenset((".png",))
 NUMBER_PATTERN = re.compile(r"(\d+)")
 SEQUENCE_DIRECTORY_PATTERN = re.compile(
     r"^(rectified|cropped|sequence|seq|hamlyn)[\s_-]*0*(\d+)$", re.IGNORECASE
@@ -58,13 +59,13 @@ def index_by_frame_id(paths: Iterable[Path], label: str) -> Dict[int, Path]:
     return result
 
 
-def _png_files(directory: Path) -> List[Path]:
+def _image_files(directory: Path, suffixes: frozenset[str]) -> List[Path]:
     if not directory.is_dir():
         return []
     values = [
         path
         for path in directory.iterdir()
-        if path.is_file() and path.suffix.casefold() == PNG_SUFFIX
+        if path.is_file() and path.suffix.casefold() in suffixes
     ]
     values.sort(key=natural_key)
     return values
@@ -151,15 +152,16 @@ def _discover_one(root: Path, sequence_id: int) -> SequenceRecord:
         if identity in seen:
             continue
         seen.add(identity)
-        rgb_paths = _png_files(rgb_directory)
-        depth_paths = _png_files(depth_directory)
+        rgb_paths = _image_files(rgb_directory, RGB_SUFFIXES)
+        depth_paths = _image_files(depth_directory, GT_SUFFIXES)
         if rgb_paths and depth_paths and rgb_directory.resolve() != depth_directory.resolve():
             usable.append((priority, rgb_directory, depth_directory, rgb_paths, depth_paths))
     if not usable:
         raise DiscoveryError(
             "Missing Hamlyn sequence {} below {}. Expected layouts such as "
             "rectified{:02d}/image01 + depth01, rectified{:02d}/color + depth, "
-            "or cropped{:02d} + depth_cropped{:02d}.".format(
+            "or cropped{:02d} + depth_cropped{:02d}. RGB must be .jpg/.jpeg/.png; "
+            "GT must be .png.".format(
                 sequence_id,
                 root,
                 sequence_id,
