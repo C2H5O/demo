@@ -32,7 +32,7 @@ echo "[2/4] Official DA3-Small"
   2>&1 | tee "${HAMLYN_OUTPUT_ROOT}/logs/da3.log"
 
 echo "[3/4] EndoDAV"
-"${ENDODAV_PYTHON}" evaluate_hamlyn.py --method endodav --stage all "${FORCE_ARGS[@]}" \
+bash scripts/eval_endodav.bash --stage all "${FORCE_ARGS[@]}" \
   2>&1 | tee "${HAMLYN_OUTPUT_ROOT}/logs/endodav.log"
 
 echo "[4/4] Endo3R"
