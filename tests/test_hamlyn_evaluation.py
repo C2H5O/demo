@@ -27,7 +27,10 @@ from evaluation.hamlyn.data import (
     frame_id,
     index_by_frame_id,
 )
-from evaluation.hamlyn.endo3r import _validate_raft_checkpoint
+from evaluation.hamlyn.endo3r import (
+    _validate_official_checkpoints,
+    official_dust3r_checkpoint,
+)
 from evaluation.hamlyn.gt import load_hamlyn_gt_depth
 from utils.config import load_config
 
@@ -216,11 +219,36 @@ def test_endo3r_raft_checkpoint_must_match_official_relative_path(
     checkpoint = repository / "checkpoints" / "raft-things.pth"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.touch()
+    dust3r_checkpoint = (
+        repository
+        / "checkpoints"
+        / "DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth"
+    )
+    dust3r_checkpoint.touch()
     runtime = SimpleNamespace(
         endo3r_repository=repository.resolve(),
         endo3r_raft_checkpoint=checkpoint.resolve(),
     )
-    _validate_raft_checkpoint(runtime)
+    _validate_official_checkpoints(runtime)
     runtime.endo3r_raft_checkpoint = (tmp_path / "elsewhere" / "raft-things.pth").resolve()
     with pytest.raises(RuntimeError, match="loads RAFT"):
-        _validate_raft_checkpoint(runtime)
+        _validate_official_checkpoints(runtime)
+
+
+def test_endo3r_reports_missing_official_dust3r_dependency(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "Endo3R"
+    checkpoint = repository / "checkpoints" / "raft-things.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.touch()
+    runtime = SimpleNamespace(
+        endo3r_repository=repository.resolve(),
+        endo3r_raft_checkpoint=checkpoint.resolve(),
+    )
+
+    assert official_dust3r_checkpoint(runtime).name == (
+        "DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth"
+    )
+    with pytest.raises(FileNotFoundError, match="before loading endo3r.pth"):
+        _validate_official_checkpoints(runtime)

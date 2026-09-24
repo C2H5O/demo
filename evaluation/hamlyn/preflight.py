@@ -11,6 +11,7 @@ from typing import Any, Dict, Mapping, Sequence
 from evaluation.hamlyn.cache import atomic_write_json
 from evaluation.hamlyn.config import RuntimeConfig
 from evaluation.hamlyn.data import SequenceRecord, print_preflight
+from evaluation.hamlyn.endo3r import official_dust3r_checkpoint
 
 
 class PreflightError(RuntimeError):
@@ -129,6 +130,10 @@ def run_preflight(
         runtime.endo3r_raft_checkpoint,
         "Endo3R RAFT checkpoint is missing",
     )
+    _require_file(
+        official_dust3r_checkpoint(runtime),
+        "Official Endo3R DUSt3R backbone checkpoint is missing",
+    )
 
     dataset = print_preflight(records)
     python = {
@@ -166,6 +171,7 @@ def run_preflight(
             ),
             "endo3r": str(runtime.endo3r_checkpoint),
             "endo3r_raft": str(runtime.endo3r_raft_checkpoint),
+            "endo3r_dust3r": str(official_dust3r_checkpoint(runtime)),
         },
     }
     atomic_write_json(runtime.output_root / "preflight.json", result)

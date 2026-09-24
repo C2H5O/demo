@@ -23,9 +23,20 @@ from evaluation.hamlyn.data import SequenceRecord, index_by_frame_id
 
 
 OFFICIAL_REPOSITORY = "https://github.com/wrld/Endo3R"
+OFFICIAL_DUST3R_CHECKPOINT = "DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth"
+OFFICIAL_DUST3R_DOWNLOAD = (
+    "https://download.europe.naverlabs.com/ComputerVision/DUSt3R/"
+    + OFFICIAL_DUST3R_CHECKPOINT
+)
 
 
-def _validate_raft_checkpoint(runtime: RuntimeConfig) -> None:
+def official_dust3r_checkpoint(runtime: RuntimeConfig) -> Path:
+    return (
+        runtime.endo3r_repository / "checkpoints" / OFFICIAL_DUST3R_CHECKPOINT
+    ).resolve()
+
+
+def _validate_official_checkpoints(runtime: RuntimeConfig) -> None:
     expected = (
         runtime.endo3r_repository / "checkpoints" / "raft-things.pth"
     ).resolve()
@@ -39,6 +50,16 @@ def _validate_raft_checkpoint(runtime: RuntimeConfig) -> None:
     if not expected.is_file():
         raise FileNotFoundError(
             "Endo3R RAFT checkpoint is missing: {}".format(expected)
+        )
+    dust3r_checkpoint = official_dust3r_checkpoint(runtime)
+    if not dust3r_checkpoint.is_file():
+        raise FileNotFoundError(
+            "Official Endo3R constructs its DUSt3R backbone from {} before "
+            "loading endo3r.pth. Download {} to {}".format(
+                OFFICIAL_DUST3R_CHECKPOINT,
+                OFFICIAL_DUST3R_DOWNLOAD,
+                dust3r_checkpoint,
+            )
         )
 
 
@@ -116,7 +137,7 @@ def infer_endo3r_sequences(
         if force or not cache_is_complete(runtime.output_root, method, record, shape)
     ]
     if pending:
-        _validate_raft_checkpoint(runtime)
+        _validate_official_checkpoints(runtime)
     for record in records:
         if record not in pending:
             print("[endo3r] reuse sequence {:02d} cache".format(record.sequence_id), flush=True)
@@ -171,5 +192,6 @@ def infer_endo3r_sequences(
                 "prediction_resize": "bilinear depth 256x320 to 224x280 in common evaluator",
                 "ground_truth_used_for_inference": False,
                 "raft_checkpoint": str(runtime.endo3r_raft_checkpoint),
+                "dust3r_checkpoint": str(official_dust3r_checkpoint(runtime)),
             },
         )
