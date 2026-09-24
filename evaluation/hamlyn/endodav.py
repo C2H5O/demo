@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
+import importlib.util
 import multiprocessing
 import sys
 import time
@@ -59,13 +61,38 @@ def official_constructor_kwargs(
 @contextmanager
 def _repository_import_path(repository: Path):
     value = str(repository.resolve())
+    package_roots = {
+        "models": repository.resolve() / "models",
+        "utils": repository.resolve() / "utils",
+    }
+    displaced_modules = {
+        name: module
+        for name, module in tuple(sys.modules.items())
+        if any(name == root or name.startswith(f"{root}.") for root in package_roots)
+    }
+    for name in displaced_modules:
+        del sys.modules[name]
+
+    for name, package_path in package_roots.items():
+        spec = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+        spec.submodule_search_locations = [str(package_path)]
+        sys.modules[name] = importlib.util.module_from_spec(spec)
+
     sys.path.insert(0, value)
     try:
         importlib.invalidate_caches()
         yield
     finally:
+        for name in tuple(sys.modules):
+            if any(
+                name == root or name.startswith(f"{root}.")
+                for root in package_roots
+            ):
+                del sys.modules[name]
+        sys.modules.update(displaced_modules)
         if value in sys.path:
             sys.path.remove(value)
+        importlib.invalidate_caches()
 
 
 def _state_dict(value: Any) -> Mapping[str, Any]:
